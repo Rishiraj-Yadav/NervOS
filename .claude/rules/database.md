@@ -1,6 +1,6 @@
 ---
 paths:
-  - "packages/nervos-core/src/nervos_core/database/**/*.py"
+  - "packages/nervos-core/src/nervos_core/infrastructure/database/**/*.py"
   - "apps/api/alembic/**/*.py"
 ---
 

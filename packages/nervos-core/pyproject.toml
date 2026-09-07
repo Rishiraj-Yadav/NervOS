@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nervos-core"
+version = "0.1.0"
+description = "NervOS core domain, application, and infrastructure package"
+requires-python = ">=3.12"
+dependencies = [
+    "argon2-cffi>=23,<26",
+    "sqlalchemy>=2,<3",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nervos_core"]

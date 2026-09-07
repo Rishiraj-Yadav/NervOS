@@ -1,0 +1,63 @@
+[project]
+name = "nervos-workspace"
+version = "0.1.0"
+description = "NervOS Stage A Python workspace"
+requires-python = ">=3.12"
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = [
+    "apps/api",
+    "packages/nervos-core",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28,<1",
+    "pyright>=1.1.400,<2",
+    "pytest>=8.3,<10",
+    "pytest-cov>=6,<8",
+    "ruff>=0.12,<1",
+]
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers"
+testpaths = [
+    "tests",
+    "apps/api/tests",
+    "packages/nervos-core/tests",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pyright]
+include = [
+    "apps/api/src",
+    "apps/api/alembic",
+    "apps/api/tests",
+    "packages/nervos-core/src",
+    "packages/nervos-core/tests",
+    "scripts",
+    "tests",
+]
+exclude = [
+    ".venv",
+    "**/__pycache__",
+]
+extraPaths = [
+    "apps/api/src",
+    "packages/nervos-core/src",
+]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"

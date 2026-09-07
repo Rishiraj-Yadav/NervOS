@@ -1,1 +1,72 @@
+# Environment and local secrets
 .env
+.env.*
+!.env.example
+secrets/
+
+# Python
+.python-version.local
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.pyright/
+*.egg-info/
+.coverage
+.coverage.*
+htmlcov/
+
+# JavaScript and frontend tooling
+node_modules/
+dist/
+coverage/
+.vite/
+*.tsbuildinfo
+playwright-report/
+test-results/
+
+# NervOS local data
+.nervos/
+data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.log
+
+# Local MCP configuration (MCP is outside Stage A)
+.mcp.json
+
+# Claude Code local state: allow only audited shared project files
+.claude/*
+!.claude/CLAUDE.md
+!.claude/settings.example.json
+!.claude/agents/
+.claude/agents/*
+!.claude/agents/*.md
+!.claude/hooks/
+.claude/hooks/*
+!.claude/hooks/README.md
+!.claude/hooks/scripts/
+.claude/hooks/scripts/*
+!.claude/hooks/scripts/*.py
+!.claude/rules/
+.claude/rules/*
+!.claude/rules/*.md
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/*/
+.claude/skills/*/*
+!.claude/skills/*/SKILL.md
+
+# Other local tools
+.serena/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini

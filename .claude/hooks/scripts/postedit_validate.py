@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import json
 import os
-import py_compile
 import sys
 from pathlib import Path
 
 
 def add_context(message: str) -> None:
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "PostToolUse",
-            "additionalContext": message,
-        }
-    }))
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": message,
+                }
+            }
+        )
+    )
 
 
 def main() -> int:
@@ -36,7 +39,8 @@ def main() -> int:
 
     try:
         if path.suffix == ".py":
-            py_compile.compile(str(path), doraise=True)
+            source = path.read_text(encoding="utf-8")
+            compile(source, str(path), "exec")
         elif path.suffix == ".json":
             json.loads(path.read_text(encoding="utf-8"))
         else:

@@ -6,9 +6,9 @@ Stage A — Foundation
 
 ## Stage A milestones
 
-- [ ] A0 — Stage A plan reviewed
-- [ ] A1 — Repository and tooling bootstrap
-- [ ] A2 — FastAPI + typed configuration + SQLite + SQLAlchemy + Alembic
+- [x] A0 — Stage A plan reviewed
+- [x] A1 — Repository and tooling bootstrap
+- [x] A2 — FastAPI + typed configuration + SQLite + SQLAlchemy + Alembic
 - [ ] A3 — First-run setup + local authentication
 - [ ] A4 — React dashboard foundation
 - [ ] A5 — Stage A E2E flow
@@ -18,20 +18,20 @@ Stage A — Foundation
 ## Stage A acceptance criteria
 
 - [ ] clean checkout can bootstrap dependencies
-- [ ] API starts successfully
-- [ ] `/api/v1/health` succeeds
-- [ ] migrations work from empty database
+- [x] API starts successfully
+- [x] `/api/v1/health` succeeds
+- [x] migrations work from empty database
 - [ ] first user can initialize NervOS exactly once
 - [ ] user can log in
 - [ ] authenticated session survives browser refresh
 - [ ] logout invalidates server-side session
 - [ ] protected dashboard is unavailable unauthenticated
-- [ ] backend tests pass
+- [x] backend tests pass
 - [ ] frontend tests pass
 - [ ] E2E smoke flow passes
-- [ ] Ruff passes
-- [ ] Pyright passes
-- [ ] frontend TypeScript check passes
+- [x] Ruff passes
+- [x] Pyright passes
+- [x] frontend TypeScript check passes
 - [ ] production frontend build passes
 - [ ] CI matches local quality commands
 - [ ] no real secrets are committed
@@ -50,17 +50,43 @@ Stage A — Foundation
 - IoT
 - multi-agent orchestration
 
+## A1 verified checks
+
+- `uv sync --frozen --all-packages`
+- `uv run python scripts/check.py check`
+- Ruff check and format check
+- Pyright strict type checking
+- Pytest tooling suite (6 tests)
+- ESLint and TypeScript checks
+- Vitest foundation (`--passWithNoTests`; product tests begin in A4)
+- Workspace membership, ignored-file, syntax, lockfile, and no-product-behavior audits
+
+## A2 verified checks
+
+- `uv sync --frozen --all-packages`
+- `uv lock --check`
+- `uv run python scripts/check.py lint`
+- `uv run python scripts/check.py typecheck`
+- `uv run python scripts/check.py test`
+- `uv run python scripts/check.py check`
+- Pytest backend/tooling suite (51 tests)
+- Isolated Alembic upgrade, current/head, no-drift check, downgrade, and re-upgrade
+- Migration-first development launcher and exact `GET /api/v1/health` smoke check
+- Ruff, Ruff format, Pyright strict, ESLint, TypeScript, and Vitest foundation checks
+
 ## Current work
 
-None yet.
+A2 verification completed. Typed process configuration, synchronous SQLite/SQLAlchemy infrastructure, the initial Alembic schema, minimal FastAPI composition, and process health are ready for review. Authentication behavior remains unimplemented.
 
 ## Blockers
 
-None recorded.
+- GNU Make is not installed on the current Windows machine; use the documented Python command facade.
+- Frontend tests have no product test files yet; Vitest exits successfully with `--passWithNoTests` by design until A4.
+- FastAPI/Starlette's current TestClient dependency path emits two upstream deprecation warnings; tests still pass.
 
 ## Next action
 
-Run Stage A planning prompt A0 and review Claude's implementation plan before allowing file changes.
+Review A2. Do not begin A3 until it receives explicit approval.
 
 ## Maintenance rule
 

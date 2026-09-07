@@ -1,0 +1,8 @@
+packages:
+  - "apps/web"
+
+onlyBuiltDependencies:
+  - esbuild
+
+ignoredBuiltDependencies:
+  - msw

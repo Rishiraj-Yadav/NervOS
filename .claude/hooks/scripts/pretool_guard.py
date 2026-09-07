@@ -4,7 +4,6 @@ import json
 import re
 import sys
 
-
 DANGEROUS_PATTERNS = [
     (
         re.compile(r"\bgit\s+push\b.*(?:--force|-f)(?:\s|$)", re.I),
@@ -38,13 +37,17 @@ DANGEROUS_PATTERNS = [
 
 
 def deny(reason: str) -> None:
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": reason,
-        }
-    }))
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": reason,
+                }
+            }
+        )
+    )
 
 
 def main() -> int:

@@ -36,17 +36,20 @@ def main() -> int:
                 selected.append(line)
 
         phase = "\n".join(selected[:10]).strip()
-        context = (
-            "Current NervOS implementation state from docs/implementation-status.md:\n"
-            + (phase or "Read the status file before significant work.")
+        context = "Current NervOS implementation state from docs/implementation-status.md:\n" + (
+            phase or "Read the status file before significant work."
         )
 
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "additionalContext": context,
-        }
-    }))
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": context,
+                }
+            }
+        )
+    )
     return 0
 
 

@@ -5,7 +5,6 @@ import re
 import sys
 from pathlib import PurePath
 
-
 SENSITIVE_NAMES = {
     ".env",
     "credentials.json",
@@ -27,13 +26,17 @@ SECRET_PATTERNS = [
 
 
 def deny(reason: str) -> None:
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": reason,
-        }
-    }))
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": reason,
+                }
+            }
+        )
+    )
 
 
 def main() -> int:
