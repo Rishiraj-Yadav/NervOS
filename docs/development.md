@@ -124,6 +124,12 @@ Never mutate the development/production schema manually as the source of truth. 
 
 Use a unique file-backed database for migration/database tests, set it with `NERVOS_DATABASE_PATH`, and dispose SQLAlchemy engines before Windows cleanup. Every connection enables foreign keys and a 5000 ms busy timeout; A2 does not enable WAL. Timestamps pass through `UTCDateTime`, which rejects naive writes and restores UTC-aware values. See `docs/database.md` for the schema and migration commands.
 
+## A3 authentication development
+
+First-run setup must be performed while the empty installation is reachable only through loopback or another trusted interface. Authentication mutations require an `Origin` header exactly equal to `NERVOS_APP_ORIGIN`; this includes manual API calls to setup, login, and logout. A3 adds no CORS or frontend UI.
+
+Authentication/database tests always use Alembic-migrated, file-backed temporary databases. The setup concurrency test uses independent SQLite connections and proves that `BEGIN IMMEDIATE` permits exactly one initial administrator. See `docs/authentication.md` for the complete contract.
+
 ## Documentation workflow
 
 After a milestone:

@@ -65,7 +65,7 @@ The launcher validates configuration, runs Alembic `upgrade head`, and starts Uv
 uv run python scripts/dev.py web
 ```
 
-Setup, login, logout, cookies, user management, and dashboard behavior are not implemented in A2.
+A3 implements backend first-run setup and local authentication at `POST /api/v1/setup`, `POST /api/v1/auth/login`, `POST /api/v1/auth/logout`, and `GET /api/v1/auth/me`. See [authentication](docs/authentication.md). The React setup/login/dashboard UI and user management remain unimplemented and are not part of A3.
 
 ## Workspace boundaries
 

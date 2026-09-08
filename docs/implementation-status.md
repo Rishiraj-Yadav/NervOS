@@ -9,7 +9,7 @@ Stage A — Foundation
 - [x] A0 — Stage A plan reviewed
 - [x] A1 — Repository and tooling bootstrap
 - [x] A2 — FastAPI + typed configuration + SQLite + SQLAlchemy + Alembic
-- [ ] A3 — First-run setup + local authentication
+- [x] A3 — First-run setup + local authentication
 - [ ] A4 — React dashboard foundation
 - [ ] A5 — Stage A E2E flow
 - [ ] A6 — CI and quality gates
@@ -21,10 +21,10 @@ Stage A — Foundation
 - [x] API starts successfully
 - [x] `/api/v1/health` succeeds
 - [x] migrations work from empty database
-- [ ] first user can initialize NervOS exactly once
-- [ ] user can log in
-- [ ] authenticated session survives browser refresh
-- [ ] logout invalidates server-side session
+- [x] first user can initialize NervOS exactly once
+- [x] user can log in
+- [x] authenticated session survives browser refresh
+- [x] logout invalidates server-side session
 - [ ] protected dashboard is unavailable unauthenticated
 - [x] backend tests pass
 - [ ] frontend tests pass
@@ -74,19 +74,35 @@ Stage A — Foundation
 - Migration-first development launcher and exact `GET /api/v1/health` smoke check
 - Ruff, Ruff format, Pyright strict, ESLint, TypeScript, and Vitest foundation checks
 
+## A3 verified checks
+
+- `uv sync --frozen --all-packages`
+- `uv lock --check`
+- `uv run python scripts/check.py lint`
+- `uv run python scripts/check.py typecheck`
+- `uv run python scripts/check.py test`
+- `uv run python scripts/check.py check`
+- Pytest backend/tooling suite (85 tests)
+- Real file-backed setup race exercised 20 times with exactly one user/session
+- Manual setup/login/me/logout/replay/login smoke flow over real Uvicorn
+- Exact-origin and oversized-body pre-body middleware checks
+- Alembic still head `0001_stage_a` with no schema drift
+- Dedicated security/test/architecture reviewers: no CRITICAL/HIGH findings; concurrency bound, safe 503 mapping, pre-body Origin/size boundary, setup-complete precheck, and single-owner policy fixes applied
+
 ## Current work
 
-A2 verification completed. Typed process configuration, synchronous SQLite/SQLAlchemy infrastructure, the initial Alembic schema, minimal FastAPI composition, and process health are ready for review. Authentication behavior remains unimplemented.
+A3 verification completed. First-run setup, Argon2id passwords, opaque server-side sessions, secure cookies, exact-Origin CSRF protection, and the setup/login/logout/me endpoints are ready for review. Authentication sessions remain distinct from future agent conversation sessions.
 
 ## Blockers
 
 - GNU Make is not installed on the current Windows machine; use the documented Python command facade.
 - Frontend tests have no product test files yet; Vitest exits successfully with `--passWithNoTests` by design until A4.
 - FastAPI/Starlette's current TestClient dependency path emits two upstream deprecation warnings; tests still pass.
+- Without an operator bootstrap secret, first-run setup is safe only while the API is reachable through a trusted interface; non-loopback deployments must enforce their own network/proxy rate limits.
 
 ## Next action
 
-Review A2. Do not begin A3 until it receives explicit approval.
+Review A3. Do not begin A4 until it receives explicit approval.
 
 ## Maintenance rule
 

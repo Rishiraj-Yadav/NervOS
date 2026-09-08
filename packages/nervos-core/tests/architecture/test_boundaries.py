@@ -1,4 +1,4 @@
-"""Architecture regression tests for the A2 package boundaries."""
+"""Architecture regression tests for the Stage A package boundaries."""
 
 from __future__ import annotations
 
@@ -43,6 +43,8 @@ def test_application_has_no_fastapi_or_api_imports() -> None:
     }
 
     assert not any(module.startswith("fastapi") for module in imports)
+    assert not any(module.startswith("sqlalchemy") for module in imports)
+    assert not any(module.startswith("nervos_core.infrastructure") for module in imports)
     assert not any(module.startswith("nervos_api") for module in imports)
 
 

@@ -15,4 +15,4 @@ A relative database path is resolved from the process working directory. Reposit
 
 Settings validation performs no filesystem mutation. The migration command creates the database parent directory immediately before connecting. Application construction and the health endpoint do not create the database.
 
-Real environment files, credentials, API keys, and session secrets must remain local and untracked. A2 has no authentication behavior and therefore defines no password, token, or cookie settings.
+Real environment files, credentials, API keys, and session secrets must remain local and untracked. A3 authentication adds no operator-configurable secrets. Cookie security is derived from the existing validated settings: `Secure` is enabled in production and whenever `NERVOS_APP_ORIGIN` uses HTTPS. The cookie name, seven-day lifetime, SameSite policy, and password/token policies are fixed application security constants documented in `docs/authentication.md`.

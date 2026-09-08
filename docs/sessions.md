@@ -8,15 +8,18 @@ NervOS uses "session" in two separate domains. Never merge the concepts.
 
 Stage A implements browser/dashboard login sessions.
 
-Target behavior:
+Implemented A3 behavior:
 
-- cryptographically random opaque token
-- token sent in HttpOnly cookie
-- only token hash stored in DB
-- server-side expiration/revocation
-- SameSite explicitly set
-- Secure flag in production/HTTPS mode
-- no authentication token in localStorage/sessionStorage
+- cryptographically random 256-bit opaque token
+- token sent only in the host-only `nervos_session` HttpOnly cookie
+- only the 32-byte SHA-256 digest stored in DB
+- seven-day absolute server-side expiration with no sliding renewal
+- revocation on current-session logout
+- `SameSite=Lax`, `Path=/`, explicit Max-Age/Expires
+- Secure in production and whenever the configured origin is HTTPS
+- no authentication token in localStorage/sessionStorage, URLs, or JSON bodies
+
+See `docs/authentication.md` for the exact API, Origin, cookie, and error contracts.
 
 ## Agent conversation session
 

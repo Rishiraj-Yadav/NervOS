@@ -66,4 +66,4 @@ uv run alembic -c apps/api/alembic.ini downgrade base
 
 This downgrade deletes both application tables and all their data. Never run destructive migration tests against the default or another non-disposable database.
 
-A2 does not implement setup, password hashing, token generation, login, logout, cookies, authentication middleware, repositories, conversation sessions, agents, jobs, workers, memory, or other runtime tables.
+A3 uses this existing schema for setup and authentication without a migration. Passwords are stored only as Argon2id hashes. Session tokens are generated from 32 random bytes and persisted only as 32-byte binary SHA-256 digests. Initial setup reserves SQLite's writer with `BEGIN IMMEDIATE` before checking for any user, then commits the first admin and initial session atomically. No raw token, plaintext password, setup marker, conversation session, agent, job, worker, memory, or other runtime table is added.
