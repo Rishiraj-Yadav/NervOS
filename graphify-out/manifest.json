@@ -78,10 +78,10 @@
     "semantic_hash": "26092ff3ec0110743d8ead52bcd9d442"
   },
   "apps/api/src/nervos_api/api/cookies.py": {
-    "mtime": 1788833847.9923923,
-    "seen": 1788913249.8009791,
-    "ast_hash": "324f7b8391778cab64caa2e6e7373233",
-    "semantic_hash": "324f7b8391778cab64caa2e6e7373233"
+    "mtime": 1788942386.8303084,
+    "seen": 1788966690.1302867,
+    "ast_hash": "609d96e5d5d46c34c7756be579db4687",
+    "semantic_hash": "609d96e5d5d46c34c7756be579db4687"
   },
   "apps/api/src/nervos_api/api/dependencies.py": {
     "mtime": 1788794317.7693677,
@@ -90,16 +90,16 @@
     "semantic_hash": "b7da67d1962536a7c3e2c52e03c27f0d"
   },
   "apps/api/src/nervos_api/api/errors.py": {
-    "mtime": 1788833447.6418722,
-    "seen": 1788913249.8009827,
-    "ast_hash": "6dbaf65d66d540f5428a8e60518626aa",
-    "semantic_hash": "6dbaf65d66d540f5428a8e60518626aa"
+    "mtime": 1788964508.5694878,
+    "seen": 1788966690.13029,
+    "ast_hash": "830ea90fec8119a9c4e311633deb60a0",
+    "semantic_hash": "830ea90fec8119a9c4e311633deb60a0"
   },
   "apps/api/src/nervos_api/api/middleware.py": {
-    "mtime": 1788874303.1893086,
-    "seen": 1788913249.8009849,
-    "ast_hash": "1329106535841ef9121c8e24669529ff",
-    "semantic_hash": "1329106535841ef9121c8e24669529ff"
+    "mtime": 1788942290.1282127,
+    "seen": 1788966690.1302912,
+    "ast_hash": "85eb9332fe58eca08ff65a3f59fe94d0",
+    "semantic_hash": "85eb9332fe58eca08ff65a3f59fe94d0"
   },
   "apps/api/src/nervos_api/api/router.py": {
     "mtime": 1788794161.8661208,
@@ -126,22 +126,22 @@
     "semantic_hash": "1cecc9e80da42484213237ade99dc889"
   },
   "apps/api/src/nervos_api/api/routes/setup.py": {
-    "mtime": 1788794195.3971572,
-    "seen": 1788913249.8009937,
-    "ast_hash": "f1f806474d4ffc012152d69a7e69c9d0",
-    "semantic_hash": "f1f806474d4ffc012152d69a7e69c9d0"
+    "mtime": 1788942410.525217,
+    "seen": 1788966690.1302981,
+    "ast_hash": "f4e3e59a549df9f7fd7079a629e1ca16",
+    "semantic_hash": "f4e3e59a549df9f7fd7079a629e1ca16"
   },
   "apps/api/src/nervos_api/api/schemas.py": {
-    "mtime": 1788833657.6346574,
-    "seen": 1788913249.8009965,
-    "ast_hash": "f34c8cba5ecf81b1288ceb5523792caf",
-    "semantic_hash": "f34c8cba5ecf81b1288ceb5523792caf"
+    "mtime": 1788942307.1909707,
+    "seen": 1788966690.130299,
+    "ast_hash": "571bf8bcca228f3f358e5834cd0070fc",
+    "semantic_hash": "571bf8bcca228f3f358e5834cd0070fc"
   },
   "apps/api/src/nervos_api/app.py": {
-    "mtime": 1788834036.1395087,
-    "seen": 1788913249.8009984,
-    "ast_hash": "708182c26e7357aa9dcfa3662ad0027d",
-    "semantic_hash": "708182c26e7357aa9dcfa3662ad0027d"
+    "mtime": 1788964468.2297087,
+    "seen": 1788966690.1303005,
+    "ast_hash": "e5d76178d67ed2dba00b1c9cc5d58adc",
+    "semantic_hash": "e5d76178d67ed2dba00b1c9cc5d58adc"
   },
   "apps/api/src/nervos_api/config.py": {
     "mtime": 1788701538.4078238,
@@ -162,16 +162,16 @@
     "semantic_hash": "6467e1552a6ce97bd556c2c96b110f80"
   },
   "apps/api/tests/integration/test_auth_security.py": {
-    "mtime": 1788874304.3052225,
-    "seen": 1788913249.801006,
-    "ast_hash": "bf5340758aa78644d2ea85c8c61f4de6",
-    "semantic_hash": "bf5340758aa78644d2ea85c8c61f4de6"
+    "mtime": 1788964546.8069797,
+    "seen": 1788966690.130306,
+    "ast_hash": "ad2af8382d7c7df91797d72350152d6f",
+    "semantic_hash": "ad2af8382d7c7df91797d72350152d6f"
   },
   "apps/api/tests/integration/test_authentication.py": {
-    "mtime": 1788833889.8413506,
-    "seen": 1788913249.8010082,
-    "ast_hash": "fdebbf2593a04eba31f7305135cf2026",
-    "semantic_hash": "fdebbf2593a04eba31f7305135cf2026"
+    "mtime": 1788943346.41967,
+    "seen": 1788966690.1303074,
+    "ast_hash": "048275ff9c8ba1d4035197e2e6a66e94",
+    "semantic_hash": "048275ff9c8ba1d4035197e2e6a66e94"
   },
   "apps/api/tests/integration/test_health.py": {
     "mtime": 1788772560.3704789,
@@ -186,10 +186,10 @@
     "semantic_hash": "7cc7d27c2e967d0bdddf9e3862be177f"
   },
   "apps/api/tests/integration/test_setup.py": {
-    "mtime": 1788832097.2414694,
-    "seen": 1788913249.8010135,
-    "ast_hash": "c8807428fdc0b009d69b7e277b1e0b44",
-    "semantic_hash": "c8807428fdc0b009d69b7e277b1e0b44"
+    "mtime": 1788943328.8533688,
+    "seen": 1788966690.1303122,
+    "ast_hash": "a89ce657348f27f7cd6f553f48b3eddf",
+    "semantic_hash": "a89ce657348f27f7cd6f553f48b3eddf"
   },
   "apps/api/tests/unit/test_config.py": {
     "mtime": 1788772489.1454213,
@@ -276,10 +276,10 @@
     "semantic_hash": "48c2d59e2d8eb1694fb6f9ae2c7186bb"
   },
   "packages/nervos-core/src/nervos_core/application/authentication.py": {
-    "mtime": 1788833423.9289567,
-    "seen": 1788913249.8010573,
-    "ast_hash": "b4453d328911f7462aa801000a32f138",
-    "semantic_hash": "b4453d328911f7462aa801000a32f138"
+    "mtime": 1788942865.7266233,
+    "seen": 1788966690.130333,
+    "ast_hash": "67d60f3151b5465636223242d66e24e0",
+    "semantic_hash": "67d60f3151b5465636223242d66e24e0"
   },
   "packages/nervos-core/src/nervos_core/domain/__init__.py": {
     "mtime": 1788701536.745692,
@@ -354,10 +354,10 @@
     "semantic_hash": "77a4f9f72534bb9ecbaa36a737c35092"
   },
   "packages/nervos-core/tests/integration/test_authentication_persistence.py": {
-    "mtime": 1788833883.5462005,
-    "seen": 1788913249.8010817,
-    "ast_hash": "b85b62c6a6295bdde97d82c94fb26483",
-    "semantic_hash": "b85b62c6a6295bdde97d82c94fb26483"
+    "mtime": 1788943313.6947262,
+    "seen": 1788966690.130351,
+    "ast_hash": "121ea3d66b0f2307aa3884f2d585982a",
+    "semantic_hash": "121ea3d66b0f2307aa3884f2d585982a"
   },
   "packages/nervos-core/tests/integration/test_database.py": {
     "mtime": 1788772222.0361333,
@@ -372,10 +372,10 @@
     "semantic_hash": "10fa37ffdf62a30e65e9fd61addd9662"
   },
   "packages/nervos-core/tests/unit/test_authentication_policy.py": {
-    "mtime": 1788793419.192089,
-    "seen": 1788913249.8010867,
-    "ast_hash": "31716974ab6bc7de890b114023bb5c30",
-    "semantic_hash": "31716974ab6bc7de890b114023bb5c30"
+    "mtime": 1788942503.4686015,
+    "seen": 1788966690.130355,
+    "ast_hash": "c40116c0ed48d1f7b999337ad914e153",
+    "semantic_hash": "c40116c0ed48d1f7b999337ad914e153"
   },
   "packages/nervos-core/tests/unit/test_datetime_type.py": {
     "mtime": 1788772222.0361333,
@@ -390,10 +390,10 @@
     "semantic_hash": "fac37dee5c1be293fa6c2756ae0e36f4"
   },
   "packages/nervos-core/tests/unit/test_passwords.py": {
-    "mtime": 1788832274.7426453,
-    "seen": 1788913249.8010921,
-    "ast_hash": "7d8c2caf5e864d3c93e68a5e513111fc",
-    "semantic_hash": "7d8c2caf5e864d3c93e68a5e513111fc"
+    "mtime": 1788964114.468967,
+    "seen": 1788966690.1303587,
+    "ast_hash": "b8c73d7095166ab94d91c93dbb8c88ce",
+    "semantic_hash": "b8c73d7095166ab94d91c93dbb8c88ce"
   },
   "packages/nervos-core/tests/unit/test_session_tokens.py": {
     "mtime": 1788793382.1791706,
@@ -606,10 +606,10 @@
     "semantic_hash": "04ffeaba170ec342925b3d3a6a10c9d9"
   },
   "README.md": {
-    "mtime": 1788832395.6557195,
-    "seen": 1788913249.8011687,
-    "ast_hash": "eca4cc98f1f5a970d3c7d199988f715e",
-    "semantic_hash": "eca4cc98f1f5a970d3c7d199988f715e"
+    "mtime": 1788943160.5582473,
+    "seen": 1788966690.1303768,
+    "ast_hash": "d84b5f060643d7d7b6891a6b9411b4c1",
+    "semantic_hash": "d84b5f060643d7d7b6891a6b9411b4c1"
   },
   "apps/marketplace/README.md": {
     "mtime": 1788663607.8135626,
@@ -660,16 +660,16 @@
     "semantic_hash": "4353be78f4951d46cb019ff0e601bd55"
   },
   "docs/authentication.md": {
-    "mtime": 1788834165.4644096,
-    "seen": 1788913249.8011851,
-    "ast_hash": "043c692e99f2e97b8ad001725b96ca61",
-    "semantic_hash": "043c692e99f2e97b8ad001725b96ca61"
+    "mtime": 1788943108.0576425,
+    "seen": 1788966690.1303804,
+    "ast_hash": "c915fefdbbb2c5e298b9f6c1a0682c3d",
+    "semantic_hash": "c915fefdbbb2c5e298b9f6c1a0682c3d"
   },
   "docs/configuration.md": {
-    "mtime": 1788832385.6932948,
-    "seen": 1788913249.8011868,
-    "ast_hash": "dfab9635d9dc702a781d3fd78a9e9315",
-    "semantic_hash": "dfab9635d9dc702a781d3fd78a9e9315"
+    "mtime": 1788943167.3907094,
+    "seen": 1788966690.1303816,
+    "ast_hash": "cc78bfbec2be6215454ecee7ef65edb9",
+    "semantic_hash": "cc78bfbec2be6215454ecee7ef65edb9"
   },
   "docs/database.md": {
     "mtime": 1788832391.185105,
@@ -678,16 +678,16 @@
     "semantic_hash": "8f2cd9b55b7376b8f1cdbd4a7c61b5f8"
   },
   "docs/development.md": {
-    "mtime": 1788832381.2484636,
-    "seen": 1788913249.8011904,
-    "ast_hash": "39643417c449b8dd351f7d57314e0409",
-    "semantic_hash": "39643417c449b8dd351f7d57314e0409"
+    "mtime": 1788943179.858292,
+    "seen": 1788966690.1303828,
+    "ast_hash": "21177f77a34e2bd2fdcfef291273d6a9",
+    "semantic_hash": "21177f77a34e2bd2fdcfef291273d6a9"
   },
   "docs/implementation-status.md": {
-    "mtime": 1788874426.5971859,
-    "seen": 1788913249.8011923,
-    "ast_hash": "2e9d02987cec39103bef449e5d4b80fd",
-    "semantic_hash": "2e9d02987cec39103bef449e5d4b80fd"
+    "mtime": 1788964558.3595352,
+    "seen": 1788966690.130384,
+    "ast_hash": "0b704f7c20b9e0d168137780875889d6",
+    "semantic_hash": "0b704f7c20b9e0d168137780875889d6"
   },
   "docs/marketplace.md": {
     "mtime": 1788624188.534043,
@@ -726,15 +726,45 @@
     "semantic_hash": "7a0c3af5ce89b6e8f319e4dd5c5ab31c"
   },
   "docs/sessions.md": {
-    "mtime": 1788832369.2439058,
-    "seen": 1788913249.8012044,
-    "ast_hash": "9d2795deae655413c4e234981aa281d3",
-    "semantic_hash": "9d2795deae655413c4e234981aa281d3"
+    "mtime": 1788943173.6298778,
+    "seen": 1788966690.1303852,
+    "ast_hash": "3d4f4860b224eec55a0463de06b9d263",
+    "semantic_hash": "3d4f4860b224eec55a0463de06b9d263"
   },
   "pnpm-workspace.yaml": {
     "mtime": 1788663664.5052001,
     "seen": 1788913249.8012066,
     "ast_hash": "54d81215edc6171ab5a931e200a76297",
     "semantic_hash": "54d81215edc6171ab5a931e200a76297"
+  },
+  ".claude/agents/backend-reviewer.md": {
+    "mtime": 1788622559.6350327,
+    "seen": 1788966690.1303725,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  ".claude/agents/frontend-reviewer.md": {
+    "mtime": 1788622559.6350327,
+    "seen": 1788966690.130374,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  ".claude/rules/documentation.md": {
+    "mtime": 1788622559.631035,
+    "seen": 1788966690.130375,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "apps/web/index.html": {
+    "mtime": 1788622559.6380327,
+    "seen": 1788966690.1303778,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "docs/adr/0006-local-authentication-security-boundary.md": {
+    "mtime": 1788943025.6292083,
+    "seen": 1788966690.1303787,
+    "ast_hash": "04e6feefd0ed743bb4a6bf40ace291d0",
+    "semantic_hash": "04e6feefd0ed743bb4a6bf40ace291d0"
   }
 }

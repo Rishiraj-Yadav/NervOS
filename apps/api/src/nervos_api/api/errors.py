@@ -44,8 +44,18 @@ def error_response(status_code: int, code: str, message: str) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
         content=content,
-        headers={"Cache-Control": "no-store"},
+        headers={
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+        },
     )
+
+
+async def unexpected_error_handler(request: Request, error: Exception) -> JSONResponse:
+    """Return a generic production-safe response for unexpected failures."""
+    del request, error
+    return error_response(500, "internal_server_error", "An unexpected error occurred.")
 
 
 async def authentication_error_handler(request: Request, error: Exception) -> JSONResponse:
@@ -61,10 +71,13 @@ async def validation_error_handler(
 ) -> JSONResponse:
     """Return sanitized validation details without rejected input values."""
     del request
+    allowed_fields = {"username", "password"}
     fields = sorted(
         {
-            ".".join(str(part) for part in item["loc"] if part not in {"body", "query", "path"})
+            str(part)
             for item in error.errors()
+            for part in item["loc"]
+            if isinstance(part, str) and part in allowed_fields
         }
     )
     message = "Request validation failed."

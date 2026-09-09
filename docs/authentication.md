@@ -12,9 +12,9 @@ Without a separate bootstrap secret, the first reachable client can claim an emp
 
 ## Input policy
 
-Usernames are Unicode NFKC-normalized, trimmed, and lowercased, then must contain 3–32 ASCII characters. The first character is alphanumeric; remaining characters may also include `_`, `.`, and `-`.
+Usernames are Unicode NFKC-normalized, trimmed, and casefolded, then must contain 3–32 ASCII characters. The first character is alphanumeric; remaining characters may also include `_`, `.`, and `-`.
 
-Passwords are 12–128 Unicode characters. NervOS does not strip, normalize, truncate, or require composition rules. Password request fields use a non-revealing Pydantic type and sanitized validation errors never include submitted values.
+Passwords are preserved exactly and must contain 12–128 Unicode code points and at most 512 UTF-8 bytes. NervOS does not strip, normalize, truncate, or require composition rules; whitespace remains significant. Password request fields use a non-revealing Pydantic type and sanitized validation errors never include submitted values.
 
 ## Password security
 
@@ -45,11 +45,14 @@ Credential and session responses use `Cache-Control: no-store`.
 
 | Endpoint | Behavior |
 |---|---|
+| `GET /api/v1/setup/status` | Return only `{"setup_complete": boolean}` based on whether any user exists. |
 | `POST /api/v1/setup` | Create first admin and session; `201`, or `409` after setup. |
 | `POST /api/v1/auth/login` | Create fresh session; `200`, or generic `401`. |
 | `POST /api/v1/auth/logout` | Revoke current session when present, clear cookie; always `204`. |
 | `GET /api/v1/auth/me` | Return safe current-user data; otherwise generic `401`. |
 
-State-changing authentication requests must include an `Origin` header exactly equal to `NERVOS_APP_ORIGIN`. Missing, `null`, malformed, and mismatched origins return `403 invalid_origin` before credential or database work. A3 does not add CORS; the future dashboard will use same-origin API access/development proxying.
+Every unsafe `/api/v1` request must include an `Origin` header exactly equal to `NERVOS_APP_ORIGIN`. Missing, duplicate, `null`, wildcard, malformed, and mismatched origins return `403 invalid_origin` before body, credential, or database work. Setup and login accept only `application/json` and credential bodies are limited to 4096 received bytes before downstream parsing. A3 does not add CORS; the future dashboard will use same-origin API access/development proxying.
+
+API responses include `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`. See ADR 0006 for the security-boundary decision.
 
 Errors use `{"error":{"code":"...","message":"..."}}`. Invalid usernames/passwords return sanitized `422`; credential failures do not distinguish username existence; persistence contention maps to generic `503`. Responses never expose raw tokens, hashes, SQL, paths, exceptions, or stack traces.

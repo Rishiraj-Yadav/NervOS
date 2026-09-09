@@ -22,7 +22,7 @@ from nervos_core.infrastructure.database.authentication import SqlAlchemyAuthent
 from nervos_core.infrastructure.database.models import AuthSessionRecord, UserRecord
 from nervos_core.infrastructure.security.passwords import Argon2PasswordHasher
 from nervos_core.infrastructure.security.session_tokens import SecureSessionTokens
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -77,6 +77,30 @@ def test_setup_stores_one_admin_hash_and_digest(
         assert issued.token.encode() not in stored_session.token_hash
 
 
+def test_setup_uses_generated_identifier_without_fixed_id_invariant(
+    authentication: tuple[AuthenticationService, sessionmaker[Session]],
+) -> None:
+    service, factory = authentication
+    with factory.begin() as session:
+        session.execute(
+            text(
+                "INSERT INTO users "
+                "(username, password_hash, role, is_active, created_at, updated_at) "
+                "VALUES ('temporary', 'not-used', 'admin', 1, :now, :now)"
+            ),
+            {"now": NOW.replace(tzinfo=None)},
+        )
+        session.execute(text("DELETE FROM users WHERE username = 'temporary'"))
+
+    issued = service.setup("real-admin", PASSWORD)
+
+    assert issued.user.id > 1
+    with factory() as session:
+        stored = session.scalar(select(AuthSessionRecord))
+        assert stored is not None
+        assert stored.user_id == issued.user.id
+
+
 def test_repeated_setup_never_creates_second_user(
     authentication: tuple[AuthenticationService, sessionmaker[Session]],
 ) -> None:
@@ -89,6 +113,32 @@ def test_repeated_setup_never_creates_second_user(
     with factory() as session:
         assert session.scalar(select(func.count()).select_from(UserRecord)) == 1
         assert session.scalar(select(func.count()).select_from(AuthSessionRecord)) == 1
+
+
+def test_successful_login_rehashes_obsolete_password(
+    authentication: tuple[AuthenticationService, sessionmaker[Session]],
+) -> None:
+    service, factory = authentication
+    service.setup("admin", PASSWORD)
+    obsolete = PasswordHasher(
+        time_cost=1,
+        memory_cost=4096,
+        parallelism=1,
+        hash_len=16,
+        type=Type.ID,
+    ).hash(PASSWORD)
+    with factory.begin() as session:
+        user = session.scalar(select(UserRecord))
+        assert user is not None
+        user.password_hash = obsolete
+
+    service.login("admin", PASSWORD)
+
+    with factory() as session:
+        user = session.scalar(select(UserRecord))
+        assert user is not None
+        assert user.password_hash != obsolete
+        assert user.password_hash.startswith("$argon2id$")
 
 
 def test_login_authenticate_expire_revoke_and_inactive(

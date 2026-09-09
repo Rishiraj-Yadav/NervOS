@@ -54,8 +54,10 @@ def test_login_uses_safe_generic_errors_and_stores_only_digest(
         json={"username": "ADMIN", "password": PASSWORD},
     )
     assert success.status_code == 200
-    assert success.json() == {
-        "id": 1,
+    body = success.json()
+    assert isinstance(body["id"], int)
+    assert body == {
+        "id": body["id"],
         "username": "admin",
         "role": "admin",
         "is_active": True,

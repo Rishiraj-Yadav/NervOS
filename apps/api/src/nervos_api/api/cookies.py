@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from urllib.parse import urlsplit
 
 from fastapi import Response
@@ -27,11 +27,7 @@ def set_session_cookie(
     settings: Settings,
 ) -> None:
     """Set the host-only opaque-session cookie."""
-    now = datetime.now(UTC)
-    max_age = min(
-        SESSION_LIFETIME_SECONDS,
-        max(0, int((expires_at - now).total_seconds()) + 1),
-    )
+    max_age = SESSION_LIFETIME_SECONDS
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=token,

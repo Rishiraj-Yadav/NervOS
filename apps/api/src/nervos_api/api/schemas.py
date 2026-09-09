@@ -20,6 +20,12 @@ class CredentialRequest(BaseModel):
     password: Annotated[SecretStr, Field(min_length=12, max_length=128)]
 
 
+class SetupStatusResponse(BaseModel):
+    """Public first-run setup availability state."""
+
+    setup_complete: bool
+
+
 class UserResponse(BaseModel):
     """Safe authenticated-user response."""
 

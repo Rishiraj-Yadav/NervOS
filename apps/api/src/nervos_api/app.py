@@ -19,9 +19,10 @@ from nervos_api.api.dependencies import utc_now
 from nervos_api.api.errors import (
     InvalidOrigin,
     authentication_error_handler,
+    unexpected_error_handler,
     validation_error_handler,
 )
-from nervos_api.api.middleware import AuthenticationBoundaryMiddleware
+from nervos_api.api.middleware import ApiSecurityHeadersMiddleware, AuthenticationBoundaryMiddleware
 from nervos_api.api.router import api_router
 from nervos_api.config import Settings, get_settings
 
@@ -46,10 +47,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="NervOS API", lifespan=lifespan)
     app.add_middleware(AuthenticationBoundaryMiddleware, settings=resolved_settings)
+    app.add_middleware(ApiSecurityHeadersMiddleware)
     app.state.settings = resolved_settings
     app.state.database_engine = engine
     app.state.session_factory = session_factory
     app.state.authentication_service = authentication_service
+    app.add_exception_handler(Exception, unexpected_error_handler)
     app.add_exception_handler(AuthenticationError, authentication_error_handler)
     app.add_exception_handler(InvalidOrigin, authentication_error_handler)
     app.add_exception_handler(

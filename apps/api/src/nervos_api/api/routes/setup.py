@@ -8,9 +8,19 @@ from nervos_api.api.dependencies import (
     OriginDependency,
     SettingsDependency,
 )
-from nervos_api.api.schemas import CredentialRequest, UserResponse
+from nervos_api.api.schemas import CredentialRequest, SetupStatusResponse, UserResponse
 
 router = APIRouter()
+
+
+@router.get("/setup/status", response_model=SetupStatusResponse)
+def setup_status(
+    response: Response,
+    service: AuthenticationServiceDependency,
+) -> SetupStatusResponse:
+    """Report whether any user has permanently closed initial setup."""
+    response.headers["Cache-Control"] = "no-store"
+    return SetupStatusResponse(setup_complete=service.setup_is_complete())
 
 
 @router.post("/setup", response_model=UserResponse, status_code=status.HTTP_201_CREATED)

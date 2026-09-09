@@ -126,7 +126,7 @@ Use a unique file-backed database for migration/database tests, set it with `NER
 
 ## A3 authentication development
 
-First-run setup must be performed while the empty installation is reachable only through loopback or another trusted interface. Authentication mutations require an `Origin` header exactly equal to `NERVOS_APP_ORIGIN`; this includes manual API calls to setup, login, and logout. A3 adds no CORS or frontend UI.
+First-run setup must be performed while the empty installation is reachable only through loopback or another trusted interface. Every unsafe `/api/v1` request requires an `Origin` header exactly equal to `NERVOS_APP_ORIGIN`; this includes manual API calls to setup, login, and logout. Setup and login are JSON-only and bounded before parsing. Process-local Argon2 concurrency returns a recoverable 429 under saturation but does not replace reverse-proxy/network rate limiting beyond loopback. A3 adds no CORS or frontend UI.
 
 Authentication/database tests always use Alembic-migrated, file-backed temporary databases. The setup concurrency test uses independent SQLite connections and proves that `BEGIN IMMEDIATE` permits exactly one initial administrator. See `docs/authentication.md` for the complete contract.
 

@@ -19,7 +19,7 @@ Implemented A3 behavior:
 - Secure in production and whenever the configured origin is HTTPS
 - no authentication token in localStorage/sessionStorage, URLs, or JSON bodies
 
-See `docs/authentication.md` for the exact API, Origin, cookie, and error contracts.
+See `docs/authentication.md` and ADR 0006 for the exact API, Origin, cookie, process-local Argon2 resource bound, and error contracts. The 429 resource bound does not replace reverse-proxy or network rate limiting for externally exposed deployments.
 
 ## Agent conversation session
 

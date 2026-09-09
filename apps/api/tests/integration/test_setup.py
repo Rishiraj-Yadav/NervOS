@@ -14,6 +14,11 @@ PASSWORD = "correct horse battery staple"
 
 
 def test_setup_creates_admin_sets_cookie_and_locks_setup(client: TestClient) -> None:
+    initial_status = client.get("/api/v1/setup/status")
+    assert initial_status.status_code == 200
+    assert initial_status.json() == {"setup_complete": False}
+    assert initial_status.headers["cache-control"] == "no-store"
+
     response = client.post(
         "/api/v1/setup",
         headers=ORIGIN,
@@ -21,8 +26,10 @@ def test_setup_creates_admin_sets_cookie_and_locks_setup(client: TestClient) -> 
     )
 
     assert response.status_code == 201
-    assert response.json() == {
-        "id": 1,
+    body = response.json()
+    assert isinstance(body["id"], int)
+    assert body == {
+        "id": body["id"],
         "username": "admin.user",
         "role": "admin",
         "is_active": True,
@@ -49,6 +56,8 @@ def test_setup_creates_admin_sets_cookie_and_locks_setup(client: TestClient) -> 
     )
     assert repeated.status_code == 409
     assert repeated.json()["error"]["code"] == "setup_complete"
+    assert client.get("/api/v1/setup/status").json() == {"setup_complete": True}
+    assert client.get("/api/v1/setup/admin").status_code == 404
 
 
 def test_setup_rejects_invalid_or_missing_origin_without_mutation(

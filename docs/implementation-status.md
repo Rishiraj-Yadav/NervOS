@@ -82,16 +82,16 @@ Stage A — Foundation
 - `uv run python scripts/check.py typecheck`
 - `uv run python scripts/check.py test`
 - `uv run python scripts/check.py check`
-- Pytest backend/tooling suite (85 tests)
+- Pytest backend/tooling suite (100 tests after final handoff remediation)
 - Real file-backed setup race exercised 20 times with exactly one user/session
 - Manual setup/login/me/logout/replay/login smoke flow over real Uvicorn
-- Exact-origin and oversized-body pre-body middleware checks
+- Public setup-status discovery, JSON-only credentials, exact-origin unsafe-API enforcement, received-body limits, and response security-header checks
 - Alembic still head `0001_stage_a` with no schema drift
 - Dedicated security/test/architecture reviewers: no CRITICAL/HIGH findings; concurrency bound, safe 503 mapping, pre-body Origin/size boundary, setup-complete precheck, and single-owner policy fixes applied
 
 ## Current work
 
-A3 verification completed. First-run setup, Argon2id passwords, opaque server-side sessions, secure cookies, exact-Origin CSRF protection, and the setup/login/logout/me endpoints are ready for review. Authentication sessions remain distinct from future agent conversation sessions.
+A3 final handoff remediation completed. First-run status/setup, Argon2id passwords, opaque server-side sessions, secure cookies, JSON-only credential requests, exact-Origin unsafe-API protection, and setup/login/logout/me endpoints are ready for review. Authentication sessions remain distinct from future agent conversation sessions.
 
 ## Blockers
 

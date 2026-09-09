@@ -11,6 +11,7 @@ from typing import Protocol
 USERNAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9_.-]{2,31}\Z")
 MIN_PASSWORD_LENGTH = 12
 MAX_PASSWORD_LENGTH = 128
+MAX_PASSWORD_BYTES = 512
 SESSION_LIFETIME_SECONDS = 7 * 24 * 60 * 60
 
 
@@ -150,6 +151,10 @@ class AuthenticationService:
         self._tokens = tokens
         self._clock = clock
 
+    def setup_is_complete(self) -> bool:
+        """Return whether any user has permanently closed initial setup."""
+        return self._persistence.any_user_exists()
+
     def setup(self, username: str, password: str) -> IssuedSession:
         """Create the first administrator and its initial session atomically."""
         canonical_username = canonicalize_username(username)
@@ -159,16 +164,21 @@ class AuthenticationService:
         password_hash = self._passwords.hash(validated_password)
         now = self._clock()
         expires_at = _session_expiration(now)
-        token = self._tokens.generate()
-        token_hash = self._tokens.digest(token)
-        user = self._persistence.create_initial_administrator(
-            username=canonical_username,
-            password_hash=password_hash,
-            token_hash=token_hash,
-            created_at=now,
-            expires_at=expires_at,
-        )
-        return IssuedSession(user=user, token=token, expires_at=expires_at)
+        for _ in range(3):
+            token = self._tokens.generate()
+            token_hash = self._tokens.digest(token)
+            try:
+                user = self._persistence.create_initial_administrator(
+                    username=canonical_username,
+                    password_hash=password_hash,
+                    token_hash=token_hash,
+                    created_at=now,
+                    expires_at=expires_at,
+                )
+            except SessionCollision:
+                continue
+            return IssuedSession(user=user, token=token, expires_at=expires_at)
+        raise PersistenceUnavailable
 
     def login(self, username: str, password: str) -> IssuedSession:
         """Authenticate credentials and create a fresh absolute-expiry session."""
@@ -238,7 +248,7 @@ def _session_expiration(created_at: datetime) -> datetime:
 
 def canonicalize_username(username: str) -> str:
     """Normalize a username into the only accepted persisted form."""
-    canonical = unicodedata.normalize("NFKC", username).strip().lower()
+    canonical = unicodedata.normalize("NFKC", username).strip().casefold()
     if USERNAME_PATTERN.fullmatch(canonical) is None:
         raise InvalidUsername
     return canonical
@@ -247,5 +257,11 @@ def canonicalize_username(username: str) -> str:
 def validate_password(password: str) -> str:
     """Enforce bounded password input without normalizing or truncating it."""
     if not MIN_PASSWORD_LENGTH <= len(password) <= MAX_PASSWORD_LENGTH:
+        raise InvalidPassword
+    try:
+        encoded = password.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise InvalidPassword from error
+    if len(encoded) > MAX_PASSWORD_BYTES:
         raise InvalidPassword
     return password
