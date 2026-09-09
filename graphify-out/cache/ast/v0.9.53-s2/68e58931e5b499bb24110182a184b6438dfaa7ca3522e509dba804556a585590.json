@@ -1,0 +1,1 @@
+{"nodes": [{"id": "$graphify-root$_claude_hooks_scripts_check_secrets_py", "label": "check-secrets.py", "file_type": "code", "source_file": ".claude/hooks/scripts/check-secrets.py", "source_location": "L1"}], "edges": [], "raw_calls": []}
