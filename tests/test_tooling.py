@@ -163,9 +163,45 @@ def test_development_api_stops_when_migration_fails(
     assert commands[0][-2:] == ["upgrade", "head"]
 
 
-def test_development_script_reports_deferred_web() -> None:
-    result = run_script("scripts/dev.py", "web")
+def test_development_web_runs_root_pnpm_script_and_propagates_exit_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dev = load_development_module()
+    resolved_pnpm = str(ROOT / "tools" / "pnpm.cmd")
 
-    assert result.returncode == 2
-    assert "not implemented in A2" in result.stdout
-    assert "milestone A4" in result.stdout
+    def fake_which(command: str) -> str | None:
+        assert command == "pnpm"
+        return resolved_pnpm
+
+    def fake_run(
+        command: list[str],
+        *,
+        cwd: Path,
+        check: bool,
+        shell: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        assert command == [resolved_pnpm, "dev:web"]
+        assert cwd == ROOT
+        assert check is False
+        assert shell is False
+        return subprocess.CompletedProcess(command, 9)
+
+    monkeypatch.setattr(dev.shutil, "which", fake_which)
+    monkeypatch.setattr(dev.subprocess, "run", fake_run)
+
+    assert dev.run_web() == 9
+
+
+def test_development_web_requires_resolved_pnpm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dev = load_development_module()
+
+    def missing_command(command: str) -> None:
+        assert command == "pnpm"
+        return None
+
+    monkeypatch.setattr(dev.shutil, "which", missing_command)
+
+    with pytest.raises(SystemExit, match="Required command 'pnpm' was not found"):
+        dev.run_web()

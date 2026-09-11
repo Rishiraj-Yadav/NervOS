@@ -10,7 +10,7 @@ Stage A — Foundation
 - [x] A1 — Repository and tooling bootstrap
 - [x] A2 — FastAPI + typed configuration + SQLite + SQLAlchemy + Alembic
 - [x] A3 — First-run setup + local authentication
-- [ ] A4 — React dashboard foundation
+- [x] A4 — React dashboard foundation
 - [ ] A5 — Stage A E2E flow
 - [ ] A6 — CI and quality gates
 - [ ] A7 — Final architecture/security/test audit
@@ -25,14 +25,14 @@ Stage A — Foundation
 - [x] user can log in
 - [x] authenticated session survives browser refresh
 - [x] logout invalidates server-side session
-- [ ] protected dashboard is unavailable unauthenticated
+- [x] protected dashboard is unavailable unauthenticated
 - [x] backend tests pass
-- [ ] frontend tests pass
+- [x] frontend tests pass
 - [ ] E2E smoke flow passes
 - [x] Ruff passes
 - [x] Pyright passes
 - [x] frontend TypeScript check passes
-- [ ] production frontend build passes
+- [x] production frontend build passes
 - [ ] CI matches local quality commands
 - [ ] no real secrets are committed
 
@@ -89,20 +89,31 @@ Stage A — Foundation
 - Alembic still head `0001_stage_a` with no schema drift
 - Dedicated security/test/architecture reviewers: no CRITICAL/HIGH findings; concurrency bound, safe 503 mapping, pre-body Origin/size boundary, setup-complete precheck, and single-owner policy fixes applied
 
+## A4 verified checks
+
+- `pnpm lint`
+- `pnpm typecheck`
+- `pnpm test` (37 Vitest/Testing Library/MSW tests)
+- `pnpm build`
+- `uv run pytest tests/test_tooling.py apps/api/tests/integration/test_setup.py apps/api/tests/integration/test_authentication.py apps/api/tests/integration/test_auth_security.py apps/api/tests/integration/test_health.py` (25 passed)
+- `uv run python scripts/check.py check` (101 Python tests and 38 frontend tests passed)
+- `git diff --check`
+- Isolated temporary-database browser smoke: setup, canonical dashboard identity, logout, login, refresh restoration, dashboard, and final logout
+- Focused architecture and security reviews completed; wildcard routing and abort-classification findings fixed
+
 ## Current work
 
-A3 final handoff remediation completed. First-run status/setup, Argon2id passwords, opaque server-side sessions, secure cookies, JSON-only credential requests, exact-Origin unsafe-API protection, and setup/login/logout/me endpoints are ready for review. Authentication sessions remain distinct from future agent conversation sessions.
+A4 React dashboard foundation completed. The browser resolves `setup_complete`, restores the cookie-backed session through `/auth/me`, gates setup/login/dashboard routes without assuming state from failures, and confirms logout server-side before changing authentication state. The dashboard remains a minimal Stage A foundation UI.
 
 ## Blockers
 
 - GNU Make is not installed on the current Windows machine; use the documented Python command facade.
-- Frontend tests have no product test files yet; Vitest exits successfully with `--passWithNoTests` by design until A4.
 - FastAPI/Starlette's current TestClient dependency path emits two upstream deprecation warnings; tests still pass.
 - Without an operator bootstrap secret, first-run setup is safe only while the API is reachable through a trusted interface; non-loopback deployments must enforce their own network/proxy rate limits.
 
 ## Next action
 
-Review A3. Do not begin A4 until it receives explicit approval.
+Review A4. Do not begin A5 until it receives explicit approval.
 
 ## Maintenance rule
 

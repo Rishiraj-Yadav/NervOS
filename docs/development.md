@@ -65,7 +65,7 @@ make typecheck
 make check
 ```
 
-At A2, lint, typecheck, backend/database tests, and `dev-api` are implemented. `dev-api` migrates the configured SQLite database before starting Uvicorn; migration failure prevents server startup. `dev-web` remains reserved until A4. The production frontend build, secret scan, and Playwright E2E are added to the aggregate check only in their owning milestones.
+Lint, typecheck, backend/database tests, and both development launchers are implemented. `dev-api` migrates the configured SQLite database before starting Uvicorn; migration failure prevents server startup. `dev-web` starts the A4 Vite application. The production frontend build is verified separately with `pnpm build`; secret scanning and Playwright E2E remain in their owning later milestones.
 
 When Make is unavailable, use:
 
@@ -103,7 +103,9 @@ A2 provides typed process configuration, synchronous SQLite/SQLAlchemy infrastru
 - Vitest + Testing Library
 - Playwright E2E in A5
 
-A1 establishes dependencies and tooling only. A4 adds routes, a shared API client, and UI behavior. Authentication credentials must never be stored in localStorage or sessionStorage.
+A4 implements `/`, `/setup`, `/login`, `/dashboard`, and an accessible not-found route. TanStack Query owns setup status and the current server session through the stable `setup-status` and `auth-session` queries. One shared API client uses relative `/api/v1/...` URLs with browser credentials. Authentication credentials and tokens are never stored in localStorage or sessionStorage.
+
+For local development, start the API and web launcher in separate terminals, then open exactly `http://localhost:5173`. Vite proxies `/api` without rewriting it to `http://127.0.0.1:8000`; using a different browser hostname will fail A3's exact-Origin policy. Frontend behavior is tested with Vitest, Testing Library, and MSW. Playwright automation remains deferred to A5.
 
 ## Configuration
 
@@ -126,7 +128,7 @@ Use a unique file-backed database for migration/database tests, set it with `NER
 
 ## A3 authentication development
 
-First-run setup must be performed while the empty installation is reachable only through loopback or another trusted interface. Every unsafe `/api/v1` request requires an `Origin` header exactly equal to `NERVOS_APP_ORIGIN`; this includes manual API calls to setup, login, and logout. Setup and login are JSON-only and bounded before parsing. Process-local Argon2 concurrency returns a recoverable 429 under saturation but does not replace reverse-proxy/network rate limiting beyond loopback. A3 adds no CORS or frontend UI.
+First-run setup must be performed while the empty installation is reachable only through loopback or another trusted interface. Every unsafe `/api/v1` request requires an `Origin` header exactly equal to `NERVOS_APP_ORIGIN`; this includes manual API calls to setup, login, and logout. Setup and login are JSON-only and bounded before parsing. Process-local Argon2 concurrency returns a recoverable 429 under saturation but does not replace reverse-proxy/network rate limiting beyond loopback. A3 adds no CORS; A4 uses the same-origin Vite proxy rather than weakening that boundary.
 
 Authentication/database tests always use Alembic-migrated, file-backed temporary databases. The setup concurrency test uses independent SQLite connections and proves that `BEGIN IMMEDIATE` permits exactly one initial administrator. See `docs/authentication.md` for the complete contract.
 

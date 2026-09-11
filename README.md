@@ -2,7 +2,7 @@
 
 NervOS is a self-hosted AI-agent runtime and management platform. The repository is currently in **Stage A — Foundation**.
 
-The A1 repository/tooling foundation, A2 API/configuration/database foundation, and A3 local-authentication boundary are implemented. The public health endpoint, first-run setup, opaque sessions, and migration-first API launcher are available. Dashboard behavior, E2E flow, and completed CI gates are later Stage A milestones. Agent runtime, model providers, MCP/tools, workers, scheduling, memory, marketplace, IoT, and multi-agent execution are outside Stage A.
+The A1 repository/tooling foundation, A2 API/configuration/database foundation, A3 local-authentication boundary, and A4 React dashboard foundation are implemented. The browser now supports first-run setup, cookie-backed login/session restoration, a protected minimal dashboard, and server-confirmed logout. Automated browser E2E and completed CI gates remain later Stage A milestones. Agent runtime, model providers, MCP/tools, workers, scheduling, memory, marketplace, IoT, and multi-agent execution are outside Stage A.
 
 See [implementation status](docs/implementation-status.md) for the verified current state and [architecture](docs/architecture.md) for target boundaries.
 
@@ -59,13 +59,13 @@ Start the A2 API development server with:
 uv run python scripts/dev.py api
 ```
 
-The launcher validates configuration, runs Alembic `upgrade head`, and starts Uvicorn on `http://127.0.0.1:8000`. Liveness is available at `GET /api/v1/health` and returns `{"status":"ok"}`. The web command remains deferred to A4:
+The API launcher validates configuration, runs Alembic `upgrade head`, and starts Uvicorn on `http://127.0.0.1:8000`. Liveness is available at `GET /api/v1/health` and returns `{"status":"ok"}`. Start the A4 web application separately with:
 
 ```bash
 uv run python scripts/dev.py web
 ```
 
-A3 implements backend first-run status and local authentication at `GET /api/v1/setup/status`, `POST /api/v1/setup`, `POST /api/v1/auth/login`, `POST /api/v1/auth/logout`, and `GET /api/v1/auth/me`. See [authentication](docs/authentication.md). The React setup/login/dashboard UI and user management remain unimplemented and are not part of A3.
+Open exactly `http://localhost:5173`. Vite proxies relative `/api/v1/...` requests to the local API so the browser remains same-origin and satisfies A3's exact-Origin policy. A4 consumes the A3 setup/authentication routes through one credentialed API client; authentication remains in the HttpOnly server session cookie and is restored through `/auth/me`. User management remains unimplemented.
 
 ## Workspace boundaries
 

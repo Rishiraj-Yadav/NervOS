@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -78,16 +79,29 @@ def run_api(settings: Settings | None = None) -> int:
     return server.returncode
 
 
+def run_web() -> int:
+    """Start the Vite development server through the root pnpm script."""
+    pnpm = shutil.which("pnpm")
+    if pnpm is None:
+        raise SystemExit(
+            "Required command 'pnpm' was not found. Run the bootstrap prerequisites first."
+        )
+
+    server = subprocess.run(
+        [pnpm, "dev:web"],
+        cwd=ROOT,
+        check=False,
+        shell=False,
+    )
+    return server.returncode
+
+
 def main() -> int:
-    """Run the selected development service when its milestone exists."""
+    """Run the selected development service."""
     args = parse_args()
     if args.service == "api":
         return run_api()
-
-    print(
-        "The web development server is not implemented in A2. It becomes available in milestone A4."
-    )
-    return 2
+    return run_web()
 
 
 if __name__ == "__main__":

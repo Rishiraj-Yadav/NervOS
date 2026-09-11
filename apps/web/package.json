@@ -10,7 +10,7 @@
     "build": "tsc --build && vite build",
     "dev": "vite",
     "lint": "eslint . --max-warnings=0",
-    "test": "vitest run --passWithNoTests",
+    "test": "vitest run",
     "typecheck": "tsc --build --pretty false"
   },
   "dependencies": {
