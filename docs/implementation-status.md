@@ -135,16 +135,27 @@ Stage A — Foundation
 - `.github/workflows/ci.yml` and `security.yml` parse as valid YAML, declare `permissions: contents: read`, reference no secrets, and pin every action to a verified full-length commit SHA
 - `git diff --check`
 
+### GitHub-hosted validation
+
+Both workflows were then exercised on real GitHub-hosted runners through pull request [#1](https://github.com/Rishiraj-Yadav/NervOS/pull/1) (`stage-a-a6-ci-validation` → `main`), triggered by `pull_request`, at commit `760c4e8`:
+
+- CI — run [34699167313](https://github.com/Rishiraj-Yadav/NervOS/actions/runs/34699167313), attempt 1, `success`
+  - `Repository checks` (`check` job): every step succeeded — checkout, pnpm, Node from `.node-version`, uv, `uv python install`, `uv lock --check`, `bootstrap.py --skip-browser`, then `check.py check` — with no Chromium provisioning
+  - `Deterministic browser journey` (`e2e` job): every step succeeded — full bootstrap with the project-local Chromium, then the CI-only `playwright install-deps chromium`, then `check.py e2e`
+- Security — run [34699167312](https://github.com/Rishiraj-Yadav/NervOS/actions/runs/34699167312), attempt 1, `success`
+  - `Tracked-file security scan`: the repository-owned scanner ran on the runner's `actions/setup-python` interpreter and reported no findings
+
+Both runs uploaded zero artifacts and required no retry (attempt 1). The only annotation was a non-failing `astral-sh/setup-uv` cache-reservation warning on the `e2e` job, caused by the two CI jobs starting in parallel and contending for one cache key; the job succeeded and that cache is only an optimization. Workflow job logs are not retrievable without repository credentials, so this record rests on per-step run results rather than raw log text.
+
 ## Current work
 
-A6 completed. The verified local Stage A implementation is now a reproducible, least-privilege repository workflow: `ci.yml` runs a browser-free `check` job and a separate Chromium `e2e` job, `security.yml` runs the repository-owned tracked-file scanner on pull requests, pushes to `main`, and a weekly schedule, and every external action is pinned to a verified full-length commit SHA with `permissions: contents: read`. The local/CI composition is settled: `check` is lint + typecheck + tests + security and stays deliberately E2E-free, so full verification is `check` then `e2e` both locally and in CI. `scripts/clean_check.py` verifies the uncommitted working tree in an isolated export without a throwaway commit. Generated `graphify-out/cache/` state is now ignored and untracked, while the generated graph report itself remains a tracked project artifact.
+A6 completed. The verified local Stage A implementation is now a reproducible, least-privilege repository workflow: `ci.yml` runs a browser-free `check` job and a separate Chromium `e2e` job, `security.yml` runs the repository-owned tracked-file scanner on pull requests, pushes to `main`, and a weekly schedule, and every external action is pinned to a verified full-length commit SHA with `permissions: contents: read`. The local/CI composition is settled: `check` is lint + typecheck + tests + security and stays deliberately E2E-free, so full verification is `check` then `e2e` both locally and in CI. `scripts/clean_check.py` verifies the uncommitted working tree in an isolated export without a throwaway commit. Generated `graphify-out/cache/` state is now ignored and untracked, while the generated graph report itself remains a tracked project artifact. A6 is verified end to end: pull request #1 ran both workflows on real GitHub-hosted runners at commit `760c4e8`, and the `check`, `e2e`, and tracked-file-scan jobs all passed on their first attempt. The validation branch exists only to exercise CI and has not been merged.
 
 ## Blockers
 
 - GNU Make is not installed on the current Windows machine; use the documented Python command facade.
 - FastAPI/Starlette's current TestClient dependency path emits two upstream deprecation warnings; tests still pass.
 - Without an operator bootstrap secret, first-run setup is safe only while the API is reachable through a trusted interface; non-loopback deployments must enforce their own network/proxy rate limits.
-- The A6 workflows have been validated locally (YAML parse, permission/secret/pinning invariants, and the same commands executed through `clean_check.py`) but have not yet executed on a GitHub-hosted runner. First-run runner behaviour, including the CI-only Playwright system-library step, is unverified until the workflows actually run.
 
 ## Next action
 
