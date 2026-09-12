@@ -1,1 +1,36 @@
-# Security automation is intentionally deferred to Stage A milestone A6.
+# NervOS tracked-file security scan.
+#
+# Runs the repository-owned scanner; no secret pattern is duplicated in this YAML.
+# The scanner is standard-library only, so this workflow deliberately installs no
+# project dependencies and performs no bootstrap. Findings never include matched
+# values, so nothing sensitive can reach the log. Read-only; references no secrets.
+name: Security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Weekly, Mondays 04:17 UTC.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tracked-file-scan:
+    name: Tracked-file security scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: .python-version
+
+      - name: Scan tracked files for secrets and forbidden artifacts
+        run: python scripts/security_scan.py --tracked-only

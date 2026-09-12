@@ -2,7 +2,7 @@
 
 ## Stage A — Foundation
 
-Repository/workspaces, FastAPI, SQLite, SQLAlchemy/Alembic, configuration, first-run setup, authentication, React dashboard shell, tests, CI.
+Repository/workspaces, FastAPI, SQLite, SQLAlchemy/Alembic, configuration, first-run setup, authentication, React dashboard shell, tests, CI (delivered by milestone A6).
 
 Outcome: secure local web application foundation.
 

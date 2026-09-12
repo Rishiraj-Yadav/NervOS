@@ -39,6 +39,7 @@ Inspect the repository first.
 - marketplace
 - IoT
 - multi-agent orchestration
+- multi-user management
 
 ## Workflow
 

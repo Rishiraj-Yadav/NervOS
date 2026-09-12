@@ -1,1 +1,103 @@
-# CI is intentionally deferred to Stage A milestone A6.
+# NervOS continuous integration.
+#
+# Every step invokes a repository-owned command; no check logic is reimplemented
+# here. Actions are pinned to verified full-length commit SHAs -- see docs/ci.md
+# for the pinning policy. This workflow is read-only and references no secrets.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_FROZEN: "1"
+
+jobs:
+  # Fast, offline and deterministic: no browser, no spawned services.
+  check:
+    name: Repository checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up pnpm
+        # Version comes from package.json "packageManager"; it is not repeated here.
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python
+        run: uv python install
+
+      - name: Verify lockfile
+        run: uv lock --check
+
+      - name: Bootstrap dependencies
+        # --skip-browser: this job never runs Playwright, so it never needs Chromium.
+        run: uv run python scripts/bootstrap.py --skip-browser
+
+      - name: Repository checks
+        run: uv run python scripts/check.py check
+
+  # The deterministic Playwright journey, kept separate from routine checks.
+  e2e:
+    name: Deterministic browser journey
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python
+        run: uv python install
+
+      - name: Verify lockfile
+        run: uv lock --check
+
+      - name: Bootstrap dependencies and Chromium
+        run: uv run python scripts/bootstrap.py
+
+      - name: Install Playwright system libraries
+        # CI-runner-only OS provisioning. Local bootstrap never installs OS packages.
+        run: pnpm --dir apps/web exec playwright install-deps chromium
+
+      - name: Playwright end-to-end journey
+        run: uv run python scripts/check.py e2e

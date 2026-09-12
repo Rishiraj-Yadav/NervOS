@@ -62,6 +62,7 @@ Stage A must NOT implement:
 - marketplace
 - IoT
 - multi-agent execution
+- multi-user management
 
 ## Architecture
 
@@ -187,9 +188,12 @@ Prefer repository commands once available:
 - `make dev-api`
 - `make dev-web`
 - `make test`
+- `make test-e2e`
 - `make lint`
 - `make typecheck`
+- `make security`
 - `make check`
+- `make clean-check`
 
 If a command does not exist yet, create it only when part of the current phase.
 

@@ -25,6 +25,7 @@ coverage/
 *.tsbuildinfo
 playwright-report/
 test-results/
+blob-report/
 
 # NervOS local data
 .nervos/
@@ -63,6 +64,10 @@ data/
 
 # Other local tools
 .serena/
+
+# Graphify: the generated code-graph report is a shared project artifact, but its
+# derived extraction caches are local state and are rebuilt on demand.
+graphify-out/cache/
 
 # Editors and operating systems
 .vscode/
