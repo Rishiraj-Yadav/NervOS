@@ -110,6 +110,31 @@ describe("route guards", () => {
     expect(attempts).toBe(2);
   });
 
+  it("keeps an authentication HTTP 500 as a retryable error", async () => {
+    let attempts = 0;
+    server.use(
+      setupStatus(true),
+      http.get("/api/v1/auth/me", () => {
+        attempts += 1;
+        return attempts === 1
+          ? error(500, "internal_server_error", "An unexpected error occurred.")
+          : HttpResponse.json(apiUser);
+      }),
+    );
+    const { user } = await renderRoute("/dashboard");
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /unexpected error occurred/i,
+    );
+    expect(screen.queryByRole("heading", { name: /welcome back/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /nervos is ready/i })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /try again/i }));
+
+    expect(await screen.findByRole("heading", { name: /nervos is ready/i })).toBeVisible();
+    expect(attempts).toBe(2);
+  });
+
   it("renders not found without resolving authentication state", async () => {
     await renderRoute("/missing");
 
