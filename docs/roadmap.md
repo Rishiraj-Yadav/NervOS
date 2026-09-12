@@ -6,11 +6,17 @@ Repository/workspaces, FastAPI, SQLite, SQLAlchemy/Alembic, configuration, first
 
 Outcome: secure local web application foundation.
 
-## Stage B — Runtime proof
+## Stage B — Trusted-agent runtime proof
 
-Introduce AgentPackage, AgentInstance, Run, RunContext, first built-in Chat Agent, model-provider interface, one model adapter/mock, and run persistence.
+Stage B proves one trusted built-in, one-shot Chat Agent through a provider-neutral model boundary, a real separately selected provider, bounded awaited execution, persisted success or explicit failure, and a minimal authenticated dashboard interaction. ADR 0007 freezes the deliberately narrow scope and its compatibility with later stages.
 
-Outcome: one agent can execute through NervOS.
+- **B0 — Scope freeze and trusted-agent architecture:** define the Agent Definition → Agent Instance → Run boundary, exact version identity, ownership, four-state lifecycle, model port, process-only secret policy, proof limits, failure semantics, and strict exclusions. Documentation/governance only.
+- **B1 — Agent-instance and run domain/persistence:** implement the two-table domain, exact-version built-in registry, immutable snapshots, transitions, ownership, Alembic migration, and deterministic fake model boundary. No provider SDK, API, or UI.
+- **B2 — Model adapter and bounded proof runner:** after a separately reviewed first-provider decision, implement one real adapter, process-environment credential boundary, and one-call awaited in-process coordinator with short database transactions.
+- **B3 — Trusted Chat Agent API and minimal UI:** add owner-scoped resource APIs and a small authenticated one-shot Chat experience whose persisted result survives reload; deterministic CI/E2E continues to use a fake provider.
+- **B4 — Provider portability, usage, and final acceptance:** prove the unchanged Chat behavior through a second reviewed adapter, normalize optional usage, and complete architecture/security/test/documentation verification.
+
+Outcome: one trusted agent can execute safely and observably through NervOS without claiming the durable execution engine introduced in Stage C.
 
 ## Stage C — Persistent execution engine
 
