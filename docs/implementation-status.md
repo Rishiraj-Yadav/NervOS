@@ -2,7 +2,17 @@
 
 ## Current phase
 
-Stage A — Foundation
+Stage B — Trusted-agent runtime proof (B0 architecture freeze only; B1–B4 are not implemented)
+
+## Stage B milestones
+
+- [x] B0 — Scope freeze and first trusted-agent architecture
+- [ ] B1 — Agent-instance and run domain/persistence
+- [ ] B2 — Model adapter, process-secret foundation, and bounded proof runner
+- [ ] B3 — Trusted Chat Agent API and minimal dashboard interaction
+- [ ] B4 — Provider portability, usage accounting, and final Stage B acceptance
+
+B0 is a documentation/governance milestone. ADR 0007 freezes a one-shot trusted `nervos.chat` definition identified by exact key/version, explicit user-owned instances, immutable-snapshot Runs, a narrow application-owned model port, process-only provider credentials, one bounded model call, the `created -> running -> succeeded|failed` lifecycle, and an awaited API-process proof runner. No Agent Instance, Run, provider adapter, API, or Chat UI is implemented yet. `FIRST PROVIDER DECISION REQUIRED BEFORE B2`.
 
 ## Stage A milestones
 
@@ -178,11 +188,17 @@ No normal NervOS database was created or used. No unresolved blocking finding re
 - Ignored historical Claude worktrees are local housekeeping and are not repository content or acceptance evidence.
 - Anonymous GitHub metadata does not expose raw runner logs; run, job, and step metadata supplied hosted validation evidence.
 
+## B0 architecture verification
+
+B0 was implemented as documentation/governance only. ADR 0007 and the Stage B roadmap/runtime documentation define the reviewed B0–B4 boundaries, exact-version trusted definition identity, explicit non-unique user instances, one-shot Runs, three failure classes, immutable execution snapshots, proof limits, process-only provider secrets, and the accepted created/running stranded-state limitation. Backend/frontend reviewer definitions now review only behavior accepted in the current milestone while continuing to flag later-stage scope expansion.
+
+Verification included focused governance tests, both repository security-scan modes, `git diff --check`, the canonical `scripts/check.py check` gate, and the full isolated `scripts/clean_check.py` gate. No source, runtime, migration, route, frontend product UI, provider dependency, secret storage, queue/worker, tool, memory, scheduler, package, SDK, or Marketplace behavior was added.
+
 ## Next action
 
-STAGE A ACCEPTED — READY FOR SEPARATE REVIEW/AUTHORIZATION TO BEGIN STAGE B.
+B0 IMPLEMENTATION REVIEW
 
-This readiness statement does not authorize Stage B.
+B1 requires separate explicit planning and authorization; it does not begin automatically.
 
 ## Maintenance rule
 
