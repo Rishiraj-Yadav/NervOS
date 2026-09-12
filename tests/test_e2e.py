@@ -39,6 +39,110 @@ def test_fingerprint_detects_creation_and_changes(tmp_path: Path) -> None:
     assert first.digest != e2e.fingerprint(target).digest
 
 
+def test_run_e2e_rejects_a_temporary_database_that_aliases_the_default_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    e2e = load_module()
+    default_database = tmp_path / "nervos-e2e.db"
+    started = False
+
+    class TemporaryDirectory:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> str:
+            return str(tmp_path)
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    def fail_if_started(*_args: object, **_kwargs: object) -> None:
+        nonlocal started
+        started = True
+        raise AssertionError("E2E subprocess work must not start before the database guard")
+
+    monkeypatch.setattr(e2e, "DEFAULT_DATABASE", default_database)
+    monkeypatch.setattr(e2e.tempfile, "TemporaryDirectory", TemporaryDirectory)
+    monkeypatch.setattr(e2e, "resolve_required_command", fail_if_started)
+    monkeypatch.setattr(e2e, "start_process", fail_if_started)
+
+    with pytest.raises(RuntimeError, match="E2E database resolved to the default NervOS database"):
+        e2e.run_e2e()
+
+    assert started is False
+
+
+def test_run_e2e_detects_default_database_mutation_after_owned_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    e2e = load_module()
+    default_database = tmp_path / "default.db"
+    default_database.write_bytes(b"before")
+    temporary = tmp_path / "temporary"
+    temporary.mkdir()
+    cleanup_order: list[str] = []
+
+    class TemporaryDirectory:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> str:
+            return str(temporary)
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    class Reservation:
+        def __init__(self) -> None:
+            self.port = 41000 + len(cleanup_order)
+
+        def close(self) -> None:
+            return None
+
+    class Process:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def wait(self, timeout: float | None = None) -> int:
+            assert timeout == e2e.PLAYWRIGHT_TIMEOUT
+            assert self.name == "playwright"
+            default_database.write_bytes(b"after")
+            return 0
+
+    processes = iter(Process(name) for name in ("api", "web", "playwright"))
+
+    def fake_start_process(*_args: object, **_kwargs: object) -> Process:
+        return next(processes)
+
+    def fake_terminate(process: Process) -> bool:
+        cleanup_order.append(process.name)
+        return True
+
+    def fake_migration(*_args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        assert kwargs["shell"] is False
+        return subprocess.CompletedProcess([], 0)
+
+    def resolve_required_command(name: str) -> str:
+        return f"{name}.exe"
+
+    def wait_for_http_ready(*_args: object) -> None:
+        return None
+
+    monkeypatch.setattr(e2e, "DEFAULT_DATABASE", default_database)
+    monkeypatch.setattr(e2e.tempfile, "TemporaryDirectory", TemporaryDirectory)
+    monkeypatch.setattr(e2e, "PortReservation", Reservation)
+    monkeypatch.setattr(e2e, "resolve_required_command", resolve_required_command)
+    monkeypatch.setattr(e2e.subprocess, "run", fake_migration)
+    monkeypatch.setattr(e2e, "start_process", fake_start_process)
+    monkeypatch.setattr(e2e, "wait_for_http_ready", wait_for_http_ready)
+    monkeypatch.setattr(e2e, "terminate_process_tree", fake_terminate)
+
+    with pytest.raises(RuntimeError, match="E2E modified the default database"):
+        e2e.run_e2e()
+
+    assert cleanup_order == ["playwright", "web", "api"]
+
+
 def test_port_reservation_uses_ipv4_loopback() -> None:
     e2e = load_module()
     reservation = e2e.PortReservation()

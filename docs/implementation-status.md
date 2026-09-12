@@ -13,7 +13,7 @@ Stage A — Foundation
 - [x] A4 — React dashboard foundation
 - [x] A5 — Stage A E2E flow
 - [x] A6 — CI, tracked-file security scanning, and Stage A documentation completion
-- [ ] A7 — Final architecture/security/test audit
+- [x] A7 — Final architecture/security/test audit
 
 ## Stage A acceptance criteria
 
@@ -147,19 +147,42 @@ Both workflows were then exercised on real GitHub-hosted runners through pull re
 
 Both runs uploaded zero artifacts and required no retry (attempt 1). The only annotation was a non-failing `astral-sh/setup-uv` cache-reservation warning on the `e2e` job, caused by the two CI jobs starting in parallel and contending for one cache key; the job succeeded and that cache is only an optimization. Workflow job logs are not retrievable without repository credentials, so this record rests on per-step run results rather than raw log text.
 
-## Current work
+## A7 final verification
 
-A6 completed. The verified local Stage A implementation is now a reproducible, least-privilege repository workflow: `ci.yml` runs a browser-free `check` job and a separate Chromium `e2e` job, `security.yml` runs the repository-owned tracked-file scanner on pull requests, pushes to `main`, and a weekly schedule, and every external action is pinned to a verified full-length commit SHA with `permissions: contents: read`. The local/CI composition is settled: `check` is lint + typecheck + tests + security and stays deliberately E2E-free, so full verification is `check` then `e2e` both locally and in CI. `scripts/clean_check.py` verifies the uncommitted working tree in an isolated export without a throwaway commit. Generated `graphify-out/cache/` state is now ignored and untracked, while the generated graph report itself remains a tracked project artifact. A6 is verified end to end: pull request #1 ran both workflows on real GitHub-hosted runners at commit `760c4e8`, and the `check`, `e2e`, and tracked-file-scan jobs all passed on their first attempt. The validation branch exists only to exercise CI and has not been merged.
+Pull request [#1](https://github.com/Rishiraj-Yadav/NervOS/pull/1) is merged. Its merged `main` commit is `a76c931e618977d1f6bfe992c22173989d52f4d2`; the merged tree was audited as the final Stage A candidate. The real GitHub-hosted merge-commit validation succeeded on its first attempt: CI run [34699701274](https://github.com/Rishiraj-Yadav/NervOS/actions/runs/34699701274) passed both `Repository checks` and `Deterministic browser journey`, and Security run [34699701202](https://github.com/Rishiraj-Yadav/NervOS/actions/runs/34699701202) passed `Tracked-file security scan`.
 
-## Blockers
+A7 remediation added safe persistence-failure HTTP regression coverage for setup, login, current-user resolution, and logout; direct E2E-supervisor regression coverage for default-database rejection and post-run mutation detection; clean-check failure-path coverage for stop-on-first-failure, nonzero status, temporary-export cleanup, unchanged active checkout, and no Git-author requirement; and concise tracked backend/frontend reviewer definitions scoped only to current Stage A review.
 
-- GNU Make is not installed on the current Windows machine; use the documented Python command facade.
-- FastAPI/Starlette's current TestClient dependency path emits two upstream deprecation warnings; tests still pass.
-- Without an operator bootstrap secret, first-run setup is safe only while the API is reachable through a trusted interface; non-loopback deployments must enforce their own network/proxy rate limits.
+Final local verification passed on the uncommitted A7 remediation candidate:
+
+- `uv lock --check`
+- architecture tests (4 passed), core unit tests (36 passed), core integration tests (10 passed), API tests (47 passed), tooling/scanner/clean-check/E2E-supervisor tests (75 passed), and the complete Python suite (172 passed)
+- ESLint, Pyright strict, frontend TypeScript, Vitest (38 passed), and production frontend build
+- local and tracked-only repository-owned security scans (176 files each, no findings)
+- isolated Alembic upgrade/current/check/downgrade/re-upgrade with application schema `users` and `auth_sessions`
+- `scripts/check.py` lint, typecheck, test, security, and aggregate check gates
+- two consecutive deterministic E2E runs, each with a new temporary Alembic-migrated SQLite database
+- `scripts/clean_check.py` in a Git-selected isolated export, including its E2E step
+
+No normal NervOS database was created or used. No unresolved blocking finding remains. The A7 documentation, governance, and regression-coverage findings are resolved. No release, tag, deployment, push, or Stage B work occurred.
+
+## Accepted Stage A limitations
+
+- The repository-owned scanner is bounded Git-selected secret hygiene, not a comprehensive dependency audit or SAST; non-SQLite binary and text files larger than 1 MiB do not receive content-rule scanning.
+- The Argon2 password-work bound is process-wide rather than host-wide.
+- Without an operator bootstrap secret, first-run setup requires a trusted interface; non-loopback deployments need their own network/proxy controls.
+- Non-credential endpoints have no global request-body cap.
+- Expired or revoked session rows are filtered but not automatically pruned.
+- CSRF protection uses exact-Origin enforcement and `SameSite=Lax`, not a separate anti-CSRF token.
+- SQLite WAL is deliberately disabled for the local Stage A model.
+- Ignored historical Claude worktrees are local housekeeping and are not repository content or acceptance evidence.
+- Anonymous GitHub metadata does not expose raw runner logs; run, job, and step metadata supplied hosted validation evidence.
 
 ## Next action
 
-Review A6. Do not begin A7 until A6 receives explicit approval.
+STAGE A ACCEPTED — READY FOR SEPARATE REVIEW/AUTHORIZATION TO BEGIN STAGE B.
+
+This readiness statement does not authorize Stage B.
 
 ## Maintenance rule
 
