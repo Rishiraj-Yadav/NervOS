@@ -23,7 +23,7 @@ Revision `0001_stage_a` creates exactly two application tables. `alembic_version
 
 - `id`: generated integer primary key with SQLite `AUTOINCREMENT`
 - `username`: unique, lowercase/trimmed canonical value of length 3–32
-- `password_hash`: non-null text reserved for a later password-hashing adapter
+- `password_hash`: non-null Argon2id password hash; authentication hashing is implemented and plaintext passwords are never persisted
 - `role`: non-empty text value
 - `is_active`: non-null boolean, default true
 - `created_at`, `updated_at`: non-null UTC timestamps with valid ordering

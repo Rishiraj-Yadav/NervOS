@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from types import ModuleType
 
@@ -126,6 +127,85 @@ def test_repository_files_excludes_ignored_paths(tmp_path: Path) -> None:
     (tmp_path / "ignored" / "secret.txt").write_text("x\n", encoding="utf-8")
 
     assert clean_check.repository_files(root=tmp_path) == [".gitignore", "kept.txt"]
+
+
+def test_run_steps_stops_at_first_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    clean_check = load_clean_check()
+    calls: list[tuple[list[str], Path]] = []
+    returncodes = iter((0, 7))
+
+    def fake_run(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[bytes]:
+        calls.append((command, cwd))
+        return subprocess.CompletedProcess(command, next(returncodes))
+
+    def resolve(command: Sequence[str]) -> list[str]:
+        return list(command)
+
+    monkeypatch.setattr(clean_check, "resolve_command", resolve)
+    monkeypatch.setattr(clean_check.subprocess, "run", fake_run)
+
+    results = clean_check.run_steps(
+        tmp_path,
+        [
+            ("first", ("tool", "first")),
+            ("failing", ("tool", "failing")),
+            ("never", ("tool", "never")),
+        ],
+    )
+
+    assert results == [("first", 0), ("failing", 7)]
+    assert calls == [
+        (["tool", "first"], tmp_path),
+        (["tool", "failing"], tmp_path),
+    ]
+
+
+def test_main_reports_failure_cleans_export_and_preserves_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    clean_check = load_clean_check()
+    export = tmp_path / "synthetic-export"
+    initialized: list[Path] = []
+    before = checkout_fingerprint()
+
+    class TemporaryDirectory:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            export.mkdir()
+
+        def __enter__(self) -> str:
+            return str(export)
+
+        def __exit__(self, *_args: object) -> None:
+            import shutil
+
+            shutil.rmtree(export)
+
+    def export_repository(_destination: Path) -> int:
+        return 1
+
+    def select_steps(_skip_e2e: bool) -> list[tuple[str, tuple[str, ...]]]:
+        return [("first", ("tool", "first")), ("never", ("tool", "never"))]
+
+    def run_steps(
+        _destination: Path, _steps: Sequence[tuple[str, tuple[str, ...]]]
+    ) -> list[tuple[str, int]]:
+        return [("first", 9)]
+
+    monkeypatch.setattr(clean_check.tempfile, "TemporaryDirectory", TemporaryDirectory)
+    monkeypatch.setattr(clean_check, "export_repository", export_repository)
+    monkeypatch.setattr(clean_check, "initialize_repository", initialized.append)
+    monkeypatch.setattr(clean_check, "select_steps", select_steps)
+    monkeypatch.setattr(clean_check, "run_steps", run_steps)
+
+    assert clean_check.main([]) == 1
+    output = capsys.readouterr().out
+    assert "first: FAIL (exit 9)" in output
+    assert "never" not in output
+    assert initialized == [export]
+    assert not export.exists()
+    assert checkout_fingerprint() == before
 
 
 def test_skip_e2e_removes_only_the_browser_step() -> None:

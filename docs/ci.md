@@ -49,7 +49,7 @@ It is a CI-runner concern and is deliberately absent from local bootstrap; see
 
 ## The `check` versus `e2e` split
 
-`scripts/check.py` exposes five groups:
+`scripts/check.py` exposes six command groups:
 
 | Group | Contents |
 | --- | --- |

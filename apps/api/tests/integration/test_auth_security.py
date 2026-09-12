@@ -2,13 +2,19 @@
 
 # pyright: reportUnknownMemberType=false, reportUnknownVariableType=false
 
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from nervos_api.api.cookies import SESSION_COOKIE_NAME
 from nervos_api.app import create_app
 from nervos_api.config import Settings
+from nervos_core.application.authentication import PersistenceUnavailable
+from nervos_core.infrastructure.database.models import AuthSessionRecord, UserRecord
+from sqlalchemy import func, select
 
 ORIGIN = {"Origin": "http://localhost:5173"}
 PASSWORD = "correct horse battery staple"
@@ -165,20 +171,47 @@ def test_production_unhandled_error_does_not_expose_stack_trace(tmp_path: Path) 
     assert response.headers["referrer-policy"] == "no-referrer"
 
 
-def test_persistence_failures_use_safe_service_unavailable_envelope(
+@pytest.mark.parametrize(
+    ("method", "path", "service_method", "request_kwargs"),
+    [
+        pytest.param("get", "/api/v1/setup/status", "setup_is_complete", {}, id="setup-status"),
+        pytest.param(
+            "post",
+            "/api/v1/setup",
+            "setup",
+            {"headers": ORIGIN, "json": {"username": "admin", "password": PASSWORD}},
+            id="setup",
+        ),
+        pytest.param(
+            "post",
+            "/api/v1/auth/login",
+            "login",
+            {"headers": ORIGIN, "json": {"username": "admin", "password": PASSWORD}},
+            id="login",
+        ),
+        pytest.param("get", "/api/v1/auth/me", "authenticate", {}, id="current-user"),
+        pytest.param("post", "/api/v1/auth/logout", "logout", {"headers": ORIGIN}, id="logout"),
+    ],
+)
+def test_auth_persistence_failures_use_safe_service_unavailable_envelope(
     client: TestClient,
     migrated_app: tuple[FastAPI, Settings],
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    path: str,
+    service_method: str,
+    request_kwargs: dict[str, Any],
 ) -> None:
-    from nervos_core.application.authentication import PersistenceUnavailable
-
     app, _ = migrated_app
+    if service_method in {"authenticate", "logout"}:
+        client.cookies.set(SESSION_COOKIE_NAME, "A" * 43)
 
-    class UnavailableAuthenticationService:
-        def setup_is_complete(self) -> bool:
-            raise PersistenceUnavailable
+    def unavailable(*_args: object, **_kwargs: object) -> None:
+        raise PersistenceUnavailable("SENSITIVE-DATABASE-SENTINEL")
 
-    app.state.authentication_service = UnavailableAuthenticationService()
-    response = client.get("/api/v1/setup/status")
+    monkeypatch.setattr(app.state.authentication_service, service_method, unavailable)
+    request: Callable[..., Any] = getattr(client, method)
+    response = request(path, **request_kwargs)
 
     assert response.status_code == 503
     assert response.json() == {
@@ -192,6 +225,12 @@ def test_persistence_failures_use_safe_service_unavailable_envelope(
     assert response.headers["referrer-policy"] == "no-referrer"
     assert "set-cookie" not in response.headers
     assert "PersistenceUnavailable" not in response.text
+    assert "SENSITIVE-DATABASE-SENTINEL" not in response.text
+    assert PASSWORD not in response.text
+    assert "A" * 43 not in response.text
+    with app.state.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(UserRecord)) == 0
+        assert session.scalar(select(func.count()).select_from(AuthSessionRecord)) == 0
 
 
 def test_credential_body_size_boundary_rejects_missing_and_oversized() -> None:
