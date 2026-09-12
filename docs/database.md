@@ -44,7 +44,7 @@ Named constraints: `pk_auth_sessions`, `fk_auth_sessions_user_id_users`, `uq_aut
 
 Named indexes: `ix_auth_sessions_user_id` and `ix_auth_sessions_expires_at`.
 
-SQLite does not enforce the declared BLOB length. A3 will be responsible for producing an exact digest and will never store a raw session token.
+SQLite does not enforce the declared BLOB length. A3 produces an exact digest and never stores a raw session token.
 
 ## Migrations
 

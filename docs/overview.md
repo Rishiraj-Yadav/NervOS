@@ -1,5 +1,9 @@
 # NervOS Overview
 
+## Status
+
+This document describes the target product architecture. Only the Stage A subset exists today; read `docs/implementation-status.md` to see what is actually implemented.
+
 ## One-line definition
 
 NervOS is a self-hosted runtime and management platform for installing, executing, scheduling, monitoring, and controlling AI agents on user-owned hardware.

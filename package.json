@@ -10,6 +10,7 @@
   "scripts": {
     "build": "pnpm --filter @nervos/web build",
     "dev:web": "pnpm --filter @nervos/web dev",
+    "e2e": "pnpm --filter @nervos/web e2e",
     "lint": "pnpm --filter @nervos/web lint",
     "test": "pnpm --filter @nervos/web test",
     "typecheck": "pnpm --filter @nervos/web typecheck"

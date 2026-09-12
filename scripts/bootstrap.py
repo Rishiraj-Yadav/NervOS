@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import re
 import shutil
 import subprocess
@@ -14,6 +15,8 @@ MINIMUM_PYTHON = (3, 12)
 MINIMUM_NODE = (22, 12)
 MAXIMUM_NODE_MAJOR = 25
 PNPM_MAJOR = 10
+# Keep in step with the uv version pinned in .github/workflows/ci.yml.
+MINIMUM_UV = (0, 9, 15)
 
 
 def require_command(name: str) -> str:
@@ -56,6 +59,11 @@ def validate_prerequisites() -> tuple[str, str]:
     node = require_command("node")
     pnpm = require_command("pnpm")
 
+    uv_version = read_version(uv, "--version")
+    if uv_version < MINIMUM_UV:
+        minimum = ".".join(str(part) for part in MINIMUM_UV)
+        raise SystemExit(f"NervOS requires uv {minimum} or newer.")
+
     node_version = read_version(node, "--version")
     if node_version < MINIMUM_NODE or node_version[0] >= MAXIMUM_NODE_MAJOR:
         raise SystemExit("NervOS requires Node.js >=22.12 and <25 for Stage A.")
@@ -67,12 +75,28 @@ def validate_prerequisites() -> tuple[str, str]:
     return uv, pnpm
 
 
-def main() -> int:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Parse bootstrap options."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--skip-browser",
+        action="store_true",
+        help="Install dependencies only; skip Playwright Chromium provisioning.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
     """Install locked dependencies into project-local environments."""
+    args = parse_args(argv)
     uv, pnpm = validate_prerequisites()
     run([uv, "sync", "--frozen", "--all-packages"])
     run([pnpm, "install", "--frozen-lockfile"])
-    print("NervOS Stage A dependencies are ready.")
+    if args.skip_browser:
+        print("NervOS Stage A dependencies are ready (Playwright Chromium skipped).")
+        return 0
+    run([pnpm, "--dir", "apps/web", "exec", "playwright", "install", "chromium"])
+    print("NervOS Stage A dependencies and Playwright Chromium are ready.")
     return 0
 
 

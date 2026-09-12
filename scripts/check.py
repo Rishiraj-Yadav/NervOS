@@ -1,4 +1,4 @@
-"""Run the repository checks available through Stage A2."""
+"""Run the repository check groups owned by the Stage A tooling."""
 
 from __future__ import annotations
 
@@ -24,8 +24,13 @@ CHECKS: dict[str, tuple[tuple[str, ...], ...]] = {
         ("uv", "run", "pytest"),
         ("pnpm", "test"),
     ),
+    "security": (("uv", "run", "python", "scripts/security_scan.py"),),
+    "e2e": (("uv", "run", "python", "scripts/e2e.py"),),
 }
-CHECKS["check"] = CHECKS["lint"] + CHECKS["typecheck"] + CHECKS["test"]
+# `check` is everything fast, offline and deterministic: no browser and no
+# process-spawning service orchestration. The deterministic Playwright journey
+# stays in its own `e2e` group so routine work never needs Chromium.
+CHECKS["check"] = CHECKS["lint"] + CHECKS["typecheck"] + CHECKS["test"] + CHECKS["security"]
 
 
 def resolve_command(command: Sequence[str]) -> list[str]:

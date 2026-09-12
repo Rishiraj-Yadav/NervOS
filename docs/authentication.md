@@ -51,7 +51,7 @@ Credential and session responses use `Cache-Control: no-store`.
 | `POST /api/v1/auth/logout` | Revoke current session when present, clear cookie; always `204`. |
 | `GET /api/v1/auth/me` | Return safe current-user data; otherwise generic `401`. |
 
-Every unsafe `/api/v1` request must include an `Origin` header exactly equal to `NERVOS_APP_ORIGIN`. Missing, duplicate, `null`, wildcard, malformed, and mismatched origins return `403 invalid_origin` before body, credential, or database work. Setup and login accept only `application/json` and credential bodies are limited to 4096 received bytes before downstream parsing. A3 does not add CORS; the future dashboard will use same-origin API access/development proxying.
+Every unsafe `/api/v1` request must include an `Origin` header exactly equal to `NERVOS_APP_ORIGIN`. Missing, duplicate, `null`, wildcard, malformed, and mismatched origins return `403 invalid_origin` before body, credential, or database work. Setup and login accept only `application/json` and credential bodies are limited to 4096 received bytes before downstream parsing. A3 does not add CORS; the dashboard uses same-origin API access through the Vite development proxy.
 
 API responses include `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`. See ADR 0006 for the security-boundary decision.
 

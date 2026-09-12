@@ -34,6 +34,12 @@ Blocks a deliberately small set of obviously destructive commands such as force-
 
 This complements Claude Code permission rules; it does not replace them.
 
+### `pretool_sensitive_read.py`
+
+Event: `PreToolUse` for Read.
+
+Blocks reads of `.env` files (except `.env.example`), `secrets/` paths, and `.ssh` paths before the file is read.
+
 ### `prewrite_secret_scan.py`
 
 Event: `PreToolUse` for Edit/Write.
@@ -54,6 +60,15 @@ Performs extremely fast validation only:
 If validation fails it adds context telling Claude to fix the file.
 
 It does NOT replace `pytest`, Ruff, Pyright, frontend tests, TypeScript checks, or E2E.
+
+## Placeholder scripts
+
+Two files in `.claude/hooks/scripts/` are empty placeholders and are NOT wired to any hook event in `.claude/settings.json`:
+
+- `check-secrets.py`
+- `check-generated-files.py`
+
+They have been superseded by the repository-owned tracked-file scanner at `scripts/security_scan.py`, documented in `docs/ci.md`. Use that scanner rather than these placeholders.
 
 ## Hook design rules for NervOS
 
