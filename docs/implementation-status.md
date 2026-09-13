@@ -2,17 +2,17 @@
 
 ## Current phase
 
-Stage B — Trusted-agent runtime proof (B1 domain/persistence and B2 internal one-call execution implemented; B3–B4 are not implemented)
+Stage B — Trusted-agent runtime proof (B1 domain/persistence, B2 internal one-call execution, and B3 trusted Agent/Run HTTP API with the minimal Chat dashboard interaction are implemented; B4 is not implemented)
 
 ## Stage B milestones
 
 - [x] B0 — Scope freeze and first trusted-agent architecture
 - [x] B1 — Agent-instance and run domain/persistence
 - [x] B2 — Model adapter, process-secret foundation, and bounded proof runner
-- [ ] B3 — Trusted Chat Agent API and minimal dashboard interaction
+- [x] B3 — Trusted Chat Agent API and minimal dashboard interaction
 - [ ] B4 — Provider portability, usage accounting, and final Stage B acceptance
 
-B0 is a documentation/governance milestone. ADR 0007 freezes a one-shot trusted `nervos.chat` definition identified by exact key/version, explicit user-owned instances, immutable-snapshot Runs, a narrow application-owned model port, process-only provider credentials, one bounded model call, the `created -> running -> succeeded|failed` lifecycle, and an awaited API-process proof runner. B1 implements the domain/persistence foundation, and B2 implements the internal Anthropic execution path. B3 HTTP resources and Chat UI are not implemented.
+B0 is a documentation/governance milestone. ADR 0007 freezes a one-shot trusted `nervos.chat` definition identified by exact key/version, explicit user-owned instances, immutable-snapshot Runs, a narrow application-owned model port, process-only provider credentials, one bounded model call, the `created -> running -> succeeded|failed` lifecycle, and an awaited API-process proof runner. B1 implements the domain/persistence foundation, B2 implements the internal Anthropic execution path, and B3 exposes that same path over an authenticated, owner-scoped HTTP API with a minimal trusted Chat UI. B4 is not implemented.
 
 ## Stage A milestones
 
@@ -208,11 +208,29 @@ Automatic verification uses deterministic fakes and temporary SQLite only. Focus
 
 `REAL PROVIDER PROOF NOT EXECUTED — CREDENTIAL/ACCESS UNAVAILABLE`
 
+## B3 implementation verification
+
+B3 exposes the already-proven B2 execution path as authenticated HTTP resources plus a minimal trusted Chat dashboard interaction. It adds no schema change (head remains `0002`), no migration, no new dependency, no second execution path, and no new execution capability.
+
+Implemented: owner-scoped `GET/POST /api/v1/agent-instances`, `GET/PATCH /api/v1/agent-instances/{id}`, `POST/GET /api/v1/agent-instances/{id}/runs`, and `GET /api/v1/runs/{id}`; four thin `AgentService` read pass-throughs; a dedicated Agent/Run error map; an explicit per-route content-type/body-size rule layered onto the existing credentialed-route controls without changing them; a `Cache-Control: no-store` default on versioned API responses; the `/agents` and `/agents/:agentInstanceId` pages; and the `RunItem` persisted-Run card.
+
+A foreign id and a nonexistent id are indistinguishable: the instance `GET`/`PATCH`, the run `GET`, the instance's run-creation `POST`, and the instance's run-list `GET` all return the identical 404 body. The nested run list resolves the owned parent before reading any Run, so an owned instance with no Runs is a `200` empty page rather than a not-found, and a foreign instance's history is a `404` rather than a misleading empty page.
+
+Frozen contract properties: the B3 API permits creation only for the exact `nervos.chat@1` pair; an unknown provider is rejected on creation **and** configuration update while a known-but-unconfigured provider is accepted at configuration time; a `PATCH` is exactly one of two shapes and performs exactly one committed application write; `usage` is null exactly when nothing trustworthy was persisted and `total_tokens` is never derived; a persisted `failed` Run is returned as 201 with the Run body, never as a 5xx; and `POST …/runs` is the only route that creates a Run.
+
+One user submission is one independent Run. The fixed instruction plus the current text is all that is sent; no prior Run's input or output ever becomes model context, and there is no `conversation_id`, `session_id`, or Message record. This is proven by a test asserting that a second Run's observed model request contains only the second input.
+
+Verification: focused application, API, architecture, and frontend tests; migration upgrade/current/check/downgrade/re-upgrade on a disposable database confirming exactly two revisions and no schema drift; the full Python suite; frontend lint/typecheck/test/build; both security-scanner modes; the canonical `scripts/check.py check` gate; two consecutive deterministic E2E journeys, each on its own fresh temporary database; and the isolated `scripts/clean_check.py` gate. The default NervOS database remained absent throughout.
+
+The browser journey runs against a real API subprocess whose supervisor launches a test-only ASGI factory outside the shipped packages and explicitly removes `ANTHROPIC_API_KEY` from the child environment, so automated E2E cannot consume a real credential. Production composition (`nervos_api.main:app`) and `scripts/dev.py` are unchanged.
+
+`REAL PROVIDER PROOF NOT EXECUTED — CREDENTIAL/ACCESS UNAVAILABLE`
+
 ## Next action
 
-B2 IMPLEMENTATION REVIEW
+B3 IMPLEMENTATION REVIEW
 
-B3 requires separate planning and authorization; it does not begin automatically.
+B3 was implemented and verified under an explicit authorization and remains uncommitted pending external implementation review. B4 requires separate planning and authorization; it does not begin automatically.
 
 ## Maintenance rule
 

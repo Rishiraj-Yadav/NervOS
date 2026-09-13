@@ -1,4 +1,6 @@
 import {
+  AgentInstanceRoute,
+  AgentInstancesRoute,
   HomeRoute,
   LoginRoute,
   NotFoundRoute,
@@ -15,6 +17,8 @@ export const appRoutes: RouteObject[] = [
       { path: "/setup", element: <SetupRoute /> },
       { path: "/login", element: <LoginRoute /> },
       { path: "/dashboard", element: <HomeRoute /> },
+      { path: "/agents", element: <AgentInstancesRoute /> },
+      { path: "/agents/:agentInstanceId", element: <AgentInstanceRoute /> },
     ],
   },
   { path: "*", element: <NotFoundRoute /> },

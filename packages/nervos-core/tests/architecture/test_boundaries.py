@@ -1,14 +1,40 @@
-"""Architecture regression tests for the Stage A package boundaries."""
+"""Architecture regression tests for the NervOS package boundaries."""
 
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]
 CORE_SOURCE = ROOT / "packages" / "nervos-core" / "src" / "nervos_core"
 MODELS_SOURCE = ROOT / "packages" / "nervos-models" / "src" / "nervos_models"
 API_SOURCE = ROOT / "apps" / "api" / "src" / "nervos_api"
+API_ROUTES = API_SOURCE / "api" / "routes"
+FRONTEND_SOURCE = ROOT / "apps" / "web" / "src"
+ORM_MODELS = CORE_SOURCE / "infrastructure" / "database" / "models.py"
+
+EXPECTED_TABLES = {"users", "auth_sessions", "agent_instances", "runs"}
+FORBIDDEN_SUBSYSTEMS = (
+    "conversation",
+    "message",
+    "thread",
+    "job",
+    "attempt",
+    "queue",
+    "worker",
+    "lease",
+    "heartbeat",
+    "stream",
+    "sse",
+    "websocket",
+    "mcp",
+    "tool",
+    "schedule",
+    "cron",
+    "webhook",
+    "marketplace",
+)
 
 
 def imported_modules(path: Path) -> set[str]:
@@ -74,15 +100,85 @@ def test_provider_sdk_exists_only_in_the_models_infrastructure_package() -> None
     )
 
 
-def test_b2_does_not_add_agent_or_run_http_routes_or_a_new_migration() -> None:
-    router_text = (API_SOURCE / "api" / "router.py").read_text(encoding="utf-8")
-    assert "agent" not in router_text.lower()
-    assert "run" not in router_text.lower()
+def test_api_routes_never_reach_persistence_or_a_provider_adapter() -> None:
+    """Route modules depend on application services, never on storage or a provider SDK."""
+    for path in python_files(API_ROUTES):
+        imports = imported_modules(path)
+        text = path.read_text(encoding="utf-8")
+
+        assert not any(module.startswith("sqlalchemy") for module in imports), path
+        assert not any(module.startswith("nervos_core.infrastructure") for module in imports), path
+        assert not any(module.startswith(("anthropic", "nervos_models")) for module in imports), (
+            path
+        )
+        for forbidden in ("AgentPersistence", "SqlAlchemyAgentPersistence", "Session", "Base"):
+            assert forbidden not in text, (path, forbidden)
+
+
+def test_b3_route_surface_and_migration_freeze() -> None:
+    """The B3 surface is exactly the approved resources, and the schema is unchanged."""
+    router_text = (API_SOURCE / "api" / "router.py").read_text(encoding="utf-8").lower()
+    for subsystem in FORBIDDEN_SUBSYSTEMS:
+        assert subsystem not in router_text, subsystem
+    assert "agent_instances_router" in router_text
+    assert "runs_router" in router_text
+
     migrations = sorted((ROOT / "apps" / "api" / "alembic" / "versions").glob("*.py"))
     assert [path.name for path in migrations] == [
         "0001_stage_a_schema.py",
         "0002_stage_b1_agent_instances_runs.py",
     ]
+
+
+def test_only_one_run_coordinator_execution_call_exists() -> None:
+    """Exactly one canonical execution path: no route may drive the coordinator itself."""
+    calls = sum(
+        path.read_text(encoding="utf-8").count("coordinator.execute(")
+        for path in python_files(API_ROUTES)
+    )
+
+    assert calls == 1
+
+
+def test_b3_creation_gate_pins_the_shared_trusted_definition() -> None:
+    """The creatable definition must come from the trusted handler identity, not a new literal."""
+    source = (API_ROUTES / "agent_instances.py").read_text(encoding="utf-8")
+
+    assert "CHAT_DEFINITION_ID" in source
+    assert "nervos.chat" not in source
+
+
+def test_no_conversation_message_or_execution_engine_schema_is_introduced() -> None:
+    """B3 adds no persistence: the application has exactly the four accepted tables."""
+    tables = set(re.findall(r'__tablename__ = "([a-z_]+)"', ORM_MODELS.read_text(encoding="utf-8")))
+
+    assert tables == EXPECTED_TABLES
+    for forbidden in FORBIDDEN_SUBSYSTEMS:
+        assert forbidden not in tables, forbidden
+
+    core_module_names = " ".join(path.name for path in python_files(CORE_SOURCE))
+    for forbidden in ("conversation", "message", "job", "attempt", "worker", "stream"):
+        assert forbidden not in core_module_names, forbidden
+
+
+def test_frontend_never_references_a_provider_credential_or_sdk() -> None:
+    for path in sorted(FRONTEND_SOURCE.rglob("*")):
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for forbidden in ("ANTHROPIC_API_KEY", "api_key", "nervos_models", "@anthropic-ai"):
+            assert forbidden not in text, (path, forbidden)
+
+
+def test_production_composition_cannot_reach_the_test_only_provider() -> None:
+    """The deterministic double lives outside shipped packages and is never referenced by them."""
+    for path in python_files(API_SOURCE):
+        text = path.read_text(encoding="utf-8")
+        for forbidden in ("e2e_support", "e2e_app", "DeterministicCompletion"):
+            assert forbidden not in text, (path, forbidden)
+
+    main_source = (API_SOURCE / "main.py").read_text(encoding="utf-8")
+    assert "create_app" in main_source
 
 
 def test_base_metadata_create_all_is_not_used() -> None:

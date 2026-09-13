@@ -2,7 +2,7 @@
 
 ## Status
 
-This document describes the target product architecture. Only the Stage A subset exists today; read `docs/implementation-status.md` to see what is actually implemented.
+This document describes the target product architecture. Read `docs/implementation-status.md` to see what is actually implemented. As of B3, the implemented subset is the Stage A foundation plus the trusted one-shot Chat path: owner-scoped Agent Instance and Run HTTP resources and a minimal dashboard interaction, backed by the single `nervos.chat@1` definition and one provider adapter.
 
 ## One-line definition
 

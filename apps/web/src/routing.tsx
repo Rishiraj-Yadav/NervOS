@@ -2,6 +2,8 @@ import { ApiHttpError } from "./api/client";
 import { currentUserQuery, setupStatusQuery } from "./api/queries";
 import type { User } from "./api/types";
 import { ErrorState, LoadingState } from "./components/AsyncState";
+import { AgentInstancePage } from "./pages/AgentInstancePage";
+import { AgentInstancesPage } from "./pages/AgentInstancesPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { LoginPage } from "./pages/LoginPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
@@ -57,11 +59,19 @@ export function LoginRoute() {
   return <SessionView page="login" />;
 }
 
+export function AgentInstancesRoute() {
+  return <SessionView page="agents" />;
+}
+
+export function AgentInstanceRoute() {
+  return <SessionView page="agent" />;
+}
+
 export function NotFoundRoute() {
   return <NotFoundPage />;
 }
 
-function SessionView({ page }: { page: "home" | "setup" | "login" | "not-found" }) {
+function SessionView({ page }: { page: "home" | "setup" | "login" | "agents" | "agent" }) {
   const session = useOutletContext<Session>();
   const location = useLocation();
 
@@ -76,8 +86,11 @@ function SessionView({ page }: { page: "home" | "setup" | "login" | "not-found" 
   if (page === "home") {
     return <DashboardPage user={session.user} />;
   }
-  if (page === "not-found") {
-    return <NotFoundPage />;
+  if (page === "agents") {
+    return <AgentInstancesPage />;
+  }
+  if (page === "agent") {
+    return <AgentInstancePage />;
   }
   return <Navigate to="/" replace />;
 }

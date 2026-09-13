@@ -69,6 +69,21 @@ Responsible for management rather than executing agent work:
 - marketplace management
 - health/status endpoints
 
+### Implemented API surface today
+
+Beyond health, setup, and authentication, the API currently serves exactly two owner-scoped resources, delivered by B3:
+
+```text
+/api/v1/agent-instances
+/api/v1/agent-instances/{agent_instance_id}
+/api/v1/agent-instances/{agent_instance_id}/runs
+/api/v1/runs/{run_id}
+```
+
+Routes depend on **application services** (`AgentService`, `RunCoordinator`, `ModelProviderCatalog`) resolved from `app.state`. No route module imports SQLAlchemy, `nervos_core.infrastructure`, `anthropic`, or `nervos_models`, and exactly one route calls `RunCoordinator.execute` — the single canonical execution path. Architecture tests enforce both properties.
+
+Everything else in this document — registry, installation, schedules, workers, tools, memory, permissions, Marketplace, SDK — remains target architecture.
+
 ## Execution plane
 
 Responsible for performing agent work:
@@ -113,7 +128,7 @@ Future MCP integration and tool-gateway abstractions.
 
 ### `packages/nervos-models`
 
-Future model-provider interface and adapters.
+Model-provider interface and adapters. It currently holds the single implemented provider adapter, canonical ID `anthropic`. Provider-SDK imports are confined to this package; core domain/application remain provider-SDK-free.
 
 ## Permanent domain distinctions
 
