@@ -19,6 +19,9 @@ from nervos_core.application.agents import (
     RunTransitionRejected,
 )
 from nervos_core.application.errors import PersistenceUnavailable
+from nervos_core.application.model_completion import ModelRequest, ModelResponse, StopOutcome
+from nervos_core.application.model_providers import ModelProviderCatalog
+from nervos_core.application.trusted_chat import create_builtin_handler_registry
 from nervos_core.domain.agents import AgentDefinitionId
 from nervos_core.domain.runs import STAGE_B_LIMITS, InvalidRun, ModelUsage, Run, RunStatus
 from nervos_core.infrastructure.database import create_session_factory, create_sqlite_engine
@@ -39,6 +42,14 @@ def database_metadata(path: Path) -> tuple[bool, int | None, int | None]:
         return False, None, None
     stat = path.stat()
     return True, stat.st_size, stat.st_mtime_ns
+
+
+class _FakeCompletion:
+    """Test-only provider used only to resolve preflight; it is never invoked here."""
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:  # pragma: no cover
+        del request
+        return ModelResponse("fixed", "test-provider", "Org/Model:v1", StopOutcome.STOP)
 
 
 @pytest.fixture(autouse=True)
@@ -81,7 +92,23 @@ def persistence(
             ]
         )
     adapter = SqlAlchemyAgentPersistence(factory)
-    yield adapter, AgentService(adapter, create_builtin_definition_registry(), lambda: NOW), factory
+    handlers = create_builtin_handler_registry()
+    providers = ModelProviderCatalog(
+        [
+            ("test-provider", _FakeCompletion),
+            ("new-provider", _FakeCompletion),
+            ("old-provider", _FakeCompletion),
+            ("other-provider", _FakeCompletion),
+        ],
+        known=["test-provider", "new-provider", "old-provider", "other-provider"],
+    )
+    yield (
+        adapter,
+        AgentService(
+            adapter, create_builtin_definition_registry(), lambda: NOW, handlers, providers
+        ),
+        factory,
+    )
     engine.dispose()
 
 

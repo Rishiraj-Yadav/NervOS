@@ -11,6 +11,8 @@ VARIABLES = (
     "NERVOS_DATABASE_PATH",
     "NERVOS_APP_ORIGIN",
     "NERVOS_LOG_LEVEL",
+    "ANTHROPIC_API_KEY",
+    "NERVOS_ANTHROPIC_API_KEY",
 )
 
 
@@ -18,6 +20,31 @@ VARIABLES = (
 def clear_nervos_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     for variable in VARIABLES:
         monkeypatch.delenv(variable, raising=False)
+
+
+def test_anthropic_credential_uses_exact_external_alias_and_is_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    credential = "synthetic-test-credential"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", credential)
+    settings = Settings()
+    assert settings.anthropic_api_key is not None
+    assert settings.anthropic_api_key.get_secret_value() == credential
+    assert credential not in repr(settings)
+    assert credential not in str(settings.model_dump())
+
+
+def test_prefixed_anthropic_variable_is_not_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NERVOS_ANTHROPIC_API_KEY", "must-not-be-read")
+    assert Settings().anthropic_api_key is None
+
+
+@pytest.mark.parametrize("value", ["", " ", "\t\r\n"])
+def test_blank_anthropic_credential_is_unavailable(
+    value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", value)
+    assert Settings().anthropic_api_key is None
 
 
 def test_defaults_are_validated_without_creating_database() -> None:

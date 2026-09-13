@@ -1,1 +1,19 @@
-# Future model-provider package. Excluded from the Stage A1 uv workspace.
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nervos-models"
+version = "0.1.0"
+description = "NervOS concrete model-provider adapters"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=1.5,<2",
+    "nervos-core",
+]
+
+[tool.uv.sources]
+nervos-core = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nervos_models"]

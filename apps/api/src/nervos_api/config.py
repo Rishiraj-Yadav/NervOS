@@ -7,11 +7,15 @@ from pathlib import Path
 from typing import Literal, Self
 from urllib.parse import urlsplit
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["development", "test", "production"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
+
+# Exact external variable name read for the first provider credential. The `NERVOS_`
+# prefix is deliberately bypassed so the operator's standard process variable is used.
+ANTHROPIC_API_KEY_VARIABLE = "ANTHROPIC_API_KEY"
 
 
 class Settings(BaseSettings):
@@ -28,6 +32,20 @@ class Settings(BaseSettings):
     database_path: Path = Path("~/.nervos/nervos.db")
     app_origin: str = "http://localhost:5173"
     log_level: LogLevel = "INFO"
+    anthropic_api_key: SecretStr | None = Field(
+        default=None, validation_alias=ANTHROPIC_API_KEY_VARIABLE
+    )
+
+    @field_validator("anthropic_api_key", mode="before")
+    @classmethod
+    def normalize_anthropic_api_key(cls, value: object) -> object:
+        """Treat an absent, empty, or whitespace-only credential as unconfigured."""
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return value
 
     @field_validator("database_path", mode="before")
     @classmethod
