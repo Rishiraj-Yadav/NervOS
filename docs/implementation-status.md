@@ -2,12 +2,12 @@
 
 ## Current phase
 
-Stage B — Trusted-agent runtime proof (B0 architecture freeze only; B1–B4 are not implemented)
+Stage B — Trusted-agent runtime proof (B1 domain/persistence implemented; B2–B4 are not implemented)
 
 ## Stage B milestones
 
 - [x] B0 — Scope freeze and first trusted-agent architecture
-- [ ] B1 — Agent-instance and run domain/persistence
+- [x] B1 — Agent-instance and run domain/persistence
 - [ ] B2 — Model adapter, process-secret foundation, and bounded proof runner
 - [ ] B3 — Trusted Chat Agent API and minimal dashboard interaction
 - [ ] B4 — Provider portability, usage accounting, and final Stage B acceptance
@@ -194,11 +194,17 @@ B0 was implemented as documentation/governance only. ADR 0007 and the Stage B ro
 
 Verification included focused governance tests, both repository security-scan modes, `git diff --check`, the canonical `scripts/check.py check` gate, and the full isolated `scripts/clean_check.py` gate. No source, runtime, migration, route, frontend product UI, provider dependency, secret storage, queue/worker, tool, memory, scheduler, package, SDK, or Marketplace behavior was added.
 
+## B1 implementation verification
+
+B1 implements the exact-version built-in definition resolver, explicit owner-scoped Agent Instances, immutable-snapshot Runs, four-state conditional persistence, the additive `0002_stage_b1_agent_instances_runs` migration, and the narrow provider-neutral model completion contract. It adds no provider, execution coordinator, API, UI, Job, tool, memory, package, or secret behavior.
+
+Verification includes focused domain and persistence tests, migration upgrade/current/check/downgrade/re-upgrade on disposable databases, the canonical repository check, both security scanner modes, two deterministic E2E regressions, and isolated clean-check. `FIRST PROVIDER DECISION REQUIRED BEFORE B2`.
+
 ## Next action
 
-B0 IMPLEMENTATION REVIEW
+B1 IMPLEMENTATION REVIEW
 
-B1 requires separate explicit planning and authorization; it does not begin automatically.
+B2 requires separate explicit planning and authorization; it does not begin automatically.
 
 ## Maintenance rule
 

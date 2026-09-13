@@ -1,13 +1,18 @@
 """Metadata tests for the Stage A persistence records."""
 
 from nervos_core.infrastructure.database.base import Base
-from nervos_core.infrastructure.database.models import AuthSessionRecord, UserRecord
+from nervos_core.infrastructure.database.models import (
+    AgentInstanceRecord,
+    AuthSessionRecord,
+    RunRecord,
+    UserRecord,
+)
 from nervos_core.infrastructure.database.types import UTCDateTime
 from sqlalchemy import Boolean, LargeBinary, Table
 
 
 def test_metadata_contains_exact_application_tables() -> None:
-    assert set(Base.metadata.tables) == {"users", "auth_sessions"}
+    assert set(Base.metadata.tables) == {"users", "auth_sessions", "agent_instances", "runs"}
 
 
 def test_user_metadata_matches_a2_contract() -> None:
@@ -36,6 +41,23 @@ def test_user_metadata_matches_a2_contract() -> None:
         "ck_users_role_nonempty",
         "ck_users_timestamp_order",
     }
+
+
+def test_b1_metadata_has_exact_indexes_and_restrictive_foreign_keys() -> None:
+    instance_table = AgentInstanceRecord.__table__
+    run_table = RunRecord.__table__
+    assert isinstance(instance_table, Table)
+    assert isinstance(run_table, Table)
+    assert {index.name for index in instance_table.indexes} == {
+        "ix_agent_instances_owner_user_id_id"
+    }
+    assert {index.name for index in run_table.indexes} == {"ix_runs_agent_instance_id_id"}
+    assert {fk.ondelete for fk in instance_table.foreign_keys} == {"RESTRICT"}
+    assert {fk.ondelete for fk in run_table.foreign_keys} == {"RESTRICT"}
+    assert not any(
+        constraint.__class__.__name__ == "UniqueConstraint"
+        for constraint in instance_table.constraints
+    )
 
 
 def test_auth_session_metadata_matches_a2_contract() -> None:
