@@ -8,6 +8,8 @@ from typing import Protocol
 
 from nervos_core.application.agent_definitions import AgentDefinitionResolver
 from nervos_core.application.clock import Clock, require_utc
+from nervos_core.application.model_providers import ModelProviderCatalog
+from nervos_core.application.trusted_chat import TrustedAgentHandlerResolver
 from nervos_core.domain.agents import (
     AgentDefinitionId,
     AgentInstance,
@@ -115,11 +117,18 @@ class AgentPersistence(Protocol):
 
 class AgentService:
     def __init__(
-        self, persistence: AgentPersistence, definitions: AgentDefinitionResolver, clock: Clock
+        self,
+        persistence: AgentPersistence,
+        definitions: AgentDefinitionResolver,
+        clock: Clock,
+        handlers: TrustedAgentHandlerResolver | None = None,
+        providers: ModelProviderCatalog | None = None,
     ) -> None:
         self._persistence = persistence
         self._definitions = definitions
         self._clock = clock
+        self._handlers = handlers
+        self._providers = providers
 
     def create_instance(
         self,
@@ -163,10 +172,30 @@ class AgentService:
             owner_user_id, instance_id, enabled, require_utc(self._clock())
         )
 
-    def create_run(self, owner_user_id: int, instance_id: int, input_text: str) -> Run:
+    def create_run(
+        self,
+        owner_user_id: int,
+        instance_id: int,
+        input_text: str,
+        handlers: TrustedAgentHandlerResolver | None = None,
+        providers: ModelProviderCatalog | None = None,
+    ) -> Run:
+        """Insert one `created` Run snapshot after every known pre-run check passes.
+
+        Handler resolution, provider resolution, and provider configuration availability are
+        verified before the insert, so a known pre-run rejection persists no Run at all. The
+        insert itself re-checks ownership, enabled state, and exact definition identity
+        atomically.
+        """
         instance = self._persistence.get_instance(owner_user_id, instance_id)
         definition = self._definitions.resolve(instance.definition_id)
         limits = definition.limits
+        resolved_handlers = handlers or self._handlers
+        resolved_providers = providers or self._providers
+        if resolved_handlers is None or resolved_providers is None:
+            raise RuntimeError("agent execution resolvers are not configured")
+        resolved_handlers.resolve(instance.definition_id)
+        resolved_providers.resolve(instance.model_provider)
         validate_input_text(input_text, limits)
         return self._persistence.create_run_for_owned_instance(
             owner_user_id,
@@ -176,6 +205,10 @@ class AgentService:
             limits,
             require_utc(self._clock()),
         )
+
+    def start(self, owner_user_id: int, run_id: int) -> Run:
+        """Atomically transition an owned `created` Run to `running` and return it."""
+        return self._persistence.mark_running(owner_user_id, run_id, require_utc(self._clock()))
 
     def succeed(
         self,

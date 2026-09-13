@@ -2,17 +2,17 @@
 
 ## Current phase
 
-Stage B — Trusted-agent runtime proof (B1 domain/persistence implemented; B2–B4 are not implemented)
+Stage B — Trusted-agent runtime proof (B1 domain/persistence and B2 internal one-call execution implemented; B3–B4 are not implemented)
 
 ## Stage B milestones
 
 - [x] B0 — Scope freeze and first trusted-agent architecture
 - [x] B1 — Agent-instance and run domain/persistence
-- [ ] B2 — Model adapter, process-secret foundation, and bounded proof runner
+- [x] B2 — Model adapter, process-secret foundation, and bounded proof runner
 - [ ] B3 — Trusted Chat Agent API and minimal dashboard interaction
 - [ ] B4 — Provider portability, usage accounting, and final Stage B acceptance
 
-B0 is a documentation/governance milestone. ADR 0007 freezes a one-shot trusted `nervos.chat` definition identified by exact key/version, explicit user-owned instances, immutable-snapshot Runs, a narrow application-owned model port, process-only provider credentials, one bounded model call, the `created -> running -> succeeded|failed` lifecycle, and an awaited API-process proof runner. No Agent Instance, Run, provider adapter, API, or Chat UI is implemented yet. `FIRST PROVIDER DECISION REQUIRED BEFORE B2`.
+B0 is a documentation/governance milestone. ADR 0007 freezes a one-shot trusted `nervos.chat` definition identified by exact key/version, explicit user-owned instances, immutable-snapshot Runs, a narrow application-owned model port, process-only provider credentials, one bounded model call, the `created -> running -> succeeded|failed` lifecycle, and an awaited API-process proof runner. B1 implements the domain/persistence foundation, and B2 implements the internal Anthropic execution path. B3 HTTP resources and Chat UI are not implemented.
 
 ## Stage A milestones
 
@@ -200,11 +200,19 @@ B1 implements the exact-version built-in definition resolver, explicit owner-sco
 
 Verification includes focused domain and persistence tests, migration upgrade/current/check/downgrade/re-upgrade on disposable databases, the canonical repository check, both security scanner modes, two deterministic E2E regressions, and isolated clean-check. `FIRST PROVIDER DECISION REQUIRED BEFORE B2`.
 
+## B2 implementation verification
+
+B2 selects Anthropic as the first provider, activates `packages/nervos-models`, and uses the official async Anthropic Messages API behind the unchanged B1 model port. `ANTHROPIC_API_KEY` is optional process-only secret-aware configuration; `.env` remains unloaded and API startup remains credential/network independent. The trusted `nervos.chat@1` behavior makes one completion/`messages.create` invocation with SDK retries disabled, applies the immutable Run timeout both to the SDK request and an outer async deadline, excludes thinking/redacted-thinking, validates exact bounded text, keeps `total_tokens` NULL, and persists terminal success/failure only after a transaction-free provider await.
+
+Automatic verification uses deterministic fakes and temporary SQLite only. Focused adapter, handler, provider-registry, coordinator, configuration/startup, architecture, B1 persistence, and migration regressions pass, followed by full Python/frontend, scanner, canonical, two-E2E, and clean-check gates. The default NervOS DB remains untouched.
+
+`REAL PROVIDER PROOF NOT EXECUTED — CREDENTIAL/ACCESS UNAVAILABLE`
+
 ## Next action
 
-B1 IMPLEMENTATION REVIEW
+B2 IMPLEMENTATION REVIEW
 
-B2 requires separate explicit planning and authorization; it does not begin automatically.
+B3 requires separate planning and authorization; it does not begin automatically.
 
 ## Maintenance rule
 

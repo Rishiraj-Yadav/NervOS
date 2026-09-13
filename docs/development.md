@@ -22,12 +22,13 @@ The uv workspace has explicit members so future placeholders are not activated a
 
 - `apps/api`
 - `packages/nervos-core`
+- `packages/nervos-models` (activated in B2 for the single Anthropic adapter)
 
 The pnpm workspace contains only:
 
 - `apps/web`
 
-The worker, marketplace, SDK, MCP, and model-provider directories are future placeholders outside the active workspaces.
+The worker, marketplace, SDK, and MCP directories remain future placeholders outside the active workspaces. `packages/nervos-models` is active only for B2's concrete provider infrastructure; `nervos-core` remains provider-SDK-free.
 
 ## Bootstrap
 

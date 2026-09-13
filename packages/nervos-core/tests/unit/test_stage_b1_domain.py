@@ -9,7 +9,12 @@ from nervos_core.application.agent_definitions import (
     UnknownAgentDefinition,
     create_builtin_definition_registry,
 )
-from nervos_core.application.model_completion import ModelCompletion, ModelRequest, ModelResponse
+from nervos_core.application.model_completion import (
+    ModelCompletion,
+    ModelRequest,
+    ModelResponse,
+    StopOutcome,
+)
 from nervos_core.domain.agents import (
     AgentDefinition,
     AgentDefinitionId,
@@ -181,7 +186,7 @@ def test_domain_timestamps_are_normalized_to_utc() -> None:
 
 class _FakeCompletion:
     async def complete(self, request: ModelRequest) -> ModelResponse:
-        return ModelResponse("fixed", "test-provider", request.model_name)
+        return ModelResponse("fixed", "test-provider", request.model_name, StopOutcome.STOP)
 
 
 def test_model_completion_contract_is_narrow_and_fake_is_test_only() -> None:

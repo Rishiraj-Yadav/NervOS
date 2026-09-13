@@ -11,6 +11,7 @@ package = false
 members = [
     "apps/api",
     "packages/nervos-core",
+    "packages/nervos-models",
 ]
 
 [dependency-groups]
@@ -28,6 +29,7 @@ testpaths = [
     "tests",
     "apps/api/tests",
     "packages/nervos-core/tests",
+    "packages/nervos-models/tests",
 ]
 
 [tool.ruff]
@@ -48,6 +50,8 @@ include = [
     "apps/api/tests",
     "packages/nervos-core/src",
     "packages/nervos-core/tests",
+    "packages/nervos-models/src",
+    "packages/nervos-models/tests",
     "scripts",
     "tests",
 ]
@@ -58,6 +62,7 @@ exclude = [
 extraPaths = [
     "apps/api/src",
     "packages/nervos-core/src",
+    "packages/nervos-models/src",
 ]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"

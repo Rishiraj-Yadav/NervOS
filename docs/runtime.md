@@ -2,101 +2,89 @@
 
 ## Status
 
-Stage B target architecture. B1 now implements the provider-neutral Agent Definition, Agent Instance, and Run domain/persistence foundation described in ADR 0007. B2–B4 model execution, API, and UI behavior is not implemented.
+Stage B trusted-agent runtime proof. B1 implements provider-neutral Agent Definition, Agent Instance, and Run domain/persistence. B2 now implements the internal one-shot Anthropic execution path described below. B3 Agent/Run/Chat HTTP resources and dashboard interaction, and B4 second-provider portability, remain unimplemented.
 
 ## Stage B trusted-agent proof
 
-Stage B deliberately proves only:
+The implemented B2 path is:
 
 ```text
-authenticated owner
-  -> explicit trusted Chat Agent Instance
-  -> persisted Run
-  -> exact-version built-in handler
-  -> application-owned model port
-  -> selected provider adapter
-  -> one bounded non-streaming model call
-  -> persisted succeeded or failed Run
+trusted owner + explicit Agent Instance intent
+  -> exact nervos.chat@1 behavior and provider preflight
+  -> committed immutable created Run
+  -> committed running Run
+  -> no database session/transaction
+  -> one bounded ModelCompletion.complete invocation
+  -> one Anthropic messages.create invocation (max_retries=0)
+  -> committed succeeded or failed Run
 ```
 
-### Definition, instance, and Run
+This is an internal application/runtime proof, not a public Chat feature. No Agent, Run, or Chat API route or frontend UI exists in B2.
 
-A trusted built-in Agent Definition is reusable behavior identified by the exact pair `(agent_key, agent_definition_version)`. Stage B provides one definition, `("nervos.chat", "1")`. There is no silent latest-version substitution.
+## Definition, instance, and snapshot
 
-An Agent Instance is user-owned persisted configuration pinned to one exact definition version. It has its own primary-key identity; multiple instances may use the same definition or display name. Instances are created only by explicit user action. An enabled instance is eligible for a new Run but does not consume resources while idle.
-
-A Run is one execution of one instance. It snapshots exact definition key/version, provider, bounded opaque model identifier, input, and effective limits when created. Later instance changes affect future Runs only. Disabling an instance prevents new Runs and does not cancel a Run already executing.
-
-Stage B Chat is one-shot: prior Runs are displayable history, not model context. There are no conversation/message tables or long-term memory.
-
-### Agent and model boundary
-
-The trusted Chat handler uses a small internal async Protocol and an explicit built-in registry keyed by exact definition key/version. The handler owns its fixed versioned system behavior, validates one prompt, constructs one narrow request, performs exactly one model call, and validates bounded text output.
-
-The provider-neutral request carries only system instruction, user text, bounded opaque model identifier, maximum output tokens, and timeout/deadline information. The response carries bounded text, provider/model identity, an optional portable finish reason, and optional normalized token usage. Provider adapters translate this shape internally. Agent behavior never receives a provider credential or SDK object.
-
-`FIRST PROVIDER DECISION REQUIRED BEFORE B2`. B1 remains provider-neutral and uses fakes. Stage B provider credentials are process/environment-only, adapter-only, never persisted, never returned to the browser, never given to Agent behavior, and never logged. No provider-specific variable name is defined before provider selection.
-
-### Proof limits
-
-Initial Stage B limits are:
-
-- request body: 16 KiB;
-- user input: at most 8,000 UTF-8 bytes and 4,000 Unicode code points;
-- model/persisted output: at most 32,000 UTF-8 bytes and 16,000 code points;
-- provider deadline: 60 seconds;
-- requested maximum output: 1,024 tokens when supported;
-- model calls/agent steps: exactly one;
-- history: default 20, maximum 50;
-- safe error message: at most 512 code points.
-
-Provider limits may be stricter. Effective limits are part of the immutable Run snapshot. An adapter must fail rather than silently ignore a required bound it cannot honor.
-
-### Lifecycle and persistence boundaries
-
-Stage B uses exactly:
+The built-in definition remains exactly `("nervos.chat", "1")`; resolution has no latest fallback. Its trusted behavior owns the fixed instruction:
 
 ```text
-created -> running -> succeeded
-                   -> failed
+You are a helpful assistant. Answer the user's request directly and accurately.
 ```
 
-Created and running are non-terminal. Succeeded and failed are terminal and immutable. Expected-state conditional writes reject invalid transitions.
+A meaningful instruction or behavior change requires a new exact definition version. The generic `AgentDefinition` does not contain a system instruction.
 
-The awaited API-process proof runner uses three short transactions:
+An explicitly created, owner-scoped Agent Instance stores canonical provider ID and opaque operator-configured model ID. A Run snapshots the exact definition, provider/model, input, and effective limits. Execution uses only that immutable committed snapshot; later instance edits or disable do not alter or cancel it.
 
-1. validate the owned enabled instance, capture its immutable snapshot, create `created`, and commit;
-2. transition `created -> running`, and commit;
-3. await one model call with no database transaction open, then persist `running -> succeeded|failed`, and commit.
+## Model boundary and Anthropic adapter
 
-A process or persistence failure can strand a Run in its last safely committed `created` or `running` state. This is accepted Stage B behavior. There is no reconciliation, watchdog, lease, heartbeat, retry, recovery worker, stale-run cleanup, cancellation, or streaming.
+The B1 application-owned async `ModelCompletion` port is unchanged. `ModelRequest` carries only system instruction, user text, opaque model, maximum output tokens, and timeout. `ModelResponse` carries normalized text, provider/model identity, optional finish outcome, and optional normalized usage. There is no generic message history, tool, streaming, media, structured output, credential, or SDK type in the port.
 
-### Failure classes
+B2 activates `packages/nervos-models` and implements exactly one provider, canonical ID `anthropic`, using the official asynchronous Anthropic Python SDK and non-streaming Messages API. Anthropic SDK imports remain in `nervos-models`; core domain/application remain provider-SDK-free.
 
-- **Pre-run rejection:** invalid input, disabled instance, unavailable definition version, invalid configuration, missing provider configuration, or known unsupported configuration. No Run exists and no model call occurs; return a safe 4xx/configuration error.
-- **Execution failure:** a Run exists and execution began, but the provider or bounded execution fails. Persist `failed` with a stable safe code/message when persistence succeeds; the failed resource remains inspectable.
-- **Persistence/platform failure:** NervOS cannot create or transition the Run. Return a safe service-unavailable response where possible; do not promise a persistence error can be stored in the failing subsystem.
+The adapter issues one `messages.create` call and the trusted handler invokes `ModelCompletion.complete` once. The SDK is constructed with `max_retries=0`; NervOS performs no retry, fallback, continuation, or malformed-output second request. This does not claim control over TCP/proxy retransmission.
 
-A model answer is never returned or represented as successful unless its terminal succeeded Run was safely persisted. A successfully persisted failed Run is an HTTP resource outcome, not model success, and should not be converted automatically to HTTP 500.
+### Content and finish policy
+
+The adapter concatenates only user-visible `text` blocks in provider order without adding separators or trimming/normalizing. `thinking` and `redacted_thinking` are ignored and never exposed, persisted, or logged. Tool/server-tool/MCP-use and unknown blocks fail closed.
+
+Only Anthropic `end_turn` produces canonical successful finish reason `stop`. `max_tokens` and context-window exhaustion become `model_output_incomplete`; refusal becomes `model_refused`; stop-sequence, tool-use, pause-turn, absent, and unknown reasons are invalid in B2. No continuation request is made.
+
+Reported trustworthy input/output token counts are retained independently. `total_tokens` remains NULL; NervOS does not derive or estimate it or store cache/reasoning/provider-specific breakdowns.
+
+## Provider and secret boundary
+
+B2 reads exactly `ANTHROPIC_API_KEY` through an explicit optional `SecretStr` settings alias. It does not read `NERVOS_ANTHROPIC_API_KEY`, automatically load `.env`, persist a credential/reference, or require a credential to construct Settings/start the API/use Stage A behavior.
+
+Provider resolution distinguishes unknown, known-unavailable, and configured. Anthropic is always known; without a process credential it is unavailable, so preflight rejects before Run creation and performs zero model calls. No provider request occurs during import or API startup.
+
+Credential flow is process environment -> secret-aware API composition -> Anthropic client only. Credentials, authorization headers, raw errors, prompts, answers, thinking, and redacted thinking are not logged. During an explicitly requested real execution, the fixed system instruction and user prompt leave the local machine for Anthropic, and only validated user-visible output may be persisted in a succeeded Run.
+
+## Limits, timeout, and cancellation
+
+Stage B snapshots 8,000 UTF-8 bytes/4,000 code points input, 32,000 bytes/16,000 code points output, 60,000 ms provider timeout, 1,024 requested output tokens, and one model call. Provider output is never truncated.
+
+The immutable Run timeout is passed explicitly to the SDK request and also wraps the complete handler/provider await through authoritative `asyncio.timeout`. SDK or outer timeout becomes `model_timed_out`; terminal persistence moves the Run to `failed` when available. There is no timed-out state and no retry.
+
+External `asyncio.CancelledError` is distinct: it propagates and is not normalized as timeout/success. B2 does not promise cancellation cleanup; the Run may remain `running`. Process exit/persistence failure can likewise strand `created` or `running`. Stage C owns durable cancellation, retries, and reconciliation.
+
+## Persistence boundaries and failure classes
+
+B2 uses exactly three independent transaction boundaries:
+
+1. create immutable `created` Run, commit, close;
+2. conditionally transition `created -> running`, commit, close;
+3. await the model with no DB session/transaction/ORM record retained, then conditionally persist `running -> succeeded|failed`, commit, close.
+
+Pre-run configuration/resource rejection creates no Run and makes zero calls. Provider/execution failures after `running` persist a stable safe code and static NervOS-owned message when terminal persistence works. Persistence/platform failures never claim they were recorded. A model answer is never returned or represented as success before the succeeded Run commit; if that commit fails, the answer does not escape.
+
+## Verification and manual proof
+
+All automatic tests use deterministic model/client doubles and require no provider credential, network, quota, or paid access. `scripts/manual_anthropic_b2_proof.py` is operator-only, requires a new explicit non-default disposable DB and current operator model, constructs a proof user/instance, and executes the full coordinator. It must be separately authorized before running and never prints credential, prompt, answer, hidden reasoning, or raw response/error.
+
+Current live status:
+
+```text
+REAL PROVIDER PROOF NOT EXECUTED — CREDENTIAL/ACCESS UNAVAILABLE
+```
 
 ## Future durable runtime
 
-Stage C implements the accepted ADR 0004 target:
-
-```text
-Trigger
-  -> Create Job
-  -> Persistent Queue
-  -> Worker claims job
-  -> Create/load Run
-  -> Run Coordinator
-       - load AgentInstance
-       - load Agent Definition
-       - load configuration and ownership policy
-       - execute from immutable Run snapshot
-  -> terminal Run state and append-only events
-```
-
-Stage C owns jobs, attempts, workers, claims/leases, retries, cancellation, concurrency, crash recovery, stale-run handling, and run events. Installed instances remain persisted and idle when no work exists.
-
-Later stages add tool/permission boundaries, scheduling/events, conversation sessions and memory, `.nervos` package lifecycle, dashboard management, security isolation, Marketplace distribution, and multi-agent behavior. None is current Stage B behavior.
+B3 adds authenticated HTTP resources and minimal dashboard interaction. Stage C adds Jobs, Attempts, workers, claims/leases, retries, durable cancellation, recovery/reconciliation, stale-run handling, and events. Later stages add tools, scheduling, conversations/memory, packages, security isolation, Marketplace, and multi-agent behavior. None is part of B2.

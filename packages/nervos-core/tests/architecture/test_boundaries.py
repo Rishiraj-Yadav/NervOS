@@ -7,6 +7,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]
 CORE_SOURCE = ROOT / "packages" / "nervos-core" / "src" / "nervos_core"
+MODELS_SOURCE = ROOT / "packages" / "nervos-models" / "src" / "nervos_models"
+API_SOURCE = ROOT / "apps" / "api" / "src" / "nervos_api"
 
 
 def imported_modules(path: Path) -> set[str]:
@@ -53,6 +55,34 @@ def test_core_never_imports_api_or_frontend() -> None:
 
     assert not any(module.startswith("nervos_api") for module in imports)
     assert not any(module.startswith(("react", "apps.web")) for module in imports)
+
+
+def test_provider_sdk_exists_only_in_the_models_infrastructure_package() -> None:
+    core_imports = {
+        module for path in python_files(CORE_SOURCE) for module in imported_modules(path)
+    }
+    api_imports_by_file = {path: imported_modules(path) for path in python_files(API_SOURCE)}
+    model_imports = {
+        module for path in python_files(MODELS_SOURCE) for module in imported_modules(path)
+    }
+
+    assert not any(module.startswith(("anthropic", "nervos_models")) for module in core_imports)
+    assert any(module.startswith("anthropic") for module in model_imports)
+    assert all(
+        path.name == "app.py" or not any(module.startswith("nervos_models") for module in imports)
+        for path, imports in api_imports_by_file.items()
+    )
+
+
+def test_b2_does_not_add_agent_or_run_http_routes_or_a_new_migration() -> None:
+    router_text = (API_SOURCE / "api" / "router.py").read_text(encoding="utf-8")
+    assert "agent" not in router_text.lower()
+    assert "run" not in router_text.lower()
+    migrations = sorted((ROOT / "apps" / "api" / "alembic" / "versions").glob("*.py"))
+    assert [path.name for path in migrations] == [
+        "0001_stage_a_schema.py",
+        "0002_stage_b1_agent_instances_runs.py",
+    ]
 
 
 def test_base_metadata_create_all_is_not_used() -> None:
