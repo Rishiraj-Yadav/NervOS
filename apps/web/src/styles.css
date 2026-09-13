@@ -57,8 +57,45 @@ form button { margin-top: .8rem; }
 .dashboard-content > h1 { font-size: clamp(3rem, 9vw, 7.5rem); letter-spacing: -.07em; line-height: .95; margin: .7rem 0 1.5rem; }
 .ready-card { align-items: flex-start; display: flex; gap: 1.2rem; margin-top: 4rem; max-width: 42rem; padding: 1.5rem; }
 .ready-card h2 { margin: 0 0 .4rem; }
-.ready-card p { color: #aeb5ad; line-height: 1.55; margin: 0; }
+.ready-card p { color: #aeb5ad; line-height: 1.55; margin: 0 0 .9rem; }
 .ready-indicator { background: #b9f646; border-radius: 50%; box-shadow: 0 0 1rem rgba(185, 246, 70, .55); flex: 0 0 auto; height: .75rem; margin-top: .45rem; width: .75rem; }
+
+/* Agent Instances and Runs */
+textarea { background: #101311; border: 1px solid #454b46; border-radius: .5rem; color: #fff; font: inherit; min-width: 0; outline: none; padding: .8rem .9rem; resize: vertical; width: 100%; }
+textarea:focus { border-color: #b9f646; box-shadow: 0 0 0 3px rgba(185, 246, 70, .13); }
+textarea:disabled { opacity: .5; }
+code { background: #101311; border-radius: .3rem; padding: .1rem .35rem; }
+.button-link.secondary { background: transparent; border: 1px solid #414840; color: #e9ede7; padding: .55rem .8rem; }
+
+.empty-card, .create-panel, .run-panel, .config-panel { margin-top: 2rem; max-width: 46rem; padding: 1.6rem; }
+.empty-card h2, .create-panel h2, .run-panel h2, .config-panel h2 { margin: 0 0 .5rem; }
+.empty-card p { color: #aeb5ad; line-height: 1.55; margin: 0 0 1.2rem; }
+.create-panel form, .run-panel form, .config-panel form { margin-top: 1rem; }
+.empty-note { color: #8e968e; }
+
+.instance-list { display: grid; gap: .8rem; list-style: none; margin: 2rem 0; padding: 0; }
+.instance-link { display: grid; gap: .2rem; padding: 1.1rem; text-decoration: none; }
+.instance-link:hover { border-color: #b9f646; }
+.instance-name { font-size: 1.15rem; font-weight: 750; }
+.instance-detail { color: #8e968e; font-size: .86rem; }
+.instance-state { color: #b9f646; font-size: .75rem; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+.instance-state.disabled { color: #d8a04a; }
+
+.agent-toolbar { align-items: center; display: flex; flex-wrap: wrap; gap: 1rem; margin-top: 1.5rem; }
+
+.run-list { display: grid; gap: .9rem; margin-top: 1.2rem; }
+.run-item { background: rgba(24, 27, 25, .9); border: 1px solid #343a35; border-radius: .8rem; padding: 1.1rem; }
+.run-head { align-items: center; display: flex; flex-wrap: wrap; gap: .8rem; margin-bottom: .8rem; }
+.run-status { font-size: .72rem; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+.run-status-succeeded { color: #b9f646; }
+.run-status-failed { color: #ff9d9d; }
+.run-status-running, .run-status-created { color: #d8a04a; }
+.run-meta { color: #8e968e; font-size: .78rem; }
+.run-label { color: #b9f646; font-size: .7rem; font-weight: 800; letter-spacing: .14em; margin: 0 0 .25rem; text-transform: uppercase; }
+.run-text { line-height: 1.6; margin: 0 0 .9rem; overflow-wrap: anywhere; white-space: pre-wrap; }
+.run-text:last-child { margin-bottom: 0; }
+.run-failure { background: #2a1818; border: 1px solid #713d3d; border-radius: .5rem; color: #ffcaca; line-height: 1.5; margin: 0; padding: .8rem; }
+.run-pending { color: #d8a04a; font-size: .86rem; line-height: 1.5; margin: .8rem 0 0; }
 
 @media (max-width: 760px) {
   .auth-shell { grid-template-columns: 1fr; }

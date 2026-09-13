@@ -26,7 +26,9 @@ from nervos_models import close_model_providers, compose_model_providers
 
 from nervos_api.api.dependencies import utc_now
 from nervos_api.api.errors import (
+    AGENT_ERROR_MAP,
     InvalidOrigin,
+    agent_error_handler,
     authentication_error_handler,
     unexpected_error_handler,
     validation_error_handler,
@@ -86,6 +88,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_exception_handler(Exception, unexpected_error_handler)
     app.add_exception_handler(AuthenticationError, authentication_error_handler)
     app.add_exception_handler(InvalidOrigin, authentication_error_handler)
+    for agent_error_type in AGENT_ERROR_MAP:
+        app.add_exception_handler(agent_error_type, agent_error_handler)
     app.add_exception_handler(
         RequestValidationError,
         validation_error_handler,  # pyright: ignore[reportArgumentType]

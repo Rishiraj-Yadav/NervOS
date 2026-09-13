@@ -5,12 +5,24 @@ import {
   login,
   logout,
 } from "./auth";
+import {
+  createAgentInstance,
+  createRun,
+  getAgentInstance,
+  listAgentInstances,
+  listRuns,
+  updateAgentInstance,
+  type RunPage,
+} from "./agentInstances";
 import type { Credentials, SetupStatus, User } from "./types";
 import { queryOptions, useMutation, useQueryClient } from "@tanstack/react-query";
 
 export const queryKeys = {
   setup: ["setup-status"] as const,
   currentUser: ["auth-session"] as const,
+  agentInstances: ["agent-instances"] as const,
+  agentInstance: (agentInstanceId: number) => ["agent-instance", agentInstanceId] as const,
+  agentRuns: (agentInstanceId: number) => ["agent-runs", agentInstanceId] as const,
 };
 
 export const setupStatusQuery = () =>
@@ -52,6 +64,64 @@ export function useLogout() {
     mutationFn: logout,
     onSuccess: () => {
       queryClient.setQueryData<User | null>(queryKeys.currentUser, null);
+    },
+  });
+}
+
+export const agentInstancesQuery = () =>
+  queryOptions({
+    queryKey: queryKeys.agentInstances,
+    queryFn: () => listAgentInstances(),
+    retry: false,
+  });
+
+export const agentInstanceQuery = (agentInstanceId: number) =>
+  queryOptions({
+    queryKey: queryKeys.agentInstance(agentInstanceId),
+    queryFn: () => getAgentInstance(agentInstanceId),
+    retry: false,
+  });
+
+export const agentRunsQuery = (agentInstanceId: number) =>
+  queryOptions({
+    queryKey: queryKeys.agentRuns(agentInstanceId),
+    queryFn: () => listRuns(agentInstanceId),
+    retry: false,
+  });
+
+export function useCreateAgentInstance() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: createAgentInstance,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.agentInstances }),
+  });
+}
+
+export function useUpdateAgentInstance(agentInstanceId: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (update: Parameters<typeof updateAgentInstance>[1]) =>
+      updateAgentInstance(agentInstanceId, update),
+    onSuccess: (instance) => {
+      queryClient.setQueryData(queryKeys.agentInstance(agentInstanceId), instance);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.agentInstances });
+    },
+  });
+}
+
+/**
+ * Execute one Run. The returned value is the Run the server persisted and committed, so it is
+ * the only thing rendered as a result — there is never a fabricated assistant answer.
+ */
+export function useCreateRun(agentInstanceId: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: string) => createRun(agentInstanceId, input),
+    onSuccess: (run) => {
+      queryClient.setQueryData<RunPage>(queryKeys.agentRuns(agentInstanceId), (previous) =>
+        previous === undefined ? previous : { ...previous, items: [run, ...previous.items] },
+      );
+      void queryClient.invalidateQueries({ queryKey: queryKeys.agentRuns(agentInstanceId) });
     },
   });
 }

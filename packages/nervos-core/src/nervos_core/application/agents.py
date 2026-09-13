@@ -172,6 +172,36 @@ class AgentService:
             owner_user_id, instance_id, enabled, require_utc(self._clock())
         )
 
+    def get_instance(self, owner_user_id: int, instance_id: int) -> AgentInstance:
+        """Return one owned Agent Instance, or raise for a nonexistent or foreign id."""
+        return self._persistence.get_instance(owner_user_id, instance_id)
+
+    def list_instances(
+        self, owner_user_id: int, limit: int, before_id: int | None
+    ) -> tuple[AgentInstance, ...]:
+        """Return one owner-scoped page of newest-first Agent Instances."""
+        return self._persistence.list_instances(owner_user_id, limit, before_id)
+
+    def get_run(self, owner_user_id: int, run_id: int) -> Run:
+        """Return one owned Run, or raise for a nonexistent or foreign id."""
+        return self._persistence.get_run(owner_user_id, run_id)
+
+    def list_runs(
+        self, owner_user_id: int, instance_id: int, limit: int, before_id: int | None
+    ) -> tuple[Run, ...]:
+        """Return one owner-scoped page of newest-first Runs for an owned Agent Instance.
+
+        The owner-scoped parent is resolved before the Runs are queried, so a nonexistent or
+        foreign Agent Instance is reported as not found rather than as an empty history. The Run
+        query alone cannot tell those apart: it is scoped by the same ownership predicate, so it
+        returns no rows for an instance that exists with no Runs and for one that does not exist
+        at all. Resolving the parent first is what keeps "this instance has no runs yet" distinct
+        from "this instance is not yours" — and the two failures stay indistinguishable because a
+        single owner-scoped lookup produces both.
+        """
+        self._persistence.get_instance(owner_user_id, instance_id)
+        return self._persistence.list_runs(owner_user_id, instance_id, limit, before_id)
+
     def create_run(
         self,
         owner_user_id: int,

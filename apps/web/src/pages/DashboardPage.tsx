@@ -2,7 +2,7 @@ import { useLogout } from "../api/queries";
 import type { User } from "../api/types";
 import { Brand } from "../components/Brand";
 import { InlineError } from "../components/AsyncState";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 export function DashboardPage({ user }: { user: User }) {
   const logout = useLogout();
@@ -36,8 +36,14 @@ export function DashboardPage({ user }: { user: User }) {
         <div className="panel ready-card">
           <div className="ready-indicator" aria-hidden="true" />
           <div>
-            <h2>Foundation online</h2>
-            <p>Agent management arrives in a later milestone. For now, authentication and the local dashboard are working.</p>
+            <h2>Trusted chat is available</h2>
+            <p>
+              Create a Chat agent and run it here. Every submission is one independent run that
+              keeps its own result.
+            </p>
+            <Link className="button-link" to="/agents">
+              Open agents
+            </Link>
           </div>
         </div>
       </section>

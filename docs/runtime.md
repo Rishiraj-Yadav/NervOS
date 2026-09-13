@@ -2,11 +2,11 @@
 
 ## Status
 
-Stage B trusted-agent runtime proof. B1 implements provider-neutral Agent Definition, Agent Instance, and Run domain/persistence. B2 now implements the internal one-shot Anthropic execution path described below. B3 Agent/Run/Chat HTTP resources and dashboard interaction, and B4 second-provider portability, remain unimplemented.
+Stage B trusted-agent runtime proof. B1 implements provider-neutral Agent Definition, Agent Instance, and Run domain/persistence. B2 implements the internal one-shot Anthropic execution path described below. B3 exposes that path as an authenticated, owner-scoped HTTP API with a minimal trusted Chat dashboard interaction. B4 second-provider portability and final Stage B acceptance remain unimplemented.
 
 ## Stage B trusted-agent proof
 
-The implemented B2 path is:
+The implemented B2 execution path is:
 
 ```text
 trusted owner + explicit Agent Instance intent
@@ -19,7 +19,59 @@ trusted owner + explicit Agent Instance intent
   -> committed succeeded or failed Run
 ```
 
-This is an internal application/runtime proof, not a public Chat feature. No Agent, Run, or Chat API route or frontend UI exists in B2.
+B2 was an internal application/runtime proof, not a public Chat feature: no Agent, Run, or Chat API route and no frontend UI existed in B2. B3 layers the authenticated HTTP resources and the minimal Chat dashboard interaction on top of the same unchanged execution path.
+
+## B3 HTTP surface and dashboard interaction
+
+B3 adds no execution capability. It exposes the already-proven B2 path to an authenticated local user:
+
+```text
+authenticated browser
+  -> NervOS API (owner-scoped, exact-Origin, session cookie)
+  -> existing RunCoordinator.execute(...)
+  -> persisted terminal Run (succeeded | failed)
+  -> browser renders the persisted Run
+```
+
+The resource family is exactly:
+
+```text
+GET    /api/v1/agent-instances
+POST   /api/v1/agent-instances
+GET    /api/v1/agent-instances/{agent_instance_id}
+PATCH  /api/v1/agent-instances/{agent_instance_id}
+POST   /api/v1/agent-instances/{agent_instance_id}/runs
+GET    /api/v1/agent-instances/{agent_instance_id}/runs
+GET    /api/v1/runs/{run_id}
+```
+
+`POST /api/v1/agent-instances/{agent_instance_id}/runs` is the **only** way a Run is created; there is no `POST /chat`, no global `POST /runs`, and no second execution path. It is the single async route and it awaits `RunCoordinator.execute` directly.
+
+Boundaries B3 preserves:
+
+- **Ownership.** Identity comes only from the authenticated session. No request or response schema carries `owner_user_id`. A foreign id and a nonexistent id are indistinguishable everywhere: `GET`/`PATCH` on an instance, `GET` on a run, `POST` on an instance's runs, and `GET` on an instance's runs all return the identical 404 body. No response reveals whether a resource exists for someone else.
+- **Run-list parent.** `GET /api/v1/agent-instances/{agent_instance_id}/runs` resolves the owned parent before it reads any Run, so an owned instance with no Runs returns `200` with an empty page while a nonexistent or foreign instance returns the same `404 agent_instance_not_found` as every other foreign lookup. Run history can therefore never be used to probe whether another user's instance exists, and "no runs yet" stays distinguishable from "not your instance".
+- **Creatable definition.** The B3 API accepts creation only for the exact trusted `nervos.chat@1` pair. Any other key or version is rejected with a safe 422 and creates nothing, so a definition registered by a later stage cannot drift into this surface by accident.
+- **Provider configuration.** An unknown provider is rejected on both creation and configuration update. A known-but-unconfigured provider is still accepted at configuration time, because a missing process credential is discovered only at execution.
+- **Update shape.** A `PATCH` is exactly one of two shapes — the configuration triple, or `enabled` alone — and maps to exactly one committed application write. Definition identity and owner are immutable.
+- **Execution response.** Execution is awaited; there is no queue, job, worker, `202`, polling, retry, or re-execute endpoint. `POST …/runs` returns **201** with the persisted Run, whether it is `succeeded` or `failed`, because the HTTP status describes the resource operation and never the model outcome. Only pre-run rejections and platform failures use an HTTP error status.
+- **Usage.** `usage` is `null` exactly when no trustworthy counters were persisted; it is never an all-null object, and `total_tokens` is never derived.
+- **Rendering.** Model output is rendered as escaped plain text with newlines preserved. No markdown library, sanitizer, or HTML injection is used.
+
+### One submission is one independent Run
+
+The Chat UI may look conversational, but there is no conversation system in B3:
+
+- One user submission creates **one independent Run**.
+- Each Run sends only the fixed `nervos.chat@1` system instruction plus the current submitted text.
+- No prior Run's input or output ever becomes model context. There is no `conversation_id`, no `session_id`, no Message record, and no replay.
+- Prior Runs are displayed to the human as independent persisted Run records under the wording **"Run history"**, with an explicit disclosure that earlier runs are not sent to the model.
+
+Conversations, sessions, and memory belong to a later stage.
+
+### Provider credential in a B3 run
+
+B3 adds no route to set, read, rotate, or delete a provider credential and no credential field in any schema. When `anthropic` is known but the API process holds no credential, the preflight rejects before Run creation with `409 model_provider_unavailable` — making zero model calls and creating no Run. The UI surfaces that as an inline error.
 
 ## Definition, instance, and snapshot
 
@@ -77,7 +129,7 @@ Pre-run configuration/resource rejection creates no Run and makes zero calls. Pr
 
 ## Verification and manual proof
 
-All automatic tests use deterministic model/client doubles and require no provider credential, network, quota, or paid access. `scripts/manual_anthropic_b2_proof.py` is operator-only, requires a new explicit non-default disposable DB and current operator model, constructs a proof user/instance, and executes the full coordinator. It must be separately authorized before running and never prints credential, prompt, answer, hidden reasoning, or raw response/error.
+All automatic tests use deterministic model/client doubles and require no provider credential, network, quota, or paid access. B3's API integration tests install the double by replacing the provider catalog on `app.state`. The browser journey runs against a real API subprocess whose supervisor launches a test-only ASGI factory outside the shipped packages and explicitly removes `ANTHROPIC_API_KEY` from the child environment, so automated E2E cannot consume a real credential even when the operator's shell has one. A failed injection fails the run loudly rather than falling back to Anthropic. `scripts/manual_anthropic_b2_proof.py` is operator-only, requires a new explicit non-default disposable DB and current operator model, constructs a proof user/instance, and executes the full coordinator. It must be separately authorized before running and never prints credential, prompt, answer, hidden reasoning, or raw response/error.
 
 Current live status:
 
@@ -87,4 +139,8 @@ REAL PROVIDER PROOF NOT EXECUTED — CREDENTIAL/ACCESS UNAVAILABLE
 
 ## Future durable runtime
 
-B3 adds authenticated HTTP resources and minimal dashboard interaction. Stage C adds Jobs, Attempts, workers, claims/leases, retries, durable cancellation, recovery/reconciliation, stale-run handling, and events. Later stages add tools, scheduling, conversations/memory, packages, security isolation, Marketplace, and multi-agent behavior. None is part of B2.
+B3 adds authenticated HTTP resources and minimal dashboard interaction. Stage C adds Jobs, Attempts, workers, claims/leases, retries, durable cancellation, recovery/reconciliation, stale-run handling, and events. Later stages add tools, scheduling, conversations/memory, packages, security isolation, Marketplace, and multi-agent behavior.
+
+### No recovery promise
+
+Stage C owns recovery. If the browser refreshes or navigates away during an awaited Run, the HTTP connection is lost and the Run may remain `running`. On reload the UI rebuilds history purely from persisted Runs and displays a stranded `running` Run as `running`; it neither presents it as actively progressing nor auto-retries it. B3 implements no recovery, no reconciliation, and no polling.

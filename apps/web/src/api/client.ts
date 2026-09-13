@@ -36,7 +36,7 @@ export class ApiProtocolError extends Error {
 type Validator<T> = (value: unknown) => value is T;
 
 interface RequestOptions {
-  method?: "GET" | "POST";
+  method?: "GET" | "POST" | "PATCH";
   body?: unknown;
 }
 

@@ -56,4 +56,53 @@ test("completes the Stage A setup and authentication journey", async ({ page }) 
   await expect(page).toHaveURL(/\/login$/);
   await expect(page.getByRole("heading", { name: /welcome back/i })).toBeVisible();
   await expect(page.getByRole("heading", { name: /nervos is ready/i })).toHaveCount(0);
+
+  // --- B3: trusted Chat Agent API and minimal UI ---
+  // Everything below runs against the deterministic test provider. The supervisor removes
+  // ANTHROPIC_API_KEY from this process environment, so no real credential can be consumed.
+  await page.getByLabel(/^username$/i).fill(username);
+  await page.getByLabel(/^password$/i).fill(password);
+  await page.getByRole("button", { name: /sign in/i }).click();
+  await expect(page.getByRole("heading", { name: /nervos is ready/i })).toBeVisible();
+
+  await page.goto("/agents");
+  await expect(page.getByRole("heading", { name: /no agents yet/i })).toBeVisible();
+
+  await page.getByRole("button", { name: /create a chat agent/i }).click();
+  await page.getByLabel("Display name").fill("E2E Chat");
+  await page.getByLabel("Model", { exact: true }).fill("opaque/e2e-model");
+  await page.getByRole("button", { name: /^create agent$/i }).click();
+
+  await expect(page.getByRole("heading", { name: "E2E Chat" })).toBeVisible();
+  await expect(page.getByText(/nervos\.chat v1/)).toBeVisible();
+
+  await page.getByLabel("Message").fill("first question from the browser");
+  await page.getByRole("button", { name: /run agent/i }).click();
+  await expect(
+    page.getByText(/Deterministic Chat reply from the NervOS test provider\./),
+  ).toBeVisible();
+
+  // The result survives a reload because it was persisted, not held in browser state.
+  await page.reload();
+  await expect(
+    page.getByText(/Deterministic Chat reply from the NervOS test provider\./),
+  ).toBeVisible();
+  await expect(page.getByText("first question from the browser")).toBeVisible();
+
+  // A second submission is an independent Run; both remain visible as history.
+  await page.getByLabel("Message").fill("second question from the browser");
+  await page.getByRole("button", { name: /run agent/i }).click();
+  await expect(page.getByText(/Second independent deterministic reply\./)).toBeVisible();
+  await expect(page.getByText("first question from the browser")).toBeVisible();
+  await expect(page.getByText("second question from the browser")).toBeVisible();
+
+  // Disabling the agent blocks new Runs while leaving the existing history readable.
+  await page.getByRole("button", { name: /disable agent/i }).click();
+  await expect(page.getByText(/cannot start new runs/i)).toBeVisible();
+  await expect(page.getByRole("button", { name: /run agent/i })).toBeDisabled();
+  await expect(page.getByText(/Second independent deterministic reply\./)).toBeVisible();
+
+  await page.goto("/dashboard");
+  await page.getByRole("button", { name: /log out/i }).click();
+  await expect(page.getByRole("heading", { name: /welcome back/i })).toBeVisible();
 });

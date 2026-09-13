@@ -6,11 +6,14 @@ from datetime import UTC, datetime
 from typing import Annotated, cast
 
 from fastapi import Cookie, Depends, Request
+from nervos_core.application.agents import AgentService
 from nervos_core.application.authentication import (
     AuthenticationRequired,
     AuthenticationService,
     PublicUser,
 )
+from nervos_core.application.model_providers import ModelProviderCatalog
+from nervos_core.application.run_coordinator import RunCoordinator
 
 from nervos_api.api.cookies import SESSION_COOKIE_NAME
 from nervos_api.api.errors import InvalidOrigin
@@ -30,6 +33,21 @@ def get_settings(request: Request) -> Settings:
 def get_authentication_service(request: Request) -> AuthenticationService:
     """Return the concrete authentication service composed into the app."""
     return cast(AuthenticationService, request.app.state.authentication_service)
+
+
+def get_agent_service(request: Request) -> AgentService:
+    """Return the application-owned Agent Instance and Run service."""
+    return cast(AgentService, request.app.state.agent_service)
+
+
+def get_run_coordinator(request: Request) -> RunCoordinator:
+    """Return the composed one-shot Run coordinator; routes never build one."""
+    return cast(RunCoordinator, request.app.state.run_coordinator)
+
+
+def get_model_provider_catalog(request: Request) -> ModelProviderCatalog:
+    """Return the composed provider catalog used only for safe local preflight."""
+    return cast(ModelProviderCatalog, request.app.state.model_provider_catalog)
 
 
 def require_configured_origin(
@@ -55,6 +73,12 @@ SettingsDependency = Annotated[Settings, Depends(get_settings)]
 AuthenticationServiceDependency = Annotated[
     AuthenticationService,
     Depends(get_authentication_service),
+]
+AgentServiceDependency = Annotated[AgentService, Depends(get_agent_service)]
+RunCoordinatorDependency = Annotated[RunCoordinator, Depends(get_run_coordinator)]
+ModelProviderCatalogDependency = Annotated[
+    ModelProviderCatalog,
+    Depends(get_model_provider_catalog),
 ]
 OriginDependency = Annotated[None, Depends(require_configured_origin)]
 CurrentUserDependency = Annotated[PublicUser, Depends(get_current_user)]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -12,6 +13,32 @@ from nervos_api.config import Settings
 _CREDENTIAL_PATHS = {"/api/v1/setup", "/api/v1/auth/login"}
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 _MAX_CREDENTIAL_BODY_BYTES = 4096
+# Bounded proof request body for the trusted-agent resource family.
+_MAX_PROOF_BODY_BYTES = 16 * 1024
+_AGENT_INSTANCE_ITEM_PATH = re.compile(r"/api/v1/agent-instances/\d+\Z")
+_AGENT_INSTANCE_RUNS_PATH = re.compile(r"/api/v1/agent-instances/\d+/runs\Z")
+
+
+def json_body_limit(method: str, path: str) -> int | None:
+    """Return the JSON body bound for a route, or None when it needs no body guard.
+
+    Returning None leaves the request completely untouched, which is what keeps body-less
+    mutations such as `POST /api/v1/auth/logout` working exactly as before.
+
+    A single trailing slash is stripped before matching, so `/api/v1/agent-instances/` cannot slip
+    past the bound and be redirected downstream with an unbounded body. Normalizing only ever adds
+    enforcement for a variant that previously had none; it never relaxes a matched path.
+    """
+    normalized = path[:-1] if path.endswith("/") and path != "/" else path
+    if normalized in _CREDENTIAL_PATHS:
+        return _MAX_CREDENTIAL_BODY_BYTES
+    if method == "POST" and normalized == "/api/v1/agent-instances":
+        return _MAX_PROOF_BODY_BYTES
+    if method == "PATCH" and _AGENT_INSTANCE_ITEM_PATH.fullmatch(normalized):
+        return _MAX_PROOF_BODY_BYTES
+    if method == "POST" and _AGENT_INSTANCE_RUNS_PATH.fullmatch(normalized):
+        return _MAX_PROOF_BODY_BYTES
+    return None
 
 
 class ApiSecurityHeadersMiddleware:
@@ -33,6 +60,10 @@ class ApiSecurityHeadersMiddleware:
                     headers.append((b"x-content-type-options", b"nosniff"))
                 if b"referrer-policy" not in names:
                     headers.append((b"referrer-policy", b"no-referrer"))
+                # Authenticated API responses can carry prompts and model answers, so they are
+                # never cacheable — including in a shared browser profile or the back/forward cache.
+                if b"cache-control" not in names:
+                    headers.append((b"cache-control", b"no-store"))
                 message["headers"] = headers
             await send(message)
 
@@ -62,7 +93,8 @@ class AuthenticationBoundaryMiddleware:
                 )
                 return
 
-        if method == "POST" and path in _CREDENTIAL_PATHS:
+        limit = json_body_limit(method, path)
+        if limit is not None:
             content_types = self.header_values(raw_headers, b"content-type")
             if len(content_types) != 1 or not self.is_json_content_type(content_types[0]):
                 await error_response(
@@ -71,7 +103,7 @@ class AuthenticationBoundaryMiddleware:
                 return
 
             lengths = self.header_values(raw_headers, b"content-length")
-            if self.body_is_too_large(lengths):
+            if self.body_is_too_large(lengths, limit):
                 await error_response(413, "request_too_large", "Request body is too large.")(
                     scope, receive, send
                 )
@@ -86,7 +118,7 @@ class AuthenticationBoundaryMiddleware:
                 if message["type"] != "http.request":
                     continue
                 body.extend(message.get("body", b""))
-                if len(body) > _MAX_CREDENTIAL_BODY_BYTES:
+                if len(body) > limit:
                     await error_response(413, "request_too_large", "Request body is too large.")(
                         scope, receive, send
                     )
@@ -124,7 +156,10 @@ class AuthenticationBoundaryMiddleware:
         return all("=" in parameter and bool(parameter.strip()) for parameter in parameters)
 
     @staticmethod
-    def body_is_too_large(content_lengths: Sequence[bytes] | bytes | None) -> bool:
+    def body_is_too_large(
+        content_lengths: Sequence[bytes] | bytes | None,
+        limit: int = _MAX_CREDENTIAL_BODY_BYTES,
+    ) -> bool:
         """Reject absent, duplicate, malformed, negative, or oversized lengths."""
         if isinstance(content_lengths, bytes):
             values = [content_lengths]
@@ -138,4 +173,4 @@ class AuthenticationBoundaryMiddleware:
             length = int(values[0])
         except ValueError:
             return True
-        return length < 0 or length > _MAX_CREDENTIAL_BODY_BYTES
+        return length < 0 or length > limit

@@ -181,6 +181,26 @@ def web_ready(status: int, body: bytes, content_type: str) -> bool:
     return status == 200 and "text/html" in content_type.lower() and bool(body)
 
 
+def e2e_environment(database: Path, web_origin: str) -> dict[str, str]:
+    """Build the child-process environment for an offline, credential-free E2E run.
+
+    The provider credential is removed explicitly rather than merely left unused. An operator
+    may legitimately have a real key exported in their shell, and automated verification must
+    never construct or consume one — not even accidentally.
+    """
+    environment = os.environ.copy()
+    environment.pop("ANTHROPIC_API_KEY", None)
+    environment.update(
+        {
+            "NERVOS_ENVIRONMENT": "test",
+            "NERVOS_DATABASE_PATH": str(database),
+            "NERVOS_APP_ORIGIN": web_origin,
+            "NERVOS_LOG_LEVEL": "WARNING",
+        }
+    )
+    return environment
+
+
 def run_e2e() -> int:
     """Migrate an isolated database, supervise services, and run Playwright."""
     original_database = fingerprint(DEFAULT_DATABASE)
@@ -201,15 +221,7 @@ def run_e2e() -> int:
         web_port = web_reservation.port
         api_origin = f"http://127.0.0.1:{api_port}"
         web_origin = f"http://127.0.0.1:{web_port}"
-        environment = os.environ.copy()
-        environment.update(
-            {
-                "NERVOS_ENVIRONMENT": "test",
-                "NERVOS_DATABASE_PATH": str(database),
-                "NERVOS_APP_ORIGIN": web_origin,
-                "NERVOS_LOG_LEVEL": "WARNING",
-            }
-        )
+        environment = e2e_environment(database, web_origin)
         web_environment = {**environment, "NERVOS_E2E_API_ORIGIN": api_origin}
         playwright_environment = {**environment, "NERVOS_E2E_WEB_ORIGIN": web_origin}
         pnpm = resolve_required_command("pnpm")
@@ -234,7 +246,10 @@ def run_e2e() -> int:
                         sys.executable,
                         "-m",
                         "uvicorn",
-                        "nervos_api.main:app",
+                        "--factory",
+                        "e2e_app:create_app",
+                        "--app-dir",
+                        "tests/e2e_support",
                         "--host",
                         "127.0.0.1",
                         "--port",

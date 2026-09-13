@@ -1,8 +1,10 @@
 # NervOS
 
-NervOS is a self-hosted AI-agent runtime and management platform. The repository is currently in **Stage A — Foundation**.
+NervOS is a self-hosted AI-agent runtime and management platform. The repository is currently in **Stage B — Trusted-agent runtime proof**.
 
-The A1 repository/tooling foundation, A2 API/configuration/database foundation, A3 local-authentication boundary, A4 React dashboard foundation, A5 deterministic browser journey, and A6 continuous-integration/security-scanning milestone are implemented. The browser supports first-run setup, cookie-backed login/session restoration, a protected minimal dashboard, and server-confirmed logout. Agent runtime, model providers, MCP/tools, workers, scheduling, memory, marketplace, IoT, and multi-agent execution are outside Stage A.
+The A1 repository/tooling foundation, A2 API/configuration/database foundation, A3 local-authentication boundary, A4 React dashboard foundation, A5 deterministic browser journey, and A6 continuous-integration/security-scanning milestone are implemented. The browser supports first-run setup, cookie-backed login/session restoration, a protected minimal dashboard, and server-confirmed logout.
+
+Within Stage B, B1 implements the Agent Instance and Run domain/persistence, B2 implements the internal one-shot Anthropic execution path, and B3 exposes it as authenticated, owner-scoped Agent Instance and Run HTTP resources with a minimal trusted Chat dashboard interaction at `/agents`. One submission is one independent Run: no conversation context, memory, queue, worker, retry, or streaming exists yet. MCP/tools, scheduling, memory, marketplace, IoT, multi-agent execution, and B4 provider portability are not implemented.
 
 See [implementation status](docs/implementation-status.md) for the verified current state and [architecture](docs/architecture.md) for target boundaries.
 
@@ -113,7 +115,7 @@ pnpm workspace members:
 
 - `apps/web`
 
-`apps/worker`, `apps/marketplace`, `packages/nervos-sdk`, `packages/nervos-mcp`, and `packages/nervos-models` are future placeholders. They are not active workspaces and contain no Stage A behavior.
+`apps/worker`, `apps/marketplace`, `packages/nervos-sdk`, and `packages/nervos-mcp` are future placeholders. They are not active workspaces and contain no implemented behavior. `packages/nervos-core` and `packages/nervos-models` are active workspaces: the former holds the domain/application logic and the latter the single implemented model-provider adapter.
 
 ## Configuration and security
 

@@ -39,6 +39,55 @@ def test_fingerprint_detects_creation_and_changes(tmp_path: Path) -> None:
     assert first.digest != e2e.fingerprint(target).digest
 
 
+def test_e2e_environment_strips_the_provider_credential(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Automated verification must never be able to consume the operator's real credential."""
+    e2e = load_module()
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "SYNTHETIC-E2E-CREDENTIAL-DO-NOT-USE")
+
+    environment = e2e.e2e_environment(tmp_path / "nervos-e2e.db", "http://127.0.0.1:5173")
+
+    assert "ANTHROPIC_API_KEY" not in environment
+    assert environment["NERVOS_ENVIRONMENT"] == "test"
+    assert environment["NERVOS_DATABASE_PATH"] == str(tmp_path / "nervos-e2e.db")
+    assert environment["NERVOS_APP_ORIGIN"] == "http://127.0.0.1:5173"
+    assert environment["NERVOS_LOG_LEVEL"] == "WARNING"
+
+
+def test_e2e_environment_is_complete_without_a_credential(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    e2e = load_module()
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    environment = e2e.e2e_environment(tmp_path / "nervos-e2e.db", "http://127.0.0.1:5173")
+
+    assert "ANTHROPIC_API_KEY" not in environment
+    assert environment["NERVOS_ENVIRONMENT"] == "test"
+
+
+def test_e2e_launches_the_deterministic_factory_not_production_composition() -> None:
+    """The supervised API must be the test-only factory, never the production entrypoint."""
+    source = (ROOT / "scripts" / "e2e.py").read_text(encoding="utf-8")
+
+    assert "e2e_app:create_app" in source
+    assert "--factory" in source
+    assert "tests/e2e_support" in source
+    assert "nervos_api.main:app" not in source
+
+    factory = ROOT / "tests" / "e2e_support" / "e2e_app.py"
+    assert factory.is_file()
+    assert "ANTHROPIC_API_KEY" not in factory.read_text(encoding="utf-8")
+
+
+def test_development_launcher_still_uses_production_composition() -> None:
+    """The dev launcher is pinned by tests/test_tooling.py and must not be repointed."""
+    source = (ROOT / "scripts" / "dev.py").read_text(encoding="utf-8")
+
+    assert "nervos_api.main:app" in source
+
+
 def test_run_e2e_rejects_a_temporary_database_that_aliases_the_default_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
