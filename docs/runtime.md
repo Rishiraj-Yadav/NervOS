@@ -2,7 +2,7 @@
 
 ## Status
 
-Target architecture. Stage A contains no agent runtime. B0 freezes the planned Stage B trusted-agent proof described in ADR 0007; B1–B4 runtime behavior is not implemented yet.
+Stage B target architecture. B1 now implements the provider-neutral Agent Definition, Agent Instance, and Run domain/persistence foundation described in ADR 0007. B2–B4 model execution, API, and UI behavior is not implemented.
 
 ## Stage B trusted-agent proof
 

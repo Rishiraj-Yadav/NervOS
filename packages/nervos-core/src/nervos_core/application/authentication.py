@@ -8,6 +8,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
+from nervos_core.application.clock import Clock
+from nervos_core.application.errors import (
+    PersistenceUnavailable as ApplicationPersistenceUnavailable,
+)
+
 USERNAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9_.-]{2,31}\Z")
 MIN_PASSWORD_LENGTH = 12
 MAX_PASSWORD_LENGTH = 128
@@ -39,7 +44,7 @@ class AuthenticationRequired(AuthenticationError):
     """Raised when a session cannot establish an active user."""
 
 
-class PersistenceUnavailable(AuthenticationError):
+class PersistenceUnavailable(AuthenticationError, ApplicationPersistenceUnavailable):
     """Raised when SQLite cannot safely complete an authentication operation."""
 
 
@@ -96,12 +101,6 @@ class StoredCredential:
 
 class SessionCollision(AuthenticationError):
     """Raised for an extraordinarily unlikely token-digest collision."""
-
-
-class Clock(Protocol):
-    """Return the current timezone-aware UTC instant."""
-
-    def __call__(self) -> datetime: ...
 
 
 class AuthenticationPersistence(Protocol):

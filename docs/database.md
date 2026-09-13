@@ -17,7 +17,7 @@ A2 deliberately does not enable WAL. The busy timeout is a local lock-handling s
 
 ## Application schema
 
-Revision `0001_stage_a` creates exactly two application tables. `alembic_version` and SQLite's `sqlite_sequence` are implementation tables rather than NervOS application tables.
+Revision `0001_stage_a` creates the two Stage A tables. Revision `0002_stage_b1_agent_instances_runs` additively creates `agent_instances` and `runs`, for exactly four application tables. `alembic_version` and SQLite's `sqlite_sequence` are implementation tables rather than NervOS application tables.
 
 ### `users`
 
@@ -45,6 +45,16 @@ Named constraints: `pk_auth_sessions`, `fk_auth_sessions_user_id_users`, `uq_aut
 Named indexes: `ix_auth_sessions_user_id` and `ix_auth_sessions_expires_at`.
 
 SQLite does not enforce the declared BLOB length. A3 produces an exact digest and never stores a raw session token.
+
+### `agent_instances`
+
+B1 stores explicit user-owned configuration pinned to an exact trusted definition version: owner, key/version, non-unique display name, enabled state, canonical model-provider identifier, opaque bounded model name, and UTC timestamps. The owner FK is restrictive. Duplicate names and multiple instances of one definition are allowed. The `(owner_user_id, id)` index supports cursor listing.
+
+### `runs`
+
+B1 stores one immutable request snapshot per instance: exact definition/provider/model/input and positive effective execution limits. Lifecycle is exactly `created -> running -> succeeded|failed`; a database CHECK enforces complete state-dependent field shapes, and snapshot text must contain a character outside the frozen NervOS blank-text set, so every stored row reconstructs as a valid domain Run. Row text is bounded by that row's snapshotted limits, usage is independently nullable/nonnegative, and terminal elapsed time is nonnegative. The instance FK is restrictive and `(agent_instance_id, id)` supports newest-first cursor history. Temporary Stage B maxima and the one-call policy are enforced in domain/application definition policy rather than fossilized as schema maxima.
+
+Neither migration nor setup seeds an Agent Instance or Run. No Agent Definition, provider, Job, Attempt, conversation, message, secret, cost, tool, or memory table exists.
 
 ## Migrations
 
