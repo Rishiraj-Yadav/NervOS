@@ -37,8 +37,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 ROOT = Path(__file__).resolve().parents[3]
 
-# The single known provider this milestone supports.
+# The two production provider identifiers this milestone supports.
 PROVIDER_ID = "anthropic"
+SECOND_PROVIDER_ID = "openai"
 
 ORIGIN = {"Origin": "http://localhost:5173"}
 PASSWORD = "correct horse battery staple"
@@ -51,10 +52,13 @@ class DeterministicCompletion:
     environment flag or setting can register it, and it performs no network I/O.
     """
 
-    def __init__(self, *, text: str = "deterministic answer") -> None:
+    def __init__(
+        self, *, text: str = "deterministic answer", provider_id: str = PROVIDER_ID
+    ) -> None:
         self.requests: list[ModelRequest] = []
         self.calls = 0
         self.text = text
+        self.provider_id = provider_id
         self.finish_reason: StopOutcome | None = StopOutcome.STOP
         self.usage: ModelUsage | None = ModelUsage(11, 3, None)
         self.error: Exception | None = None
@@ -66,7 +70,7 @@ class DeterministicCompletion:
             raise self.error
         return ModelResponse(
             self.text,
-            PROVIDER_ID,
+            self.provider_id,
             request.model_name,
             self.finish_reason,
             self.usage,
@@ -112,6 +116,25 @@ def deterministic_catalog(completion: DeterministicCompletion) -> ModelProviderC
 def unavailable_catalog() -> ModelProviderCatalog:
     """Return a catalog where the known provider has no process configuration."""
     return ModelProviderCatalog([], known=[PROVIDER_ID])
+
+
+def two_provider_catalog(
+    anthropic: DeterministicCompletion, openai: DeterministicCompletion
+) -> ModelProviderCatalog:
+    """Return a catalog configuring both production providers with distinct doubles.
+
+    Keeping the doubles separate is what makes a provider-routing defect observable: a
+    fallback or a misrouted lookup shows up as a call on the wrong recorder.
+    """
+    return ModelProviderCatalog(
+        [(PROVIDER_ID, lambda: anthropic), (SECOND_PROVIDER_ID, lambda: openai)],
+        known=[PROVIDER_ID, SECOND_PROVIDER_ID],
+    )
+
+
+def unavailable_two_provider_catalog() -> ModelProviderCatalog:
+    """Return a catalog where both known providers lack process configuration."""
+    return ModelProviderCatalog([], known=[PROVIDER_ID, SECOND_PROVIDER_ID])
 
 
 def seed_user(session_factory: sessionmaker[Session], username: str) -> int:

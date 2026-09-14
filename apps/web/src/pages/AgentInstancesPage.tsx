@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 
+import { MODEL_PROVIDERS } from "../api/providers";
 import { agentInstancesQuery, useCreateAgentInstance } from "../api/queries";
 import { ErrorState, InlineError, LoadingState } from "../components/AsyncState";
 import { Brand } from "../components/Brand";
@@ -9,7 +10,6 @@ import { Brand } from "../components/Brand";
 // The single trusted definition this milestone exposes. It is never chosen implicitly.
 const DEFINITION_KEY = "nervos.chat";
 const DEFINITION_VERSION = "1";
-const PROVIDER_ID = "anthropic";
 
 export function AgentInstancesPage() {
   const instances = useQuery(agentInstancesQuery());
@@ -25,7 +25,7 @@ export function AgentInstancesPage() {
         agent_key: DEFINITION_KEY,
         agent_definition_version: DEFINITION_VERSION,
         display_name: String(data.get("display_name") ?? ""),
-        model_provider: PROVIDER_ID,
+        model_provider: String(data.get("model_provider") ?? ""),
         model_name: String(data.get("model_name") ?? ""),
       });
       await navigate(`/agents/${created.id}`);
@@ -128,8 +128,14 @@ export function AgentInstancesPage() {
               </p>
 
               <label htmlFor="model_provider">Model provider</label>
-              <input id="model_provider" type="text" value={PROVIDER_ID} readOnly />
-              <p className="field-hint">Anthropic is currently the only supported provider.</p>
+              <select id="model_provider" name="model_provider" defaultValue="anthropic">
+                {MODEL_PROVIDERS.map((provider) => (
+                  <option key={provider.id} value={provider.id}>
+                    {provider.label}
+                  </option>
+                ))}
+              </select>
+              <p className="field-hint">Choose a supported provider. Credentials stay in the API process.</p>
 
               <label htmlFor="model_name">Model</label>
               <input

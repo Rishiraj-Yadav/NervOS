@@ -36,33 +36,25 @@ Users configure and control them.
 
 ## Current development phase
 
-Check `docs/implementation-status.md` before making changes.
+`docs/implementation-status.md` is the authoritative statement of what is actually
+implemented today. `docs/roadmap.md` and `docs/architecture.md` describe reviewed
+direction and target boundaries, not delivered behavior. Read the status document
+before starting work, and update it only after that milestone's acceptance criteria
+actually pass.
 
-Do NOT implement features from future phases unless explicitly requested.
+Do not implement any feature belonging to a future stage or milestone without explicit
+authorization for that milestone. A capability absent from the current status document
+is not implemented, regardless of how the target architecture describes it.
 
-For Stage A the objective is only:
+Capabilities that remain outside every authorized milestone so far, and are therefore
+still unimplemented:
 
-- repository/tooling foundation
-- FastAPI API
-- SQLite database
-- SQLAlchemy + Alembic
-- local authentication
-- React dashboard foundation
-- configuration system
-- tests
-- CI
-- documentation
-
-Stage A must NOT implement:
-- agent runtime
-- MCP gateway
-- memory system
-- scheduler
-- job workers
-- marketplace
-- IoT
-- multi-agent execution
-- multi-user management
+- agent runtime, durable jobs, workers, queues, scheduling, and event triggers
+- MCP gateway and tool execution
+- scoped memory and conversation sessions
+- marketplace and agent package installation
+- multi-agent execution, IoT, and multi-user management
+- persistent secret management
 
 ## Architecture
 
@@ -76,7 +68,7 @@ Major boundaries:
 - `packages/nervos-core` — core domain/application logic
 - `packages/nervos-sdk` — third-party Agent SDK later
 - `packages/nervos-mcp` — MCP integration later
-- `packages/nervos-models` — model provider adapters later
+- `packages/nervos-models` — concrete model-provider adapters (currently `anthropic` and `openai`)
 
 The API layer may depend on nervos-core.
 

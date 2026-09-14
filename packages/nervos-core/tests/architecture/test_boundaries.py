@@ -92,8 +92,11 @@ def test_provider_sdk_exists_only_in_the_models_infrastructure_package() -> None
         module for path in python_files(MODELS_SOURCE) for module in imported_modules(path)
     }
 
-    assert not any(module.startswith(("anthropic", "nervos_models")) for module in core_imports)
-    assert any(module.startswith("anthropic") for module in model_imports)
+    # B4 adds a second concrete SDK; the boundary rule is unchanged for both.
+    for sdk in ("anthropic", "openai"):
+        assert not any(module.startswith(sdk) for module in core_imports), sdk
+        assert any(module.startswith(sdk) for module in model_imports), sdk
+    assert not any(module.startswith("nervos_models") for module in core_imports)
     assert all(
         path.name == "app.py" or not any(module.startswith("nervos_models") for module in imports)
         for path, imports in api_imports_by_file.items()
@@ -108,11 +111,30 @@ def test_api_routes_never_reach_persistence_or_a_provider_adapter() -> None:
 
         assert not any(module.startswith("sqlalchemy") for module in imports), path
         assert not any(module.startswith("nervos_core.infrastructure") for module in imports), path
-        assert not any(module.startswith(("anthropic", "nervos_models")) for module in imports), (
-            path
-        )
+        assert not any(
+            module.startswith(("anthropic", "openai", "nervos_models")) for module in imports
+        ), path
         for forbidden in ("AgentPersistence", "SqlAlchemyAgentPersistence", "Session", "Base"):
             assert forbidden not in text, (path, forbidden)
+
+
+def test_exactly_two_production_providers_are_known() -> None:
+    """Portability is two reviewed adapters, not open-ended discovery."""
+    text = (MODELS_SOURCE / "composition.py").read_text(encoding="utf-8")
+
+    assert "PROVIDER_ID as ANTHROPIC_PROVIDER_ID" in text
+    assert "PROVIDER_ID as OPENAI_PROVIDER_ID" in text
+    assert "known=[ANTHROPIC_PROVIDER_ID, OPENAI_PROVIDER_ID]" in text
+    for dynamic in ("pkgutil", "importlib", "iter_entry_points", "setuptools"):
+        assert dynamic not in text, dynamic
+
+
+def test_trusted_chat_and_coordinator_stay_provider_neutral() -> None:
+    """No provider-specific branch may appear in the shared execution path."""
+    for name in ("trusted_chat.py", "run_coordinator.py", "model_completion.py"):
+        text = (CORE_SOURCE / "application" / name).read_text(encoding="utf-8")
+        for provider in ("anthropic", "openai", "Anthropic", "OpenAI"):
+            assert provider not in text, (name, provider)
 
 
 def test_b3_route_surface_and_migration_freeze() -> None:

@@ -103,6 +103,64 @@ describe("agent list page", () => {
     expect(screen.getByLabelText("Agent definition")).toHaveValue("nervos.chat v1");
   });
 
+  it("offers exactly the two supported providers and no discovery request", async () => {
+    let providerListCalls = 0;
+    server.use(
+      ...signedIn(),
+      http.get("/api/v1/model-providers", () => {
+        providerListCalls += 1;
+        return HttpResponse.json({ items: [] });
+      }),
+    );
+    const { user } = await renderRoute("/agents");
+    await user.click(await screen.findByRole("button", { name: /create a chat agent/i }));
+
+    const options = Array.from(
+      screen.getByLabelText("Model provider").querySelectorAll("option"),
+      (option) => ({ value: option.value, label: option.textContent }),
+    );
+
+    expect(options).toEqual([
+      { value: "anthropic", label: "Anthropic" },
+      { value: "openai", label: "OpenAI" },
+    ]);
+    expect(providerListCalls).toBe(0);
+  });
+
+  it("creates an instance with the explicitly selected second provider", async () => {
+    let body: unknown = null;
+    server.use(
+      ...signedIn(),
+      http.post("/api/v1/agent-instances", async ({ request }) => {
+        body = await request.json();
+        return HttpResponse.json(
+          apiAgentInstance({ display_name: "Chat", model_provider: "openai" }),
+          { status: 201 },
+        );
+      }),
+      http.get("/api/v1/agent-instances/1", () =>
+        HttpResponse.json(apiAgentInstance({ display_name: "Chat", model_provider: "openai" })),
+      ),
+      http.get("/api/v1/agent-instances/1/runs", () =>
+        HttpResponse.json({ items: [], next_before_id: null }),
+      ),
+    );
+    const { user } = await renderRoute("/agents");
+    await user.click(await screen.findByRole("button", { name: /create a chat agent/i }));
+
+    await user.type(screen.getByLabelText("Display name"), "Chat");
+    await user.selectOptions(screen.getByLabelText("Model provider"), "openai");
+    await user.type(screen.getByLabelText("Model"), "opaque/second-model");
+    await user.click(screen.getByRole("button", { name: /^create agent$/i }));
+
+    await screen.findByRole("heading", { name: "Chat" });
+    expect(body).toMatchObject({
+      display_name: "Chat",
+      model_provider: "openai",
+      model_name: "opaque/second-model",
+    });
+  });
+
   it("surfaces a load failure with a retry affordance", async () => {
     server.use(
       setupStatusHandler(true),

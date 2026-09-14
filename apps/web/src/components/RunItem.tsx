@@ -35,6 +35,9 @@ export function RunItem({ run }: { run: Run }) {
       <header className="run-head">
         <span className={`run-status run-status-${run.status}`}>{STATUS_LABELS[run.status]}</span>
         <span className="run-meta">Run #{run.id}</span>
+        <span className="run-meta">
+          {run.model_provider} · {run.model_name}
+        </span>
         {run.elapsed_ms !== null ? <span className="run-meta">{run.elapsed_ms} ms</span> : null}
         {usage !== null ? <span className="run-meta">{usage}</span> : null}
       </header>

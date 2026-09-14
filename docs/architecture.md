@@ -128,7 +128,7 @@ Future MCP integration and tool-gateway abstractions.
 
 ### `packages/nervos-models`
 
-Model-provider interface and adapters. It currently holds the single implemented provider adapter, canonical ID `anthropic`. Provider-SDK imports are confined to this package; core domain/application remain provider-SDK-free.
+Model-provider interface and adapters. It currently holds exactly two implemented production provider adapters: canonical ID `anthropic` through the asynchronous Messages API and canonical ID `openai` through the asynchronous Responses API. Provider-SDK imports are confined to this package; core domain/application remain provider-SDK-free. The package is a future home for further adapters, but only these two reviewed adapters are known today.
 
 ## Permanent domain distinctions
 

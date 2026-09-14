@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import anthropic
 import pytest
+from anthropic import Omit
 from nervos_core.application.model_completion import (
     MODEL_RESPONSE_INVALID,
     ModelProviderError,
@@ -322,17 +323,96 @@ async def test_cancellation_propagates_and_never_becomes_a_provider_failure() ->
     assert len(create.kwargs) == 1
 
 
-def test_production_client_disables_sdk_retries(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The production client must issue one request with provider retries disabled."""
-    import nervos_models.anthropic as module
+def _fake_sdk_client(inherited: dict[str, Any]) -> tuple[type, list[dict[str, Any]]]:
+    """A stand-in exposing the SDK's public header surface, plus names to report as inherited.
 
-    captured: dict[str, Any] = {}
+    The factory reads `platform_headers()` and the `default_headers` property, and may call
+    `with_options`, exactly as it does against the real client.
+    """
+    copies: list[dict[str, Any]] = []
 
     class _FakeAsyncAnthropic:
         def __init__(self, **kwargs: Any) -> None:
-            captured.update(kwargs)
+            self.constructed: dict[str, Any] = kwargs
 
-    monkeypatch.setattr(module, "AsyncAnthropic", _FakeAsyncAnthropic)
+        @property
+        def user_agent(self) -> str:
+            return "AsyncAnthropic/Python 1.5.0"
+
+        def platform_headers(self) -> dict[str, str]:
+            return {"X-Stainless-Lang": "python"}
+
+        @property
+        def default_headers(self) -> dict[str, Any]:
+            return {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "User-Agent": "AsyncAnthropic/Python 1.5.0",
+                "X-Stainless-Async": "async:asyncio",
+                "anthropic-version": "2023-06-01",
+                **self.platform_headers(),
+                **self.constructed["default_headers"],
+                **inherited,
+            }
+
+        def with_options(self, **kwargs: Any) -> Any:
+            copies.append(kwargs)
+            return self
+
+    return _FakeAsyncAnthropic, copies
+
+
+def test_production_client_disables_sdk_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The production client must issue one request with provider retries disabled.
+
+    Every keyword is enumerated, so the pinned canonical endpoint and the NervOS-owned
+    authentication header are part of the frozen client contract and any further constructor
+    argument would fail this test.
+    """
+    import nervos_models.anthropic as module
+
+    fake, copies = _fake_sdk_client({})
+    monkeypatch.setattr(module, "AsyncAnthropic", fake)
     client = module.create_anthropic_client("synthetic-key", timeout_seconds=1.5)
-    assert isinstance(client, _FakeAsyncAnthropic)
-    assert captured == {"api_key": "synthetic-key", "max_retries": 0, "timeout": 1.5}
+    assert isinstance(client, fake)
+    captured = cast(Any, client).constructed
+    assert set(captured) == {"api_key", "base_url", "max_retries", "timeout", "default_headers"}
+    assert captured["api_key"] == "synthetic-key"
+    assert captured["base_url"] == "https://api.anthropic.com"
+    assert captured["max_retries"] == 0
+    assert captured["timeout"] == 1.5
+    headers = captured["default_headers"]
+    assert headers["x-api-key"] == "synthetic-key"
+    assert isinstance(headers["Authorization"], Omit)
+    # Canonical headers are always frozen explicitly, including when no arbitrary ambient
+    # name was inherited, so a same-name ambient collision cannot survive.
+    assert len(copies) == 1
+    final_headers = copies[0]["set_default_headers"]
+    assert final_headers["Accept"] == "application/json"
+    assert final_headers["Content-Type"] == "application/json"
+    assert final_headers["User-Agent"] == "AsyncAnthropic/Python 1.5.0"
+    assert final_headers["X-Stainless-Async"] == "async:asyncio"
+    assert final_headers["Anthropic-Version"] == "2023-06-01"
+
+
+def test_an_inherited_custom_header_name_is_removed_with_the_sdk_omit_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only names the factory did not authorize are removed, and by the SDK's own sentinel."""
+    import nervos_models.anthropic as module
+
+    fake, copies = _fake_sdk_client(
+        {"X-Ambient-Extra": "synthetic-extra", "Anthropic-Beta": "synthetic-beta"}
+    )
+    monkeypatch.setattr(module, "AsyncAnthropic", fake)
+    module.create_anthropic_client("synthetic-key", timeout_seconds=1.5)
+
+    assert len(copies) == 1
+    headers = copies[0]["set_default_headers"]
+    assert isinstance(headers["X-Ambient-Extra"], Omit)
+    assert isinstance(headers["Anthropic-Beta"], Omit)
+    assert headers["x-api-key"] == "synthetic-key"
+    assert isinstance(headers["Authorization"], Omit)
+    # The SDK's own headers are restored with canonical values rather than omitted.
+    assert headers["Anthropic-Version"] == "2023-06-01"
+    assert headers["Accept"] == "application/json"

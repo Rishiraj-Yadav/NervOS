@@ -1,13 +1,12 @@
 import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 
+import { MODEL_PROVIDERS } from "../api/providers";
 import { agentInstanceQuery, agentRunsQuery, useCreateRun, useUpdateAgentInstance } from "../api/queries";
 import { ErrorState, InlineError, LoadingState } from "../components/AsyncState";
 import { Brand } from "../components/Brand";
 import { RunItem } from "../components/RunItem";
 import { NotFoundPage } from "./NotFoundPage";
-
-const PROVIDER_ID = "anthropic";
 
 export function AgentInstancePage() {
   const { agentInstanceId } = useParams<{ agentInstanceId: string }>();
@@ -36,7 +35,7 @@ function AgentInstanceView({ agentInstanceId }: { agentInstanceId: number }) {
       // separate request so one submission maps to exactly one stored change.
       await updateConfiguration.mutateAsync({
         display_name: String(data.get("display_name") ?? ""),
-        model_provider: PROVIDER_ID,
+        model_provider: String(data.get("model_provider") ?? ""),
         model_name: String(data.get("model_name") ?? ""),
       });
     } catch {
@@ -155,7 +154,18 @@ function AgentInstanceView({ agentInstanceId }: { agentInstanceId: number }) {
                 />
 
                 <label htmlFor="model_provider">Model provider</label>
-                <input id="model_provider" type="text" value={PROVIDER_ID} readOnly />
+                <select
+                  id="model_provider"
+                  name="model_provider"
+                  defaultValue={instance.data.model_provider}
+                  key={`provider-${instance.data.updated_at}`}
+                >
+                  {MODEL_PROVIDERS.map((provider) => (
+                    <option key={provider.id} value={provider.id}>
+                      {provider.label}
+                    </option>
+                  ))}
+                </select>
 
                 <label htmlFor="model_name">Model</label>
                 <input
