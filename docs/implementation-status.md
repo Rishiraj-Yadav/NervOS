@@ -2,7 +2,7 @@
 
 ## Current phase
 
-Stage B — Trusted-agent runtime proof (B1 domain/persistence, B2 internal one-call execution, B3 trusted Agent/Run HTTP API with the minimal Chat dashboard interaction, and B4 second-provider portability are implemented. Stage B is **not yet finally accepted**: the B4 candidate is locally verified and awaiting external implementation review, and Git/hosted/merge/post-merge acceptance has not been performed)
+Stage B — Trusted-agent runtime proof is complete and accepted. B1 domain/persistence, B2 internal one-call execution, B3 trusted Agent/Run HTTP API with the minimal Chat dashboard interaction, and B4 second-provider portability are implemented, merged to `main`, and post-merge verified.
 
 ## Stage B milestones
 
@@ -10,7 +10,7 @@ Stage B — Trusted-agent runtime proof (B1 domain/persistence, B2 internal one-
 - [x] B1 — Agent-instance and run domain/persistence
 - [x] B2 — Model adapter, process-secret foundation, and bounded proof runner
 - [x] B3 — Trusted Chat Agent API and minimal dashboard interaction
-- [x] B4 — Second-provider portability (implemented; Stage B final acceptance still pending)
+- [x] B4 — Second-provider portability and Stage B final acceptance
 
 B0 is a documentation/governance milestone. ADR 0007 freezes a one-shot trusted `nervos.chat` definition identified by exact key/version, explicit user-owned instances, immutable-snapshot Runs, a narrow application-owned model port, process-only provider credentials, one bounded model call, the `created -> running -> succeeded|failed` lifecycle, and an awaited API-process proof runner. B1 implements the domain/persistence foundation, B2 implements the internal Anthropic execution path, B3 exposes that same path over an authenticated, owner-scoped HTTP API with a minimal trusted Chat UI, and B4 adds OpenAI Responses as a second production adapter behind the unchanged port. ADR 0008 records the B4 portability decision.
 
@@ -247,9 +247,9 @@ OPENAI LIVE PROOF — NOT EXECUTED
 
 ## Next action
 
-B4 EXTERNAL ACCEPTANCE REVIEW
+Stage B implementation is complete. B4 passed external implementation review and hosted checks, was finalized as implementation commit `faa52a2`, and was merged to `main` by pull request #8 in merge commit `acb55b3`. Local `main` is synchronized with `origin/main`, the working tree was clean after synchronization, and the accepted B4 commit is reachable from merged `main`.
 
-The B4 candidate is implemented and locally re-verified after pre-acceptance remediation, and remains uncommitted for external acceptance review. Stage B may be recorded as complete only once the candidate has been accepted, merged, and post-merge verified; until then this document describes a candidate, not an accepted release state. No live provider proof has been executed for either provider. Stage C requires separate planning and authorization and does not begin automatically.
+No live provider proof has been executed for either provider; those optional proofs remain separately authorized and non-blocking. Stage C is not started and requires separate planning and explicit authorization.
 
 ## Maintenance rule
 
