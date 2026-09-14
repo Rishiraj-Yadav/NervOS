@@ -2,7 +2,7 @@
 
 ## Current phase
 
-Stage B — Trusted-agent runtime proof (B1 domain/persistence, B2 internal one-call execution, and B3 trusted Agent/Run HTTP API with the minimal Chat dashboard interaction are implemented; B4 is not implemented)
+Stage B — Trusted-agent runtime proof (B1 domain/persistence, B2 internal one-call execution, B3 trusted Agent/Run HTTP API with the minimal Chat dashboard interaction, and B4 second-provider portability are implemented. Stage B is **not yet finally accepted**: the B4 candidate is locally verified and awaiting external implementation review, and Git/hosted/merge/post-merge acceptance has not been performed)
 
 ## Stage B milestones
 
@@ -10,9 +10,9 @@ Stage B — Trusted-agent runtime proof (B1 domain/persistence, B2 internal one-
 - [x] B1 — Agent-instance and run domain/persistence
 - [x] B2 — Model adapter, process-secret foundation, and bounded proof runner
 - [x] B3 — Trusted Chat Agent API and minimal dashboard interaction
-- [ ] B4 — Provider portability, usage accounting, and final Stage B acceptance
+- [x] B4 — Second-provider portability (implemented; Stage B final acceptance still pending)
 
-B0 is a documentation/governance milestone. ADR 0007 freezes a one-shot trusted `nervos.chat` definition identified by exact key/version, explicit user-owned instances, immutable-snapshot Runs, a narrow application-owned model port, process-only provider credentials, one bounded model call, the `created -> running -> succeeded|failed` lifecycle, and an awaited API-process proof runner. B1 implements the domain/persistence foundation, B2 implements the internal Anthropic execution path, and B3 exposes that same path over an authenticated, owner-scoped HTTP API with a minimal trusted Chat UI. B4 is not implemented.
+B0 is a documentation/governance milestone. ADR 0007 freezes a one-shot trusted `nervos.chat` definition identified by exact key/version, explicit user-owned instances, immutable-snapshot Runs, a narrow application-owned model port, process-only provider credentials, one bounded model call, the `created -> running -> succeeded|failed` lifecycle, and an awaited API-process proof runner. B1 implements the domain/persistence foundation, B2 implements the internal Anthropic execution path, B3 exposes that same path over an authenticated, owner-scoped HTTP API with a minimal trusted Chat UI, and B4 adds OpenAI Responses as a second production adapter behind the unchanged port. ADR 0008 records the B4 portability decision.
 
 ## Stage A milestones
 
@@ -226,11 +226,30 @@ The browser journey runs against a real API subprocess whose supervisor launches
 
 `REAL PROVIDER PROOF NOT EXECUTED — CREDENTIAL/ACCESS UNAVAILABLE`
 
+## B4 implementation verification
+
+B4 adds a second production provider without changing the core port, the B3 API surface, or the schema. It adds no migration (head remains `0002`), no new REST route (the OpenAPI surface remains exactly the seven B3 operations), and no provider-status endpoint.
+
+Implemented: canonical provider `openai` through the official asynchronous `openai` SDK and the stateless Responses API, alongside the unchanged `anthropic` adapter; one optional process-only `OPENAI_API_KEY` setting with blank-to-unavailable normalization and no `.env` loading; a composition that knows exactly both canonical IDs and constructs each client only when its credential exists, with `max_retries=0` and explicit async close; a static two-option provider selector shared by the Agent create and configuration pages; and provider/model display on each Run card.
+
+Frozen OpenAI contract: exactly one awaited `responses.create` per execution with `store=False`, `background=False`, and `stream=False`, and no conversation, previous-response, tools, metadata, temperature, or reasoning controls. Output is normalized by inspecting typed `response.output` directly: recognized reasoning items are ignored, at most one assistant message is accepted, ordered `output_text` parts are concatenated with no separator or normalization, any refusal dominates and is never exposed, and tool/unknown output items fail closed. Accepted visible text is required only for a completion, so an empty or blank `completed` response is still invalid; a `max_output_tokens` or `content_filter` outcome remains canonical even when the response carries no output item at all, and any partial text accompanying it is discarded rather than exposed. `completed` maps to `stop`; `incomplete:max_output_tokens` to `model_output_incomplete`; refusal and `incomplete:content_filter` to `model_refused`; `incomplete:max_messages`, `incomplete:steered`, unknown or absent incomplete reasons, and `in_progress`/`queued`/`cancelled`/unknown statuses to `model_response_invalid`; `failed` maps conservatively to `model_unavailable`. A non-null structured `response.error` is never serialized. The immutable Run `model_name` snapshot remains the operator's opaque string and is never rewritten by a provider-returned alias.
+
+Usage: OpenAI retains provider-reported input, output, and total counts and never derives them; Anthropic's `total_tokens` remains `NULL` for the same reason. Cache, reasoning, and tool breakdowns are discarded. Typed SDK failures map most-specific-first onto the existing NervOS codes with no string parsing, and external cancellation still propagates.
+
+Pre-acceptance remediation: an earlier adapter revision decided its outcome and then unconditionally demanded visible text, so an empty `incomplete:max_output_tokens` or `incomplete:content_filter` response was misclassified as `model_response_invalid` instead of `model_output_incomplete` or `model_refused`. Normalization order is now structured provider error, then unrecognized status, then any unacceptable output item, then an explicit refusal, and only last the presence of accepted visible text; item validation still applies to every outcome, so a tool or unknown item fails closed even alongside a recognized non-success status. Composition no longer leaves a secret-bearing settings object reachable: each credential is read once locally to build its client, middleware and `app.state` then receive a credential-free copy, credential fields are excluded from repr and serialization, and app-state, log, and OpenAPI reachability are asserted by test. Both production client factories now pin their canonical HTTPS API base URL and additionally own their authentication and scoping headers, so the ambient `OPENAI_BASE_URL`/`ANTHROPIC_BASE_URL`, `OPENAI_CUSTOM_HEADERS`/`ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_AUTH_TOKEN`, and `OPENAI_ORG_ID`/`OPENAI_PROJECT_ID` variables can no longer redirect a canonical provider, replace its authentication, or scope its request. Each factory then replaces the SDK custom-header layer through public `with_options(set_default_headers=...)`, restoring canonical HTTP basics from frozen/public SDK values, the public platform-header family, required protocol headers, and NervOS-owned authentication/scoping policy while applying the public `Omit` sentinel to every ambient-only name. Therefore neither an arbitrary new header nor a hostile value colliding with an SDK-owned canonical name can reach the prepared request. Stage B supports exactly one provider-environment input per provider, its API key. The isolation uses only public SDK mechanisms; the exact boundary is recorded in `docs/runtime.md`.
+
+Verification uses deterministic doubles for both providers only. The E2E supervisor removes both `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` from child environments, installs two distinct provider-identifying offline fakes with fail-closed startup assertions, and runs the same instance with Anthropic, then OpenAI, proving both immutable snapshots survive reload. Cross-provider tests assert one call, disabled SDK retries, the shared canonical finish vocabulary, safe errors, and cancellation propagation for both adapters. A dedicated no-fallback regression proves a failing selected provider makes exactly one call and never invokes the other.
+
+```text
+ANTHROPIC LIVE PROOF — NOT EXECUTED
+OPENAI LIVE PROOF — NOT EXECUTED
+```
+
 ## Next action
 
-B3 IMPLEMENTATION REVIEW
+B4 EXTERNAL ACCEPTANCE REVIEW
 
-B3 was implemented and verified under an explicit authorization and remains uncommitted pending external implementation review. B4 requires separate planning and authorization; it does not begin automatically.
+The B4 candidate is implemented and locally re-verified after pre-acceptance remediation, and remains uncommitted for external acceptance review. Stage B may be recorded as complete only once the candidate has been accepted, merged, and post-merge verified; until then this document describes a candidate, not an accepted release state. No live provider proof has been executed for either provider. Stage C requires separate planning and authorization and does not begin automatically.
 
 ## Maintenance rule
 

@@ -14,7 +14,7 @@ Stage B proves one trusted built-in, one-shot Chat Agent through a provider-neut
 - **B1 — Agent-instance and run domain/persistence:** implement the two-table domain, exact-version built-in registry, immutable snapshots, transitions, ownership, Alembic migration, and deterministic fake model boundary. No provider SDK, API, or UI.
 - **B2 — Model adapter and bounded proof runner:** after a separately reviewed first-provider decision, implement one real adapter, process-environment credential boundary, and one-call awaited in-process coordinator with short database transactions.
 - **B3 — Trusted Chat Agent API and minimal UI:** add owner-scoped resource APIs and a small authenticated one-shot Chat experience whose persisted result survives reload; deterministic CI/E2E continues to use a fake provider.
-- **B4 — Provider portability, usage, and final acceptance:** prove the unchanged Chat behavior through a second reviewed adapter, normalize optional usage, and complete architecture/security/test/documentation verification.
+- **B4 — Provider portability, usage, and final acceptance:** implemented. The unchanged `nervos.chat@1` behavior runs through a second reviewed adapter (OpenAI Responses) behind the same provider-neutral port, usage is normalized per provider, and architecture/security/test/documentation verification is complete.
 
 Outcome: one trusted agent can execute safely and observably through NervOS without claiming the durable execution engine introduced in Stage C.
 

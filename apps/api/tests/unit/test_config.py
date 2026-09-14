@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 from nervos_api.config import Settings
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 VARIABLES = (
     "NERVOS_ENVIRONMENT",
@@ -13,6 +13,8 @@ VARIABLES = (
     "NERVOS_LOG_LEVEL",
     "ANTHROPIC_API_KEY",
     "NERVOS_ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "NERVOS_OPENAI_API_KEY",
 )
 
 
@@ -20,6 +22,11 @@ VARIABLES = (
 def clear_nervos_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     for variable in VARIABLES:
         monkeypatch.delenv(variable, raising=False)
+
+
+def _secret(value: str | None) -> SecretStr | None:
+    """Wrap a synthetic credential the way process configuration does."""
+    return SecretStr(value) if value is not None else None
 
 
 def test_anthropic_credential_uses_exact_external_alias_and_is_secret(
@@ -45,6 +52,99 @@ def test_blank_anthropic_credential_is_unavailable(
 ) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", value)
     assert Settings().anthropic_api_key is None
+
+
+def test_openai_credential_uses_exact_external_alias_and_is_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    credential = "synthetic-second-provider-credential"
+    monkeypatch.setenv("OPENAI_API_KEY", credential)
+    settings = Settings()
+    assert settings.openai_api_key is not None
+    assert settings.openai_api_key.get_secret_value() == credential
+    assert credential not in repr(settings)
+    assert credential not in str(settings.model_dump())
+
+
+def test_prefixed_openai_variable_is_not_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NERVOS_OPENAI_API_KEY", "must-not-be-read")
+    assert Settings().openai_api_key is None
+
+
+@pytest.mark.parametrize("value", ["", " ", "\t\r\n"])
+def test_blank_openai_credential_is_unavailable(
+    value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", value)
+    assert Settings().openai_api_key is None
+
+
+def test_provider_credentials_are_independent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One provider's credential never configures or leaks into the other."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "synthetic-anthropic-only")
+    settings = Settings()
+    assert settings.anthropic_api_key is not None
+    assert settings.openai_api_key is None
+
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-openai-only")
+    both = Settings()
+    assert both.anthropic_api_key is not None
+    assert both.openai_api_key is not None
+    assert both.anthropic_api_key.get_secret_value() == "synthetic-anthropic-only"
+    assert both.openai_api_key.get_secret_value() == "synthetic-openai-only"
+
+
+def test_provider_credentials_are_absent_from_repr_and_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A credential field is never rendered by repr and never emitted by serialization."""
+    anthropic = "synthetic-anthropic-serialization"
+    openai = "synthetic-openai-serialization"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", anthropic)
+    monkeypatch.setenv("OPENAI_API_KEY", openai)
+
+    settings = Settings()
+
+    dumped = settings.model_dump()
+    assert "anthropic_api_key" not in dumped
+    assert "openai_api_key" not in dumped
+    assert anthropic not in repr(settings)
+    assert openai not in repr(settings)
+    assert anthropic not in str(settings.model_dump())
+    assert openai not in str(settings.model_dump())
+
+
+@pytest.mark.parametrize(
+    ("anthropic", "openai"),
+    [
+        (None, None),
+        ("synthetic-anthropic-only", None),
+        (None, "synthetic-openai-only"),
+        ("synthetic-anthropic-both", "synthetic-openai-both"),
+    ],
+)
+def test_sanitized_copy_drops_both_credentials_and_changes_nothing_else(
+    anthropic: str | None, openai: str | None
+) -> None:
+    """One credential-free copy serves every consumer that outlives composition."""
+    settings = Settings(
+        anthropic_api_key=_secret(anthropic),
+        openai_api_key=_secret(openai),
+    )
+
+    sanitized = settings.without_provider_credentials()
+
+    assert sanitized.anthropic_api_key is None
+    assert sanitized.openai_api_key is None
+    assert sanitized.environment == settings.environment
+    assert sanitized.database_path == settings.database_path
+    assert sanitized.app_origin == settings.app_origin
+    assert sanitized.log_level == settings.log_level
+
+
+def test_settings_load_no_environment_file() -> None:
+    """Credentials are process-only; no dotenv file is read automatically."""
+    assert Settings.model_config.get("env_file") is None
 
 
 def test_defaults_are_validated_without_creating_database() -> None:

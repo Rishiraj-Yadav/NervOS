@@ -190,6 +190,7 @@ def e2e_environment(database: Path, web_origin: str) -> dict[str, str]:
     """
     environment = os.environ.copy()
     environment.pop("ANTHROPIC_API_KEY", None)
+    environment.pop("OPENAI_API_KEY", None)
     environment.update(
         {
             "NERVOS_ENVIRONMENT": "test",

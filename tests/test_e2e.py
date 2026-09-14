@@ -45,10 +45,12 @@ def test_e2e_environment_strips_the_provider_credential(
     """Automated verification must never be able to consume the operator's real credential."""
     e2e = load_module()
     monkeypatch.setenv("ANTHROPIC_API_KEY", "SYNTHETIC-E2E-CREDENTIAL-DO-NOT-USE")
+    monkeypatch.setenv("OPENAI_API_KEY", "SYNTHETIC-SECOND-CREDENTIAL-DO-NOT-USE")
 
     environment = e2e.e2e_environment(tmp_path / "nervos-e2e.db", "http://127.0.0.1:5173")
 
     assert "ANTHROPIC_API_KEY" not in environment
+    assert "OPENAI_API_KEY" not in environment
     assert environment["NERVOS_ENVIRONMENT"] == "test"
     assert environment["NERVOS_DATABASE_PATH"] == str(tmp_path / "nervos-e2e.db")
     assert environment["NERVOS_APP_ORIGIN"] == "http://127.0.0.1:5173"
@@ -64,6 +66,7 @@ def test_e2e_environment_is_complete_without_a_credential(
     environment = e2e.e2e_environment(tmp_path / "nervos-e2e.db", "http://127.0.0.1:5173")
 
     assert "ANTHROPIC_API_KEY" not in environment
+    assert "OPENAI_API_KEY" not in environment
     assert environment["NERVOS_ENVIRONMENT"] == "test"
 
 

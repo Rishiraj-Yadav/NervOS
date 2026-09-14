@@ -1,6 +1,6 @@
 # NervOS configuration
 
-Milestone B2 uses one immutable API settings model backed only by process environment variables. NervOS does not automatically load `.env`, `.env.local`, or any other environment file. `.env.example` is documentation containing non-secret values only.
+Stage B uses one immutable API settings model backed only by process environment variables. NervOS does not automatically load `.env`, `.env.local`, or any other environment file. `.env.example` is documentation containing non-secret values only.
 
 ## Variables
 
@@ -10,7 +10,8 @@ Milestone B2 uses one immutable API settings model backed only by process enviro
 | `NERVOS_DATABASE_PATH` | `~/.nervos/nervos.db` | Must be non-blank and identify a file rather than an existing directory. User-home syntax is expanded and the path is resolved without creating it. |
 | `NERVOS_APP_ORIGIN` | `http://localhost:5173` | One exact HTTP(S) origin with a host. Wildcards, credentials, paths, trailing slashes, queries, fragments, and invalid ports are rejected. Production requires HTTPS. |
 | `NERVOS_LOG_LEVEL` | `INFO` | One of `DEBUG`, `INFO`, `WARNING`, or `ERROR`. |
-| `ANTHROPIC_API_KEY` | unavailable | Optional process-only credential for the B2 Anthropic adapter. It is read through an explicit secret-aware settings alias, never through `NERVOS_ANTHROPIC_API_KEY`, and is required only when executing an Anthropic-configured instance. Empty or whitespace-only values mean unavailable. |
+| `ANTHROPIC_API_KEY` | unavailable | Optional process-only credential for Anthropic. It is required only when executing an Anthropic-configured instance. Empty or whitespace-only values mean unavailable. |
+| `OPENAI_API_KEY` | unavailable | Optional process-only credential for OpenAI Responses. It is required only when executing an OpenAI-configured instance. Empty or whitespace-only values mean unavailable. |
 
 A relative database path is resolved from the process working directory. Repository commands run from the repository root; deployments should normally provide an absolute path.
 

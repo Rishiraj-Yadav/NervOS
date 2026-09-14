@@ -69,6 +69,46 @@ describe("agent detail page", () => {
     expect(screen.getByLabelText("Model")).toHaveValue("opaque/model");
   });
 
+  it("shows a second-provider instance with its stored provider selected", async () => {
+    server.use(
+      ...detailHandlers({
+        instance: apiAgentInstance({ model_provider: "openai", model_name: "opaque/second" }),
+      }),
+    );
+
+    await renderRoute("/agents/1");
+
+    await screen.findByRole("heading", { name: "Chat" });
+    expect(screen.getByLabelText("Model provider")).toHaveValue("openai");
+    expect(screen.getByLabelText("Model")).toHaveValue("opaque/second");
+  });
+
+  it("switches provider without rewriting the user's model string", async () => {
+    let body: unknown;
+    server.use(
+      ...detailHandlers({
+        patch: (value) => (
+          (body = value),
+          HttpResponse.json(apiAgentInstance({ model_provider: "openai", model_name: "opaque/model" }))
+        ),
+      }),
+    );
+    const { user } = await renderRoute("/agents/1");
+    await screen.findByRole("heading", { name: "Chat" });
+
+    await user.selectOptions(screen.getByLabelText("Model provider"), "openai");
+    expect(screen.getByLabelText("Model")).toHaveValue("opaque/model");
+    await user.click(screen.getByRole("button", { name: /save configuration/i }));
+
+    await waitFor(() =>
+      expect(body).toEqual({
+        display_name: "Chat",
+        model_provider: "openai",
+        model_name: "opaque/model",
+      }),
+    );
+  });
+
   it("sends the full configuration triple when saving", async () => {
     let body: unknown;
     server.use(...detailHandlers({ patch: (value) => ((body = value), HttpResponse.json(apiAgentInstance())) }));

@@ -22,13 +22,13 @@ The uv workspace has explicit members so future placeholders are not activated a
 
 - `apps/api`
 - `packages/nervos-core`
-- `packages/nervos-models` (activated in B2 for the single Anthropic adapter)
+- `packages/nervos-models` (activated in B2 for Anthropic and extended in B4 with the OpenAI Responses adapter)
 
 The pnpm workspace contains only:
 
 - `apps/web`
 
-The worker, marketplace, SDK, and MCP directories remain future placeholders outside the active workspaces. `packages/nervos-models` is active only for B2's concrete provider infrastructure; `nervos-core` remains provider-SDK-free.
+The worker, marketplace, SDK, and MCP directories remain future placeholders outside the active workspaces. `packages/nervos-models` is active only for concrete provider infrastructure; `nervos-core` remains provider-SDK-free, and both provider SDKs are isolated there.
 
 ## Bootstrap
 
@@ -136,7 +136,7 @@ The Python supervisor creates a unique temporary run directory and SQLite databa
 
 Readiness uses bounded semantic HTTP polling and child-liveness checks rather than startup sleeps. The supervisor owns and cleans the exact Uvicorn, Vite, Playwright, and Chromium process trees on success, failure, timeout, or interruption. It fingerprints the default NervOS database before and after each run. Playwright traces and screenshots are retained only on failure under ignored output paths; temporary databases and logs are removed after process handles close.
 
-The one Chromium journey uses the real UI, API, migrations, and opaque cookie session without MSW or external services. It proves fresh setup, dashboard identity, logout, login, browser-reload restoration, final logout, and direct `/dashboard` redirection to login. Unexpected non-loopback browser requests are rejected. Aggregate `check` remains E2E-free; run both `check` and `e2e` for full local verification, which is exactly what `.github/workflows/ci.yml` does in two separate jobs.
+The one Chromium journey uses the real UI, API, migrations, and opaque cookie session without MSW or external services. It proves fresh setup, dashboard identity, logout, login, browser-reload restoration, final logout, and direct `/dashboard` redirection to login. Since B4 it also proves deterministic two-provider portability: the same Agent Instance executes through the Anthropic double, reloads, is reconfigured to OpenAI, executes again, and shows both immutable provider/model snapshots after another reload. The supervisor removes both `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` from every child environment and installs two distinct offline provider doubles, so the journey cannot reach a real provider even when the operator has credentials exported. Unexpected non-loopback browser requests are rejected. Aggregate `check` remains E2E-free; run both `check` and `e2e` for full local verification, which is exactly what `.github/workflows/ci.yml` does in two separate jobs.
 
 Troubleshooting:
 

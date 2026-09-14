@@ -16,6 +16,7 @@ LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
 # Exact external variable name read for the first provider credential. The `NERVOS_`
 # prefix is deliberately bypassed so the operator's standard process variable is used.
 ANTHROPIC_API_KEY_VARIABLE = "ANTHROPIC_API_KEY"
+OPENAI_API_KEY_VARIABLE = "OPENAI_API_KEY"
 
 
 class Settings(BaseSettings):
@@ -33,12 +34,21 @@ class Settings(BaseSettings):
     app_origin: str = "http://localhost:5173"
     log_level: LogLevel = "INFO"
     anthropic_api_key: SecretStr | None = Field(
-        default=None, validation_alias=ANTHROPIC_API_KEY_VARIABLE
+        default=None,
+        validation_alias=ANTHROPIC_API_KEY_VARIABLE,
+        repr=False,
+        exclude=True,
+    )
+    openai_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=OPENAI_API_KEY_VARIABLE,
+        repr=False,
+        exclude=True,
     )
 
-    @field_validator("anthropic_api_key", mode="before")
+    @field_validator("anthropic_api_key", "openai_api_key", mode="before")
     @classmethod
-    def normalize_anthropic_api_key(cls, value: object) -> object:
+    def normalize_provider_api_key(cls, value: object) -> object:
         """Treat an absent, empty, or whitespace-only credential as unconfigured."""
         if value is None:
             return None
@@ -46,6 +56,16 @@ class Settings(BaseSettings):
             stripped = value.strip()
             return stripped or None
         return value
+
+    def without_provider_credentials(self) -> Settings:
+        """Return an equal configuration holding neither provider credential.
+
+        A credential is read exactly once, locally, to build its provider client. Every
+        object that outlives composition - middleware, ``app.state``, and any later
+        consumer - receives this copy instead, so no secret-bearing settings object stays
+        reachable from the running application.
+        """
+        return self.model_copy(update={"anthropic_api_key": None, "openai_api_key": None})
 
     @field_validator("database_path", mode="before")
     @classmethod
