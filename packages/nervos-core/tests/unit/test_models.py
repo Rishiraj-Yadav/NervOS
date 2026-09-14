@@ -12,7 +12,15 @@ from sqlalchemy import Boolean, LargeBinary, Table
 
 
 def test_metadata_contains_exact_application_tables() -> None:
-    assert set(Base.metadata.tables) == {"users", "auth_sessions", "agent_instances", "runs"}
+    assert set(Base.metadata.tables) == {
+        "users",
+        "auth_sessions",
+        "agent_instances",
+        "runs",
+        "jobs",
+        "job_attempts",
+        "run_events",
+    }
 
 
 def test_user_metadata_matches_a2_contract() -> None:

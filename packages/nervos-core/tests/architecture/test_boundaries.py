@@ -14,7 +14,15 @@ API_ROUTES = API_SOURCE / "api" / "routes"
 FRONTEND_SOURCE = ROOT / "apps" / "web" / "src"
 ORM_MODELS = CORE_SOURCE / "infrastructure" / "database" / "models.py"
 
-EXPECTED_TABLES = {"users", "auth_sessions", "agent_instances", "runs"}
+EXPECTED_TABLES = {
+    "users",
+    "auth_sessions",
+    "agent_instances",
+    "runs",
+    "jobs",
+    "job_attempts",
+    "run_events",
+}
 FORBIDDEN_SUBSYSTEMS = (
     "conversation",
     "message",
@@ -35,6 +43,11 @@ FORBIDDEN_SUBSYSTEMS = (
     "webhook",
     "marketplace",
 )
+
+# C1 legitimately introduces the durable Job and Attempt execution records, so those two module
+# names are no longer forbidden in core. Every later-stage subsystem below stays absent: the
+# durable foundation is not a licence for conversation, session, worker, or streaming modules.
+FORBIDDEN_CORE_MODULE_NAMES = ("conversation", "message", "worker", "stream")
 
 
 def imported_modules(path: Path) -> set[str]:
@@ -149,6 +162,7 @@ def test_b3_route_surface_and_migration_freeze() -> None:
     assert [path.name for path in migrations] == [
         "0001_stage_a_schema.py",
         "0002_stage_b1_agent_instances_runs.py",
+        "0003_stage_c1_durable_execution.py",
     ]
 
 
@@ -170,17 +184,18 @@ def test_b3_creation_gate_pins_the_shared_trusted_definition() -> None:
     assert "nervos.chat" not in source
 
 
-def test_no_conversation_message_or_execution_engine_schema_is_introduced() -> None:
-    """B3 adds no persistence: the application has exactly the four accepted tables."""
+def test_c1_schema_is_frozen_without_active_worker_runtime() -> None:
     tables = set(re.findall(r'__tablename__ = "([a-z_]+)"', ORM_MODELS.read_text(encoding="utf-8")))
-
     assert tables == EXPECTED_TABLES
-    for forbidden in FORBIDDEN_SUBSYSTEMS:
-        assert forbidden not in tables, forbidden
-
+    router_text = (API_SOURCE / "api" / "router.py").read_text(encoding="utf-8").lower()
+    for forbidden in ("job", "attempt", "event", "worker", "queue"):
+        assert forbidden not in router_text, forbidden
     core_module_names = " ".join(path.name for path in python_files(CORE_SOURCE))
-    for forbidden in ("conversation", "message", "job", "attempt", "worker", "stream"):
+    for forbidden in FORBIDDEN_CORE_MODULE_NAMES:
         assert forbidden not in core_module_names, forbidden
+    assert "active_attempt_id" not in ORM_MODELS.read_text(encoding="utf-8")
+    jobs_domain = (CORE_SOURCE / "domain" / "jobs.py").read_text(encoding="utf-8")
+    assert "active_attempt_id" not in jobs_domain
 
 
 def test_frontend_never_references_a_provider_credential_or_sdk() -> None:

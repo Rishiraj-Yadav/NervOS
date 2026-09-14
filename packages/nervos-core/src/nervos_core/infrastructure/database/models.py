@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
     true,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -161,6 +162,193 @@ class RunRecord(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class JobRecord(Base):
+    """One durable execution obligation for a Run."""
+
+    __tablename__ = "jobs"
+    __table_args__ = (
+        UniqueConstraint("run_id"),
+        CheckConstraint(
+            "status IN ('queued','claimed','running','retry_wait','succeeded','failed','cancelled')",
+            name="status_value",
+        ),
+        CheckConstraint(
+            "attempt_count BETWEEN 0 AND max_attempts AND max_attempts BETWEEN 1 AND 10",
+            name="attempt_bounds",
+        ),
+        CheckConstraint("length(model_provider) BETWEEN 1 AND 64", name="model_provider_shape"),
+        CheckConstraint(
+            "(claimed_by IS NULL AND claim_token IS NULL AND lease_expires_at IS NULL AND last_heartbeat_at IS NULL) OR (claimed_by IS NOT NULL AND length(claimed_by) BETWEEN 1 AND 128 AND claim_token IS NOT NULL AND length(claim_token)=32 AND lease_expires_at IS NOT NULL AND last_heartbeat_at IS NOT NULL)",
+            name="claim_shape",
+        ),
+        CheckConstraint("(error_code IS NULL) = (error_message IS NULL)", name="error_pair"),
+        CheckConstraint(
+            "error_code IS NULL OR (length(error_code) BETWEEN 1 AND 64 AND length(error_message) BETWEEN 1 AND 512)",
+            name="error_bounds",
+        ),
+        CheckConstraint(
+            "updated_at >= created_at AND available_at >= created_at AND (finished_at IS NULL OR finished_at >= created_at) AND (cancel_requested_at IS NULL OR cancel_requested_at >= created_at)",
+            name="timestamp_order",
+        ),
+        CheckConstraint(
+            "(status IN ('succeeded','failed','cancelled')) = (finished_at IS NOT NULL)",
+            name="terminal_finish",
+        ),
+        CheckConstraint(
+            "(status IN ('failed','cancelled')) = (error_code IS NOT NULL)", name="terminal_error"
+        ),
+        CheckConstraint(
+            "status != 'cancelled' OR cancel_requested_at IS NOT NULL", name="cancelled_request"
+        ),
+        Index("ix_jobs_status_available_at_id", "status", "available_at", "id"),
+        Index("ix_jobs_agent_instance_id_status", "agent_instance_id", "status"),
+        Index("ix_jobs_status_lease_expires_at_id", "status", "lease_expires_at", "id"),
+        {"sqlite_autoincrement": True},
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False)
+    agent_instance_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_instances.id", ondelete="RESTRICT"), nullable=False
+    )
+    model_provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    available_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="3")
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    claimed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    claim_token: Mapped[bytes | None] = mapped_column(LargeBinary(32), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class JobAttemptRecord(Base):
+    """One claim/execution episode for a Job."""
+
+    __tablename__ = "job_attempts"
+    __table_args__ = (
+        UniqueConstraint("job_id", "attempt_number"),
+        CheckConstraint("attempt_number > 0", name="attempt_number_positive"),
+        CheckConstraint(
+            "status IN ('claimed','running','succeeded','failed','cancelled','expired')",
+            name="status_value",
+        ),
+        CheckConstraint(
+            "length(worker_id) BETWEEN 1 AND 128 AND length(claim_token)=32", name="owner_shape"
+        ),
+        CheckConstraint(
+            "lease_expires_at > claimed_at AND last_heartbeat_at >= claimed_at AND created_at >= claimed_at",
+            name="lease_order",
+        ),
+        CheckConstraint(
+            "execution_started_at IS NULL OR execution_started_at >= claimed_at", name="start_order"
+        ),
+        CheckConstraint(
+            "finished_at IS NULL OR finished_at >= COALESCE(execution_started_at, claimed_at)",
+            name="finish_order",
+        ),
+        CheckConstraint(
+            "retry_disposition IS NULL OR retry_disposition IN ('SAFE_TO_RETRY','DO_NOT_RETRY','AMBIGUOUS')",
+            name="retry_disposition_value",
+        ),
+        CheckConstraint("(error_code IS NULL) = (error_message IS NULL)", name="error_pair"),
+        CheckConstraint(
+            "error_code IS NULL OR (length(error_code) BETWEEN 1 AND 64 AND length(error_message) BETWEEN 1 AND 512)",
+            name="error_bounds",
+        ),
+        CheckConstraint(
+            "(status IN ('succeeded','failed','cancelled','expired')) = (finished_at IS NOT NULL)",
+            name="terminal_finish",
+        ),
+        CheckConstraint(
+            "status NOT IN ('claimed','running') OR (finished_at IS NULL AND retry_disposition IS NULL AND error_code IS NULL)",
+            name="active_shape",
+        ),
+        CheckConstraint(
+            "status != 'claimed' OR execution_started_at IS NULL", name="claimed_shape"
+        ),
+        CheckConstraint(
+            "status != 'running' OR execution_started_at IS NOT NULL", name="running_shape"
+        ),
+        CheckConstraint(
+            "status NOT IN ('failed','expired') OR retry_disposition IS NOT NULL",
+            name="failure_disposition",
+        ),
+        CheckConstraint(
+            "status != 'succeeded' OR (retry_disposition IS NULL AND error_code IS NULL)",
+            name="success_shape",
+        ),
+        Index("ix_job_attempts_status_lease_expires_at_id", "status", "lease_expires_at", "id"),
+        Index(
+            "uq_job_attempts_one_active",
+            "job_id",
+            unique=True,
+            sqlite_where=text("status IN ('claimed','running')"),
+        ),
+        {"sqlite_autoincrement": True},
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id", ondelete="RESTRICT"), nullable=False)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    worker_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    claim_token: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    claimed_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    execution_started_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    lease_expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    last_heartbeat_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    retry_disposition: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class RunEventRecord(Base):
+    """Append-only safe lifecycle fact, sequenced within one Run."""
+
+    __tablename__ = "run_events"
+    __table_args__ = (
+        UniqueConstraint("run_id", "sequence"),
+        CheckConstraint("sequence > 0", name="sequence_positive"),
+        CheckConstraint(
+            "event_type IN ('run.created','run.queued','attempt.claimed','attempt.started','attempt.failed','attempt.expired','retry.scheduled','cancellation.requested','run.cancelled','run.succeeded','run.failed','recovery.pre_start','recovery.ambiguous')",
+            name="event_type_value",
+        ),
+        CheckConstraint("(code IS NULL) = (message IS NULL)", name="message_pair"),
+        CheckConstraint(
+            "code IS NULL OR (length(code) BETWEEN 1 AND 64 AND length(message) BETWEEN 1 AND 512)",
+            name="message_bounds",
+        ),
+        CheckConstraint(
+            "attempt_number IS NULL OR attempt_number > 0", name="attempt_number_positive"
+        ),
+        CheckConstraint(
+            "event_type != 'retry.scheduled' OR available_at IS NOT NULL", name="retry_available"
+        ),
+        Index("ix_run_events_attempt_id_id", "attempt_id", "id"),
+        {"sqlite_autoincrement": True},
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False)
+    job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id", ondelete="RESTRICT"), nullable=False)
+    attempt_id: Mapped[int | None] = mapped_column(
+        ForeignKey("job_attempts.id", ondelete="RESTRICT"), nullable=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    message: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    attempt_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    available_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
 class AuthSessionRecord(Base):

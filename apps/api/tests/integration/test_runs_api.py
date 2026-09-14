@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from nervos_core.application import model_completion
 from nervos_core.application.errors import PersistenceUnavailable
@@ -19,6 +20,8 @@ from nervos_core.application.model_completion import (
 from nervos_core.application.model_providers import ModelProviderCatalog
 from nervos_core.application.trusted_chat import NERVOS_CHAT_SYSTEM_INSTRUCTION
 from nervos_core.domain.runs import ModelUsage
+from nervos_core.infrastructure.database.jobs import SqlAlchemyJobPersistence
+from sqlalchemy import text
 
 INSTANCES = "/api/v1/agent-instances"
 ORIGIN = {"Origin": "http://localhost:5173"}
@@ -89,6 +92,40 @@ def test_successful_execution_returns_the_persisted_run(
     persisted = owner_client.get(f"/api/v1/runs/{body['id']}", headers=ORIGIN)
     assert persisted.status_code == 200
     assert persisted.json() == body
+
+
+def test_synchronous_post_still_creates_no_durable_execution_rows(
+    owner_client: TestClient,
+    app_under_test: FastAPI,
+    deterministic_completion: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stage B production POST stays awaited 201 and enqueues no durable work.
+
+    C1 ships the Job, Attempt, and Run-event primitives dormant. No Worker participates in this
+    test, the API must still perform the single model call synchronously, and the durable tables
+    must stay empty because the public route never reaches the submission primitive.
+    """
+
+    def forbidden_submit(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("production POST reached the dormant durable submission primitive")
+
+    monkeypatch.setattr(SqlAlchemyJobPersistence, "submit", forbidden_submit)
+    instance_id = make_instance(owner_client)
+
+    response = execute(owner_client, instance_id)
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["status"] == "succeeded"
+    assert body["output_text"] == "deterministic answer"
+    assert deterministic_completion.calls == 1
+
+    with app_under_test.state.session_factory() as session:
+        assert session.scalar(text("SELECT count(*) FROM jobs")) == 0
+        assert session.scalar(text("SELECT count(*) FROM job_attempts")) == 0
+        assert session.scalar(text("SELECT count(*) FROM run_events")) == 0
+        assert session.scalar(text("SELECT count(*) FROM runs")) == 1
 
 
 def test_run_response_never_exposes_limits_or_owner(
