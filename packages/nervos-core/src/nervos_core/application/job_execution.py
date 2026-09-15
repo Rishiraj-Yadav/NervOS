@@ -1,10 +1,11 @@
-"""Stage C2 durable Job execution: lease, heartbeat, terminalization, and honest retry policy.
+"""Stage C2/C4 durable Job execution: lease, heartbeat, terminalization, and honest retry policy.
 
 This module is the orchestration seam between the durable queue and the provider-neutral
 `RunExecutor`. It owns four decisions that deliberately do **not** live in the executor:
 
 * the lease and heartbeat cadence,
-* the recorded retry disposition (evidence only — C2 never retries),
+* the recorded retry disposition and — since C4 — the activation of the one disposition that
+  is positively safe to replay,
 * the bounded persistence-finalization retry, and
 * the "expired lease means lost authority" rule.
 
@@ -40,6 +41,7 @@ from nervos_core.application.model_completion import (
     MODEL_UNAVAILABLE,
     ModelCompletion,
 )
+from nervos_core.application.retry_policy import PRODUCTION_RETRY_POLICY, RetryPolicy
 from nervos_core.application.run_execution import ExecutionOutcome, RunExecutor
 from nervos_core.domain.jobs import RetryDisposition
 from nervos_core.domain.runs import ModelUsage, Run
@@ -57,8 +59,12 @@ if LEASE_DURATION < 3 * HEARTBEAT_INTERVAL:  # pragma: no cover - import-time in
 PERSISTENCE_FINALIZATION_ATTEMPTS = 5
 PERSISTENCE_FINALIZATION_BACKOFF_SECONDS = (0.2, 0.4, 0.8, 1.6)
 
-# C2 records evidence; it never acts on it. Every failure terminalizes the Job and Run as
-# `failed`, and the transient retry state is never written by this milestone.
+# The frozen classification. Exactly one code is positively safe to replay: a normalized rate
+# limit is evidence that the provider declined the request, whereas a timeout, an unavailable
+# transport, or an internal failure cannot exclude the possibility that the request was
+# accepted and processed. Only `SAFE_TO_RETRY` may schedule a durable retry, and the
+# transaction additionally requires the exact code, so widening this map alone cannot widen
+# the replay surface.
 DISPOSITION_BY_CODE: Mapping[str, RetryDisposition] = MappingProxyType(
     {
         MODEL_RATE_LIMITED: RetryDisposition.SAFE_TO_RETRY,
@@ -94,6 +100,26 @@ class ClaimState(StrEnum):
     ACTIVE = "active"
     TERMINAL = "terminal"
     LOST = "lost"
+
+
+class FailureOutcome(StrEnum):
+    """What durably happened to one provider failure the Worker tried to settle.
+
+    C4 splits failure settlement into a retryable and a terminal shape, so a bare `bool` can no
+    longer describe the result honestly: "the write did not commit" and "the retry was
+    scheduled" are different facts, and confusing them either strands an Attempt or replays a
+    provider call. Persistence reports the durable fact; the service decides whether to retry
+    only the *database* transition.
+    """
+
+    RETRY_SCHEDULED = "retry_scheduled"
+    TERMINAL_FAILED = "terminal_failed"
+    # Somebody already durably settled this Attempt (our own unobserved COMMIT, or C3).
+    ALREADY_SETTLED = "already_settled"
+    # Proven still ours and still uncommitted, so replaying the write cannot double-apply.
+    UNSETTLED = "unsettled"
+    # Lost authority, or a shape we cannot explain. Fail closed: no write, and no provider call.
+    UNRESOLVED = "unresolved"
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +189,31 @@ class JobExecutionPersistence(Protocol):
         now: datetime,
     ) -> bool: ...
 
+    def record_failure(
+        self,
+        claim: ClaimedAttempt,
+        *,
+        error_code: str,
+        error_message: str,
+        retry_disposition: RetryDisposition,
+        usage: ModelUsage,
+        elapsed_ms: int,
+        anchor_at: datetime,
+        retry_policy: RetryPolicy,
+        now: datetime,
+    ) -> FailureOutcome: ...
+
+    def inspect_failure(
+        self,
+        claim: ClaimedAttempt,
+        *,
+        error_code: str,
+        retry_disposition: RetryDisposition,
+        anchor_at: datetime,
+        retry_policy: RetryPolicy,
+        now: datetime,
+    ) -> FailureOutcome: ...
+
 
 class JobExecutionService:
     """Execute one claimed Job end to end without ever re-invoking a model."""
@@ -174,6 +225,7 @@ class JobExecutionService:
         completions: Mapping[str, ModelCompletion],
         clock: Clock,
         *,
+        retry_policy: RetryPolicy = PRODUCTION_RETRY_POLICY,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         lease_duration: timedelta = LEASE_DURATION,
         heartbeat_interval: timedelta = HEARTBEAT_INTERVAL,
@@ -182,6 +234,7 @@ class JobExecutionService:
         self._executor = executor
         self._completions = completions
         self._clock = clock
+        self._retry_policy = retry_policy
         self._sleep = sleep
         self._lease_duration = lease_duration
         self._heartbeat_interval = heartbeat_interval
@@ -205,7 +258,13 @@ class JobExecutionService:
             outcome = await self._run_provider(claim, lost)
             if outcome is None:
                 return None
-            await self._finalize(claim, outcome)
+            # The scheduling anchor is captured exactly once, the moment a normalized result
+            # exists, and is stable across every later database-only replay of the same
+            # transition. Recomputing it per attempt would let a BUSY retry drift the durable
+            # due time and would leave an uncertain COMMIT with no single expected value to
+            # reconcile against.
+            anchor_at = require_utc(self._clock())
+            await self._finalize(claim, outcome, anchor_at)
             return outcome
         finally:
             heartbeat.cancel()
@@ -283,13 +342,21 @@ class JobExecutionService:
             lost.set()
             return
 
-    async def _finalize(self, claim: ClaimedAttempt, outcome: ExecutionOutcome) -> None:
-        """Persist the terminal state, retrying only the durable write.
+    async def _finalize(
+        self, claim: ClaimedAttempt, outcome: ExecutionOutcome, anchor_at: datetime
+    ) -> None:
+        """Persist the committed outcome, retrying only the durable write.
 
         Every attempt is fully fenced. An unknown persistence failure is never replayed
         blindly: durable state is read back first, and only a read that proves the work is
         still ours and still uncommitted allows another attempt.
         """
+        if outcome.status == "succeeded":
+            await self._finalize_success(claim, outcome)
+            return
+        await self._finalize_failure(claim, outcome, anchor_at)
+
+    async def _finalize_success(self, claim: ClaimedAttempt, outcome: ExecutionOutcome) -> None:
         for attempt in range(PERSISTENCE_FINALIZATION_ATTEMPTS):
             try:
                 committed: bool | None = await self._offload(self._terminalize, claim, outcome)
@@ -311,27 +378,63 @@ class JobExecutionService:
         # Bounded retries exhausted: leave the Attempt/Job/Run exactly as they are for C3.
         return
 
-    def _terminalize(self, claim: ClaimedAttempt, outcome: ExecutionOutcome) -> bool:
-        now = require_utc(self._clock())
-        if outcome.status == "succeeded":
-            assert outcome.output_text is not None
-            return self._persistence.succeed(
-                claim,
-                output_text=outcome.output_text,
-                finish_reason=outcome.finish_reason,
-                usage=outcome.usage,
-                elapsed_ms=outcome.elapsed_ms,
-                now=now,
-            )
+    async def _finalize_failure(
+        self, claim: ClaimedAttempt, outcome: ExecutionOutcome, anchor_at: datetime
+    ) -> None:
+        """Settle one normalized provider failure, retrying only the durable transition.
+
+        The provider has already been invoked exactly once for this Attempt, so every path here
+        replays a *database* transition at most; none of them can re-issue the request. A
+        retryable failure is only retryable while this Worker still owns a live claim and the
+        shared budget is unspent, and both facts are re-read inside the write transaction
+        rather than trusted from an earlier application-level read.
+        """
         assert outcome.error_code is not None and outcome.error_message is not None
-        return self._persistence.fail(
+        retry_disposition = disposition_for(outcome.error_code)
+        for attempt in range(PERSISTENCE_FINALIZATION_ATTEMPTS):
+            try:
+                settled: FailureOutcome | None = await self._offload(
+                    self._persistence.record_failure,
+                    claim,
+                    error_code=outcome.error_code,
+                    error_message=outcome.error_message,
+                    retry_disposition=retry_disposition,
+                    usage=outcome.usage,
+                    elapsed_ms=outcome.elapsed_ms,
+                    anchor_at=anchor_at,
+                    retry_policy=self._retry_policy,
+                    now=require_utc(self._clock()),
+                )
+            except PersistenceContention:
+                settled = None
+            except PersistenceUnavailable:
+                settled = await self._offload(
+                    self._persistence.inspect_failure,
+                    claim,
+                    error_code=outcome.error_code,
+                    retry_disposition=retry_disposition,
+                    anchor_at=anchor_at,
+                    retry_policy=self._retry_policy,
+                    now=require_utc(self._clock()),
+                )
+            if settled is FailureOutcome.UNSETTLED or settled is None:
+                if attempt + 1 < PERSISTENCE_FINALIZATION_ATTEMPTS:
+                    await self._sleep(PERSISTENCE_FINALIZATION_BACKOFF_SECONDS[attempt])
+                continue
+            return
+        # Bounded retries exhausted, or an unexplainable durable shape: strand exactly as C2
+        # does, leaving the rows for C3 rather than fabricating an outcome.
+        return
+
+    def _terminalize(self, claim: ClaimedAttempt, outcome: ExecutionOutcome) -> bool:
+        assert outcome.status == "succeeded" and outcome.output_text is not None
+        return self._persistence.succeed(
             claim,
-            error_code=outcome.error_code,
-            error_message=outcome.error_message,
-            retry_disposition=disposition_for(outcome.error_code),
+            output_text=outcome.output_text,
+            finish_reason=outcome.finish_reason,
             usage=outcome.usage,
             elapsed_ms=outcome.elapsed_ms,
-            now=now,
+            now=require_utc(self._clock()),
         )
 
     async def _offload(self, function: Callable[..., _T], /, *args: object, **kwargs: object) -> _T:

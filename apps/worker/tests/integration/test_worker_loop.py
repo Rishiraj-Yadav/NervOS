@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 from nervos_core.application.model_completion import (
     MODEL_RATE_LIMITED,
+    MODEL_UNAVAILABLE,
     ModelProviderError,
     ModelRequest,
     ModelResponse,
@@ -25,6 +26,7 @@ from support import (
     NOW,
     PROVIDER_ID,
     SECOND_PROVIDER_ID,
+    MutableClock,
     RecordingCompletion,
     attempt_rows,
     build_worker,
@@ -33,6 +35,8 @@ from support import (
     job_row,
     migrate,
     run_row,
+    run_until_all_jobs_terminal,
+    run_until_job_status,
     run_until_stopped,
     submit,
 )
@@ -77,14 +81,15 @@ async def test_a_queued_run_is_claimed_started_executed_and_terminalized(
 
 
 @pytest.mark.anyio
-async def test_a_normalized_provider_failure_is_recorded_and_never_retried(
+async def test_a_nonretryable_provider_failure_is_recorded_and_never_retried(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """An ambiguous transport failure cannot exclude a provider-side effect, so it is terminal."""
     engine = migrate(tmp_path / "worker.db", monkeypatch)
     try:
         run_id = submit(engine)
         completion = RecordingCompletion()
-        completion.error = ModelProviderError(MODEL_RATE_LIMITED)
+        completion.error = ModelProviderError(MODEL_UNAVAILABLE)
         worker = build_worker(engine, {PROVIDER_ID: completion})
 
         await run_until_stopped(worker, engine)
@@ -92,16 +97,74 @@ async def test_a_normalized_provider_failure_is_recorded_and_never_retried(
         assert completion.calls == 1
         row = run_row(engine, run_id)
         assert row["status"] == "failed"
-        assert row["error_code"] == MODEL_RATE_LIMITED
+        assert row["error_code"] == MODEL_UNAVAILABLE
         assert row["error_message"]
         assert job_row(engine, run_id)["status"] == JobStatus.FAILED.value
         assert job_row(engine, run_id)["attempt_count"] == 1
-        assert attempt_rows(engine)[0]["retry_disposition"] == RetryDisposition.SAFE_TO_RETRY.value
-        with engine.connect() as connection:
-            assert (
-                connection.scalar(text("SELECT count(*) FROM jobs WHERE status='retry_wait'")) == 0
-            )
+        assert attempt_rows(engine)[0]["retry_disposition"] == RetryDisposition.AMBIGUOUS.value
         assert event_types(engine, run_id)[-2:] == ["attempt.failed", "run.failed"]
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_a_rate_limited_failure_retries_durably_across_worker_restarts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C4 through the shipped loop: a safe failure waits on disk, and a *new* Worker resumes it.
+
+    The first Worker is stopped after committing `retry_wait` and never used again, so nothing
+    in memory can carry the retry forward: only the durable due instant can. The second Worker
+    is a fresh incarnation that must claim the due retry, execute it exactly once, and preserve
+    the Run's original start.
+    """
+    engine = migrate(tmp_path / "worker.db", monkeypatch)
+    try:
+        run_id = submit(engine)
+        clock = MutableClock()
+        completion = RecordingCompletion()
+        completion.error = ModelProviderError(MODEL_RATE_LIMITED)
+        first_worker = build_worker(engine, {PROVIDER_ID: completion}, clock=clock)
+
+        await run_until_job_status(first_worker, engine, "retry_wait")
+
+        with engine.connect() as connection:
+            due = connection.scalar(text("SELECT available_at FROM jobs"))
+            original_start = connection.scalar(text("SELECT started_at FROM runs"))
+        job = job_row(engine, run_id)
+        assert job["status"] == JobStatus.RETRY_WAIT.value
+        assert job["claimed_by"] is None and job["claim_token"] is None
+        assert job["error_code"] is None
+        assert completion.calls == 1
+        assert attempt_rows(engine)[0]["status"] == AttemptStatus.FAILED.value
+
+        # The stored deadline is absolute, so later claiming needs no process memory.
+        assert due is not None and original_start is not None
+
+        # Time moves past the durable deadline, and the replacement is a *new* process
+        # incarnation, so nothing about the retry can come from the first Worker's memory.
+        clock.advance(120)
+        completion.error = None
+        second_worker = build_worker(
+            engine, {PROVIDER_ID: completion}, worker_id="worker-2", clock=clock
+        )
+        await run_until_all_jobs_terminal(second_worker, engine)
+
+        # Exactly one provider call per Attempt: one failed, one that succeeded.
+        assert completion.calls == 2
+        row = run_row(engine, run_id)
+        assert row["status"] == "succeeded"
+        assert row["output_text"] == "worker answer"
+        assert row["started_at"] == original_start
+        assert [attempt["status"] for attempt in attempt_rows(engine)] == [
+            AttemptStatus.FAILED.value,
+            AttemptStatus.SUCCEEDED.value,
+        ]
+        events = event_types(engine, run_id)
+        assert events.count("retry.scheduled") == 1
+        assert events.count("attempt.started") == 2
+        assert events.count("run.succeeded") == 1
+        assert "run.failed" not in events
     finally:
         engine.dispose()
 

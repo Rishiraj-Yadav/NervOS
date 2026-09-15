@@ -21,7 +21,7 @@ Repository scripts do not install global or system packages.
 The uv workspace has explicit members so future placeholders are not activated accidentally:
 
 - `apps/api`
-- `apps/worker` (activated in C2 for durable execution)
+- `apps/worker` (activated in C2 for durable execution; extended in C3 with the registry/reconciler and in C4 with durable safe execution retry)
 - `packages/nervos-core`
 - `packages/nervos-models` (activated in B2 for Anthropic and extended in B4 with the OpenAI Responses adapter)
 
@@ -135,7 +135,7 @@ Or, where GNU Make is available:
 make test-e2e
 ```
 
-The Python supervisor creates a unique temporary run directory and SQLite database on every invocation, runs Alembic before starting any server, starts the API, Worker, Vite, and Playwright processes, selects distinct dynamic IPv4 loopback ports, and derives one consistent `127.0.0.1` browser Origin for FastAPI, Vite, and Playwright. Worker readiness is a test-only marker file written after settings load, schema validation, provider resolution, durable registration, and the startup reclamation pass. The supervisor also runs a second Worker for the C3 pre-start recovery journey: the first claims one Job and is lost before the execution-start boundary, and the second reconciles that expired claim and executes it exactly once. Vite keeps `/api` relative and unrewritten with `changeOrigin: false`; the E2E-only environment override changes only its proxy target.
+The Python supervisor creates a unique temporary run directory and SQLite database on every invocation, runs Alembic before starting any server, starts the API, Worker, Vite, and Playwright processes, selects distinct dynamic IPv4 loopback ports, and derives one consistent `127.0.0.1` browser Origin for FastAPI, Vite, and Playwright. Worker readiness is a test-only marker file written after settings load, schema validation, provider resolution, durable registration, and the startup reclamation pass. The supervisor also runs a second Worker for the C3 pre-start recovery journey: the first claims one Job and is lost before the execution-start boundary, and the second reconciles that expired claim and executes it exactly once. One prompt in the journey exercises the C4 retry path: the deterministic provider double refuses its first call with a normalized rate limit, the Worker commits a durable `retry_wait` with a test-only stretched delay, and the supervisor proves from committed state that a second Attempt ran only after the due instant, that the Run kept its original start, and that the prompt made exactly two provider calls. Vite keeps `/api` relative and unrewritten with `changeOrigin: false`; the E2E-only environment override changes only its proxy target.
 
 Readiness uses bounded semantic HTTP polling and child-liveness checks rather than startup sleeps. The supervisor owns and cleans the exact Uvicorn, Vite, Playwright, and Chromium process trees on success, failure, timeout, or interruption. It fingerprints the default NervOS database before and after each run. Playwright traces and screenshots are retained only on failure under ignored output paths; temporary databases and logs are removed after process handles close.
 

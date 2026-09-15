@@ -523,12 +523,53 @@ def test_disabling_an_instance_does_not_cancel_an_accepted_run(
 ) -> None:
     instance_id = make_instance(owner_client)
     run = submit(owner_client, instance_id).json()
-
     owner_client.patch(f"{INSTANCES}/{instance_id}", json={"enabled": False}, headers=ORIGIN)
-
     after = owner_client.get(f"/api/v1/runs/{run['id']}", headers=ORIGIN).json()
     assert after["status"] == "created"
     assert runs_of(owner_client, instance_id) == [after]
+
+
+def test_an_internal_retry_wait_is_projected_as_an_ordinary_running_run(
+    owner_client: TestClient, app_under_test: FastAPI
+) -> None:
+    """C4's retry state is execution-plane detail and must not become a public Run shape.
+
+    A Job waiting to retry has no public representation: the Run it belongs to is simply still
+    running, exactly as it was while the provider call was in flight. This asserts the response
+    is byte-identical to the same Run before the retry was scheduled, so no Job status, attempt
+    number, disposition, deadline, or claim field can leak through the projection.
+    """
+    instance_id = make_instance(owner_client)
+    run = submit(owner_client, instance_id).json()
+    created = owner_client.get(f"/api/v1/runs/{run['id']}", headers=ORIGIN).json()
+
+    engine = app_under_test.state.database_engine
+    with engine.begin() as connection:
+        # Keep every timestamp after the Run's own creation instant: the schema enforces the
+        # ordering, and this test is about projection, not about timestamp legality.
+        started_at = connection.scalar(
+            text("SELECT created_at FROM runs WHERE id=:r"), {"r": run["id"]}
+        )
+        job_created_at = connection.scalar(
+            text("SELECT created_at FROM jobs WHERE run_id=:r"), {"r": run["id"]}
+        )
+        connection.execute(
+            text("UPDATE runs SET status='running', started_at=:now WHERE id=:r"),
+            {"now": started_at, "r": run["id"]},
+        )
+        connection.execute(
+            text("UPDATE jobs SET status='retry_wait', available_at=:due WHERE run_id=:r"),
+            {"due": job_created_at, "r": run["id"]},
+        )
+
+    projected = owner_client.get(f"/api/v1/runs/{run['id']}", headers=ORIGIN).json()
+    assert projected["status"] == "running"
+    assert projected["error_code"] is None and projected["error_message"] is None
+    assert projected["finished_at"] is None and projected["elapsed_ms"] is None
+    assert set(projected) == set(created)
+    for leak in ("retry_wait", "attempt", "available_at", "claim", "disposition"):
+        assert not any(leak in str(key).lower() for key in projected), leak
+    assert [item["id"] for item in runs_of(owner_client, instance_id)] == [run["id"]]
 
 
 @pytest.mark.parametrize("query", ["limit=0", "limit=51", "before_id=0", "before_id=-3"])

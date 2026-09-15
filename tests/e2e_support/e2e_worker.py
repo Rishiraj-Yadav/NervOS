@@ -19,9 +19,10 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from deterministic import build_deterministic_completions
+from deterministic import RETRY_DELAY_VARIABLE, FixedDelayRetry, build_deterministic_completions
 from nervos_core.application.job_execution import ClaimedAttempt, JobExecutionService
 from nervos_core.application.lease_reclamation import LeaseReclaimer
+from nervos_core.application.retry_policy import PRODUCTION_RETRY_POLICY, RetryPolicy
 from nervos_core.application.run_execution import RunExecutor
 from nervos_core.application.trusted_chat import create_builtin_handler_registry
 from nervos_core.infrastructure.database import create_sqlite_engine
@@ -92,6 +93,19 @@ class GatedJobPersistence(SqlAlchemyJobExecutionPersistence):
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def resolve_retry_policy() -> RetryPolicy:
+    """Return the retry policy this Worker runs with.
+
+    Production composition injects the reviewed schedule and never reads this variable, so the
+    supervised journey can stretch the durable wait long enough to observe it without changing
+    any shipped constant.
+    """
+    override = os.environ.get(RETRY_DELAY_VARIABLE, "").strip()
+    if not override:
+        return PRODUCTION_RETRY_POLICY
+    return FixedDelayRetry(float(override))
 
 
 def install_stop_handlers(
@@ -207,6 +221,7 @@ async def run() -> int:
             RunExecutor(create_builtin_handler_registry()),
             completions,
             utc_now,
+            retry_policy=resolve_retry_policy(),
         )
         worker_id = generate_worker_id()
         registry = WorkerRegistry(persistence, worker_id, clock=utc_now)

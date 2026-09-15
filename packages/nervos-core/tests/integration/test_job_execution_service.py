@@ -16,6 +16,7 @@ from nervos_core.application.job_execution import (
     LEASE_DURATION,
     ClaimedAttempt,
     ClaimState,
+    FailureOutcome,
     JobExecutionPersistence,
     JobExecutionService,
     disposition_for,
@@ -159,16 +160,16 @@ async def test_success_persists_one_terminal_run_with_one_provider_call(
 @pytest.mark.parametrize(
     ("code", "expected"),
     [
-        (MODEL_RATE_LIMITED, RetryDisposition.SAFE_TO_RETRY),
         (MODEL_TIMED_OUT, RetryDisposition.AMBIGUOUS),
         (MODEL_UNAVAILABLE, RetryDisposition.AMBIGUOUS),
         (INTERNAL_EXECUTION_ERROR, RetryDisposition.AMBIGUOUS),
         (MODEL_REFUSED, RetryDisposition.DO_NOT_RETRY),
     ],
 )
-async def test_failure_records_the_disposition_and_never_retries(
+async def test_a_nonretryable_failure_records_its_disposition_and_never_retries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: str, expected: RetryDisposition
 ) -> None:
+    """Only a positively safe classification may become a retry; everything else stays terminal."""
     engine = prepare(tmp_path, monkeypatch)
     try:
         clock = MutableClock()
@@ -196,6 +197,51 @@ async def test_failure_records_the_disposition_and_never_retries(
             error_message = connection.scalar(text("SELECT error_message FROM runs"))
         assert isinstance(error_message, str) and 0 < len(error_message) <= 512
         assert event_types(engine, claimed.run_id)[-2:] == ["attempt.failed", "run.failed"]
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_a_rate_limited_failure_schedules_a_durable_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rate limit is the one failure C4 replays, and it replays it durably, not in memory."""
+    engine = prepare(tmp_path, monkeypatch)
+    try:
+        clock = MutableClock()
+        completion = Completion()
+        completion.error = ModelProviderError(MODEL_RATE_LIMITED)
+        repository = SqlAlchemyJobExecutionPersistence(engine, sleep=lambda _: None)
+        claimed = claim(engine)
+        outcome = await service(engine, repository, completion, clock).execute(claimed)
+
+        assert outcome is not None and outcome.status == "failed"
+        assert completion.calls == 1
+        attempt = attempt_row(engine, claimed.attempt_id)
+        assert attempt["status"] == AttemptStatus.FAILED.value
+        assert attempt["retry_disposition"] == RetryDisposition.SAFE_TO_RETRY.value
+        assert attempt["error_code"] == MODEL_RATE_LIMITED
+        assert attempt["execution_started_at"] is not None
+        job = job_row(engine, claimed.job_id)
+        assert job["status"] == JobStatus.RETRY_WAIT.value
+        assert job["claimed_by"] is None and job["claim_token"] is None
+        assert job["lease_expires_at"] is None and job["last_heartbeat_at"] is None
+        assert job["error_code"] is None and job["error_message"] is None
+        assert job["finished_at"] is None
+        assert job["attempt_count"] == 1
+        with engine.connect() as connection:
+            run = (
+                connection.execute(
+                    text("SELECT status, started_at, finished_at, error_code FROM runs")
+                )
+                .mappings()
+                .one()
+            )
+        assert run["status"] == "running"
+        assert run["started_at"] is not None and run["finished_at"] is None
+        assert run["error_code"] is None
+        assert event_types(engine, claimed.run_id)[-2:] == ["attempt.failed", "retry.scheduled"]
+        assert "run.failed" not in event_types(engine, claimed.run_id)
     finally:
         engine.dispose()
 
@@ -315,6 +361,104 @@ async def test_persistence_retry_never_invokes_the_provider_twice(
         assert completion.calls == 1
         assert flaky.terminal_attempts == 3
         assert job_row(engine, claimed.job_id)["status"] == JobStatus.SUCCEEDED.value
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_a_contended_retry_write_is_replayed_with_the_same_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C4 binding amendment: a BUSY/LOCKED replay must not drift the durable due instant.
+
+    The scheduling anchor is captured once per logical finalization, so replaying the write
+    recomputes the identical deadline — which is also what lets an uncertain COMMIT be
+    reconciled against exactly one expected value later.
+    """
+    engine = prepare(tmp_path, monkeypatch)
+    try:
+        clock = MutableClock()
+        completion = Completion()
+        completion.error = ModelProviderError(MODEL_RATE_LIMITED)
+        repository = SqlAlchemyJobExecutionPersistence(engine, sleep=lambda _: None)
+        claimed = claim(engine)
+
+        class FlakyPersistence:
+            """Fails the retry write twice with a *proven* contention, then delegates."""
+
+            def __init__(self) -> None:
+                self.settling_attempts = 0
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(repository, name)
+
+            def record_failure(self, *args: object, **kwargs: object) -> FailureOutcome:
+                self.settling_attempts += 1
+                if self.settling_attempts <= 2:
+                    raise PersistenceContention
+                return repository.record_failure(*args, **kwargs)  # type: ignore[arg-type]
+
+        flaky = FlakyPersistence()
+        outcome = await service(
+            engine, cast(JobExecutionPersistence, flaky), completion, clock
+        ).execute(claimed)
+
+        assert outcome is not None and outcome.status == "failed"
+        assert completion.calls == 1
+        assert flaky.settling_attempts == 3
+        job = job_row(engine, claimed.job_id)
+        assert job["status"] == JobStatus.RETRY_WAIT.value
+        # Rendered exactly as the SQLite adapter persists an aware UTC timestamp.
+        assert job["available_at"] == (NOW + timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S.%f")
+        assert counts(engine)["run_events"] == 6
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_an_uncertain_retry_commit_is_adopted_not_repeated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A COMMIT that succeeded invisibly must be reconciled, never replayed blindly.
+
+    The first settlement really commits and then reports an unknown failure, exactly the shape a
+    lost COMMIT acknowledgement produces. The service must read durable state, adopt the
+    committed retry, write no second event, and never call the provider again.
+    """
+    engine = prepare(tmp_path, monkeypatch)
+    try:
+        clock = MutableClock()
+        completion = Completion()
+        completion.error = ModelProviderError(MODEL_RATE_LIMITED)
+        repository = SqlAlchemyJobExecutionPersistence(engine, sleep=lambda _: None)
+        claimed = claim(engine)
+
+        class UncertainPersistence:
+            """Commit for real, then report an unknown failure the caller cannot interpret."""
+
+            def __init__(self) -> None:
+                self.settling_attempts = 0
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(repository, name)
+
+            def record_failure(self, *args: object, **kwargs: object) -> FailureOutcome:
+                self.settling_attempts += 1
+                repository.record_failure(*args, **kwargs)  # type: ignore[arg-type]
+                raise PersistenceUnavailable
+
+        uncertain = UncertainPersistence()
+        outcome = await service(
+            engine, cast(JobExecutionPersistence, uncertain), completion, clock
+        ).execute(claimed)
+
+        assert outcome is not None and outcome.status == "failed"
+        assert completion.calls == 1
+        # One settlement attempt only: the readback proved the commit and stopped the loop.
+        assert uncertain.settling_attempts == 1
+        assert job_row(engine, claimed.job_id)["status"] == JobStatus.RETRY_WAIT.value
+        assert event_types(engine, claimed.run_id)[-2:] == ["attempt.failed", "retry.scheduled"]
+        assert event_types(engine, claimed.run_id).count("retry.scheduled") == 1
     finally:
         engine.dispose()
 

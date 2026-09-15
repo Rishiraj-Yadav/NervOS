@@ -303,13 +303,16 @@ describe("agent detail page", () => {
     expect(screen.getByText(/a worker must be running to execute this run/i)).toBeVisible();
   });
 
-  it("renders a running run with the truthful crash recovery copy", async () => {
+  it("renders a running run with the truthful crash recovery and retry copy", async () => {
     server.use(...detailHandlers({ runs: [apiRun({ status: "running", output_text: null })] }));
 
     await renderRoute("/agents/1");
 
     expect(await screen.findByText("Running")).toBeVisible();
     expect(screen.getByText(/closes this run as failed without replaying it/i)).toBeVisible();
+    // C4: a running Run may be waiting briefly before it executes again, and the copy must not
+    // promise that no retry ever happens.
+    expect(screen.getByText(/may be retried/i)).toBeVisible();
   });
 
   it("renders a run closed before execution started without a duration or start", async () => {

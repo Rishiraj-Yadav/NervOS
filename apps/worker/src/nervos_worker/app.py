@@ -15,6 +15,7 @@ from pathlib import Path
 from nervos_core.application.job_execution import JobExecutionService
 from nervos_core.application.lease_reclamation import LeaseReclaimer
 from nervos_core.application.model_completion import ModelCompletion
+from nervos_core.application.retry_policy import PRODUCTION_RETRY_POLICY
 from nervos_core.application.run_execution import RunExecutor
 from nervos_core.application.trusted_chat import create_builtin_handler_registry
 from nervos_core.infrastructure.database import create_session_factory, create_sqlite_engine
@@ -119,6 +120,10 @@ def create_worker(settings: WorkerSettings | None = None) -> WorkerComposition:
         RunExecutor(create_builtin_handler_registry()),
         completions,
         utc_now,
+        # The retry schedule is injected rather than reached for globally, so the Worker's
+        # composition root names the one policy that decides when a safe failure may be
+        # replayed.
+        retry_policy=PRODUCTION_RETRY_POLICY,
     )
     worker_id = generate_worker_id()
     registry = WorkerRegistry(persistence, worker_id, clock=utc_now)

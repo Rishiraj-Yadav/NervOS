@@ -41,7 +41,7 @@ from nervos_core.application.errors import (
     PersistenceUnavailable,
     QueueCapacityExceeded,
 )
-from nervos_core.application.job_execution import ClaimedAttempt, ClaimState
+from nervos_core.application.job_execution import ClaimedAttempt, ClaimState, FailureOutcome
 from nervos_core.application.lease_reclamation import (
     ReclaimedClaim,
     ReclamationKind,
@@ -51,8 +51,10 @@ from nervos_core.application.lease_reclamation import (
 )
 from nervos_core.application.model_completion import (
     EXECUTION_OUTCOME_AMBIGUOUS,
+    MODEL_RATE_LIMITED,
     safe_error_message,
 )
+from nervos_core.application.retry_policy import RetryPolicy, retry_due_at
 from nervos_core.domain.agents import AgentDefinitionId
 from nervos_core.domain.jobs import AttemptStatus, JobStatus, RetryDisposition, RunEventType
 from nervos_core.domain.runs import (
@@ -83,13 +85,22 @@ _PRIMARY_RESULT_CODE_MASK = 0xFF
 _TRANSACTION_ATTEMPTS = 3
 _RETRY_BACKOFF_SECONDS = (0.05, 0.1)
 
-# Job states that occupy durable queue capacity. `retry_wait` is included even though C2
-# never writes it, so a later milestone cannot silently raise the ceiling.
+# Job states that occupy durable queue capacity. C2 reserved `retry_wait` here before anything
+# wrote it, so C4 activating that state cannot raise the pending ceiling by accident.
 _OCCUPYING_STATUSES = (
     JobStatus.QUEUED.value,
     JobStatus.CLAIMED.value,
     JobStatus.RUNNING.value,
     JobStatus.RETRY_WAIT.value,
+)
+
+# The two durable states a claim may legitimately be taken from, paired with the Run state each
+# one must be consistent with. A `queued` Job belongs to a Run that never started; a
+# `retry_wait` Job belongs to a Run that already crossed the execution-start boundary. Pairing
+# them here keeps a malformed Job/Run combination out of the queue instead of letting it claim.
+_CLAIMABLE_SOURCES = (
+    (JobStatus.QUEUED, RunStatus.CREATED),
+    (JobStatus.RETRY_WAIT, RunStatus.RUNNING),
 )
 
 _T = TypeVar("_T")
@@ -621,9 +632,19 @@ class SqlAlchemyJobExecutionPersistence:
                     JobRecord.model_provider,
                     JobRecord.attempt_count,
                     JobRecord.max_attempts,
+                    JobRecord.status,
                 )
+                .join(RunRecord, RunRecord.id == JobRecord.run_id)
                 .where(
-                    JobRecord.status == JobStatus.QUEUED.value,
+                    or_(
+                        *(
+                            and_(
+                                JobRecord.status == job_status.value,
+                                RunRecord.status == run_status.value,
+                            )
+                            for job_status, run_status in _CLAIMABLE_SOURCES
+                        )
+                    ),
                     JobRecord.available_at <= now,
                     JobRecord.attempt_count < JobRecord.max_attempts,
                     JobRecord.model_provider.in_(provider_ids),
@@ -639,6 +660,11 @@ class SqlAlchemyJobExecutionPersistence:
 
         job_id = int(candidate["id"])
         run_id = int(candidate["run_id"])
+        # A due `retry_wait` Job is claimable through exactly the same path as queued work. The
+        # compare-and-set below therefore pins the *observed* source status rather than
+        # accepting either claimable state: a Job that changed hands between the select and the
+        # update must fail its fence instead of being claimed from a shape we did not classify.
+        source_status = str(candidate["status"])
         attempt_number = int(candidate["attempt_count"]) + 1
         progress.job_id = job_id
         progress.run_id = run_id
@@ -649,7 +675,7 @@ class SqlAlchemyJobExecutionPersistence:
             update(JobRecord)
             .where(
                 JobRecord.id == job_id,
-                JobRecord.status == JobStatus.QUEUED.value,
+                JobRecord.status == source_status,
                 JobRecord.attempt_count < JobRecord.max_attempts,
             )
             .values(
@@ -827,59 +853,152 @@ class SqlAlchemyJobExecutionPersistence:
     # -- execution boundary ------------------------------------------------------------
 
     def start_attempt(self, claim: ClaimedAttempt, *, now: datetime) -> bool:
-        """Commit the execution-start boundary before any external call is made."""
+        """Commit the execution-start boundary before any external call is made.
 
-        def operation(connection: Connection) -> bool:
-            attempt_update = connection.execute(
-                update(JobAttemptRecord)
-                .where(
-                    JobAttemptRecord.id == claim.attempt_id,
-                    JobAttemptRecord.job_id == claim.job_id,
-                    JobAttemptRecord.status == AttemptStatus.CLAIMED.value,
-                    JobAttemptRecord.worker_id == claim.worker_id,
-                    JobAttemptRecord.claim_token == claim.claim_token,
-                    JobAttemptRecord.lease_expires_at > now,
-                )
-                .values(status=AttemptStatus.RUNNING.value, execution_started_at=now)
-            )
-            if _rowcount(attempt_update) != 1:
-                raise _Fenced
-            job_update = connection.execute(
-                update(JobRecord)
-                .where(
-                    JobRecord.id == claim.job_id,
-                    JobRecord.status == JobStatus.CLAIMED.value,
-                    JobRecord.claimed_by == claim.worker_id,
-                    JobRecord.claim_token == claim.claim_token,
-                    JobRecord.lease_expires_at > now,
-                )
-                .values(status=JobStatus.RUNNING.value, updated_at=now)
-            )
-            if _rowcount(job_update) != 1:
-                raise _Fenced
-            run_update = connection.execute(
-                update(RunRecord)
-                .where(
-                    RunRecord.id == claim.run_id,
-                    RunRecord.status == RunStatus.CREATED.value,
-                )
-                .values(status=RunStatus.RUNNING.value, started_at=now)
-            )
-            if _rowcount(run_update) != 1:
-                raise _Fenced
-            _append_event_on_connection(
-                connection,
-                run_id=claim.run_id,
-                job_id=claim.job_id,
-                attempt_id=claim.attempt_id,
-                sequence=_sequence_base(connection, claim.run_id) + 1,
-                event_type=RunEventType.ATTEMPT_STARTED,
-                attempt_number=claim.attempt_number,
-                created_at=now,
-            )
-            return True
+        Returns True only when the boundary is durably committed — either by this call or by an
+        earlier call whose COMMIT this process never observed. A caller may therefore invoke
+        the provider exactly when True is returned, and must not invoke it otherwise.
 
-        return self._run_fenced(operation)
+        C4 makes this the *second* start of the same Run possible. The Run's original
+        `started_at` is the moment execution first began and is load-bearing evidence for the
+        whole Run, so a retry start asserts that shape without rewriting it: no second start
+        timestamp and no duplicate `attempt.started` for an Attempt that already started.
+        """
+        try:
+            return bool(
+                self._runner.run(lambda connection: self._start_once(connection, claim, now=now))
+            )
+        except _Fenced:
+            return self._start_already_committed(claim, now=now)
+        except (PersistenceContention, PersistenceUnavailable):
+            # An uncertain COMMIT is reconciled by reading durable state, never by replaying
+            # the transition blindly: a replay could append a second start event.
+            return self._start_already_committed(claim, now=now)
+
+    def _start_once(self, connection: Connection, claim: ClaimedAttempt, *, now: datetime) -> bool:
+        attempt_update = connection.execute(
+            update(JobAttemptRecord)
+            .where(
+                JobAttemptRecord.id == claim.attempt_id,
+                JobAttemptRecord.job_id == claim.job_id,
+                JobAttemptRecord.status == AttemptStatus.CLAIMED.value,
+                JobAttemptRecord.worker_id == claim.worker_id,
+                JobAttemptRecord.claim_token == claim.claim_token,
+                JobAttemptRecord.lease_expires_at > now,
+            )
+            .values(status=AttemptStatus.RUNNING.value, execution_started_at=now)
+        )
+        if _rowcount(attempt_update) != 1:
+            raise _Fenced
+        job_update = connection.execute(
+            update(JobRecord)
+            .where(
+                JobRecord.id == claim.job_id,
+                JobRecord.status == JobStatus.CLAIMED.value,
+                JobRecord.claimed_by == claim.worker_id,
+                JobRecord.claim_token == claim.claim_token,
+                JobRecord.lease_expires_at > now,
+            )
+            .values(status=JobStatus.RUNNING.value, updated_at=now)
+        )
+        if _rowcount(job_update) != 1:
+            raise _Fenced
+        # First execution of the Run: claim the `created` shape and record the real start
+        # instant. Only the very first started Attempt can do this.
+        run_update = connection.execute(
+            update(RunRecord)
+            .where(
+                RunRecord.id == claim.run_id,
+                RunRecord.status == RunStatus.CREATED.value,
+                RunRecord.started_at.is_(None),
+            )
+            .values(status=RunStatus.RUNNING.value, started_at=now)
+        )
+        if _rowcount(run_update) != 1:
+            # A retry start leaves the Run exactly as the first start left it. 'BEGIN IMMEDIATE'
+            # already holds the write lock, so this read cannot race a concurrent writer.
+            run = (
+                connection.execute(
+                    select(RunRecord.status, RunRecord.started_at).where(
+                        RunRecord.id == claim.run_id
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if run is None or run["status"] != RunStatus.RUNNING.value or run["started_at"] is None:
+                raise _Fenced
+        _append_event_on_connection(
+            connection,
+            run_id=claim.run_id,
+            job_id=claim.job_id,
+            attempt_id=claim.attempt_id,
+            sequence=_sequence_base(connection, claim.run_id) + 1,
+            event_type=RunEventType.ATTEMPT_STARTED,
+            attempt_number=claim.attempt_number,
+            created_at=now,
+        )
+        return True
+
+    def _start_already_committed(self, claim: ClaimedAttempt, *, now: datetime) -> bool:
+        """Return whether this exact Attempt's start boundary is already durably committed.
+
+        Requires every fact the commit would have written, including exactly one start event
+        for this Attempt, so an uncommitted or partially applied start can never be mistaken
+        for a committed one.
+        """
+        with self._engine.connect() as connection:
+            attempt = (
+                connection.execute(
+                    select(
+                        JobAttemptRecord.status,
+                        JobAttemptRecord.worker_id,
+                        JobAttemptRecord.claim_token,
+                        JobAttemptRecord.lease_expires_at,
+                        JobAttemptRecord.execution_started_at,
+                    ).where(JobAttemptRecord.id == claim.attempt_id)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            job = (
+                connection.execute(
+                    select(
+                        JobRecord.status,
+                        JobRecord.claimed_by,
+                        JobRecord.claim_token,
+                        JobRecord.lease_expires_at,
+                    ).where(JobRecord.id == claim.job_id)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            started_events = int(
+                connection.scalar(
+                    select(func.count())
+                    .select_from(RunEventRecord)
+                    .where(
+                        RunEventRecord.attempt_id == claim.attempt_id,
+                        RunEventRecord.event_type == RunEventType.ATTEMPT_STARTED.value,
+                    )
+                )
+                or 0
+            )
+        if attempt is None or job is None:
+            return False
+        return (
+            attempt["status"] == AttemptStatus.RUNNING.value
+            and attempt["execution_started_at"] is not None
+            and attempt["worker_id"] == claim.worker_id
+            and attempt["claim_token"] == claim.claim_token
+            and attempt["lease_expires_at"] > now
+            and job["status"] == JobStatus.RUNNING.value
+            and job["claimed_by"] == claim.worker_id
+            and job["claim_token"] == claim.claim_token
+            and job["lease_expires_at"] is not None
+            and job["lease_expires_at"] > now
+            and started_events == 1
+        )
 
     def renew_lease(
         self, claim: ClaimedAttempt, *, now: datetime, lease_duration: timedelta
@@ -1016,95 +1135,469 @@ class SqlAlchemyJobExecutionPersistence:
         validate_error_message(error_message)
 
         def operation(connection: Connection) -> bool:
-            attempt_update = connection.execute(
-                update(JobAttemptRecord)
-                .where(
-                    JobAttemptRecord.id == claim.attempt_id,
-                    JobAttemptRecord.job_id == claim.job_id,
-                    JobAttemptRecord.status == AttemptStatus.RUNNING.value,
-                    JobAttemptRecord.worker_id == claim.worker_id,
-                    JobAttemptRecord.claim_token == claim.claim_token,
-                    JobAttemptRecord.lease_expires_at > now,
-                )
-                .values(
-                    status=AttemptStatus.FAILED.value,
-                    finished_at=now,
-                    retry_disposition=retry_disposition.value,
-                    error_code=error_code,
-                    error_message=error_message,
-                )
-            )
-            if _rowcount(attempt_update) != 1:
-                raise _Fenced
-            job_update = connection.execute(
-                update(JobRecord)
-                .where(
-                    JobRecord.id == claim.job_id,
-                    JobRecord.status == JobStatus.RUNNING.value,
-                    JobRecord.claimed_by == claim.worker_id,
-                    JobRecord.claim_token == claim.claim_token,
-                )
-                .values(
-                    status=JobStatus.FAILED.value,
-                    finished_at=now,
-                    updated_at=now,
-                    error_code=error_code,
-                    error_message=error_message,
-                    claimed_by=None,
-                    claim_token=None,
-                    lease_expires_at=None,
-                    last_heartbeat_at=None,
-                )
-            )
-            if _rowcount(job_update) != 1:
-                raise _Fenced
-            run_update = connection.execute(
-                update(RunRecord)
-                .where(RunRecord.id == claim.run_id, RunRecord.status == RunStatus.RUNNING.value)
-                .values(
-                    status=RunStatus.FAILED.value,
-                    finished_at=now,
-                    elapsed_ms=elapsed_ms,
-                    error_code=error_code,
-                    error_message=error_message,
-                    input_tokens=usage.input_tokens,
-                    output_tokens=usage.output_tokens,
-                    total_tokens=usage.total_tokens,
-                )
-            )
-            if _rowcount(run_update) != 1:
-                raise _Fenced
-            # Two events in one transaction: read the high-water mark ONCE and assign
-            # consecutive sequences. Two independent MAX+1 reads would both claim the same
-            # value and fail the unique (run_id, sequence) constraint.
-            base = _sequence_base(connection, claim.run_id)
-            _append_event_on_connection(
+            self._fail_attempt_on_connection(
                 connection,
-                run_id=claim.run_id,
-                job_id=claim.job_id,
-                attempt_id=claim.attempt_id,
-                sequence=base + 1,
-                event_type=RunEventType.ATTEMPT_FAILED,
-                code=error_code,
-                message=error_message,
-                attempt_number=claim.attempt_number,
-                created_at=now,
+                claim,
+                error_code=error_code,
+                error_message=error_message,
+                retry_disposition=retry_disposition,
+                now=now,
             )
-            _append_event_on_connection(
+            self._close_terminal_on_connection(
                 connection,
-                run_id=claim.run_id,
-                job_id=claim.job_id,
-                attempt_id=claim.attempt_id,
-                sequence=base + 2,
-                event_type=RunEventType.RUN_FAILED,
-                code=error_code,
-                message=error_message,
-                attempt_number=claim.attempt_number,
-                created_at=now,
+                claim,
+                error_code=error_code,
+                error_message=error_message,
+                usage=usage,
+                elapsed_ms=elapsed_ms,
+                now=now,
             )
             return True
 
         return self._run_fenced(operation)
+
+    def _fail_attempt_on_connection(
+        self,
+        connection: Connection,
+        claim: ClaimedAttempt,
+        *,
+        error_code: str,
+        error_message: str,
+        retry_disposition: RetryDisposition,
+        now: datetime,
+    ) -> None:
+        """Close the current Attempt as failed evidence, retaining its full history."""
+        attempt_update = connection.execute(
+            update(JobAttemptRecord)
+            .where(
+                JobAttemptRecord.id == claim.attempt_id,
+                JobAttemptRecord.job_id == claim.job_id,
+                JobAttemptRecord.status == AttemptStatus.RUNNING.value,
+                JobAttemptRecord.worker_id == claim.worker_id,
+                JobAttemptRecord.claim_token == claim.claim_token,
+                JobAttemptRecord.lease_expires_at > now,
+            )
+            .values(
+                status=AttemptStatus.FAILED.value,
+                finished_at=now,
+                retry_disposition=retry_disposition.value,
+                error_code=error_code,
+                error_message=error_message,
+            )
+        )
+        if _rowcount(attempt_update) != 1:
+            raise _Fenced
+
+    def _close_terminal_on_connection(
+        self,
+        connection: Connection,
+        claim: ClaimedAttempt,
+        *,
+        error_code: str,
+        error_message: str,
+        usage: ModelUsage,
+        elapsed_ms: int,
+        now: datetime,
+    ) -> None:
+        """Close Job + Run terminally and append both terminal events.
+
+        The Attempt is already closed as failed evidence at this point.
+        """
+        job_update = connection.execute(
+            update(JobRecord)
+            .where(
+                JobRecord.id == claim.job_id,
+                JobRecord.status == JobStatus.RUNNING.value,
+                JobRecord.claimed_by == claim.worker_id,
+                JobRecord.claim_token == claim.claim_token,
+                JobRecord.lease_expires_at > now,
+            )
+            .values(
+                status=JobStatus.FAILED.value,
+                finished_at=now,
+                updated_at=now,
+                error_code=error_code,
+                error_message=error_message,
+                claimed_by=None,
+                claim_token=None,
+                lease_expires_at=None,
+                last_heartbeat_at=None,
+            )
+        )
+        if _rowcount(job_update) != 1:
+            raise _Fenced
+        run_update = connection.execute(
+            update(RunRecord)
+            .where(RunRecord.id == claim.run_id, RunRecord.status == RunStatus.RUNNING.value)
+            .values(
+                status=RunStatus.FAILED.value,
+                finished_at=now,
+                elapsed_ms=elapsed_ms,
+                error_code=error_code,
+                error_message=error_message,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                total_tokens=usage.total_tokens,
+            )
+        )
+        if _rowcount(run_update) != 1:
+            raise _Fenced
+        # Two events in one transaction: read the high-water mark ONCE and assign
+        # consecutive sequences. Two independent MAX+1 reads would both claim the same
+        # value and fail the unique (run_id, sequence) constraint.
+        base = _sequence_base(connection, claim.run_id)
+        _append_event_on_connection(
+            connection,
+            run_id=claim.run_id,
+            job_id=claim.job_id,
+            attempt_id=claim.attempt_id,
+            sequence=base + 1,
+            event_type=RunEventType.ATTEMPT_FAILED,
+            code=error_code,
+            message=error_message,
+            attempt_number=claim.attempt_number,
+            created_at=now,
+        )
+        _append_event_on_connection(
+            connection,
+            run_id=claim.run_id,
+            job_id=claim.job_id,
+            attempt_id=claim.attempt_id,
+            sequence=base + 2,
+            event_type=RunEventType.RUN_FAILED,
+            code=error_code,
+            message=error_message,
+            attempt_number=claim.attempt_number,
+            created_at=now,
+        )
+
+    # -- C4 safe execution retry --------------------------------------------------------
+
+    def record_failure(
+        self,
+        claim: ClaimedAttempt,
+        *,
+        error_code: str,
+        error_message: str,
+        retry_disposition: RetryDisposition,
+        usage: ModelUsage,
+        elapsed_ms: int,
+        anchor_at: datetime,
+        retry_policy: RetryPolicy,
+        now: datetime,
+    ) -> FailureOutcome:
+        """Settle one normalized provider failure as a durable retry or an honest terminal.
+
+        This is the only place C4 decides to replay anything, so every precondition is
+        revalidated against committed state inside the writing transaction rather than trusted
+        from the caller's earlier read: the exact live claim, the exact normalized code *and*
+        its disposition, the shared claim budget, and the Run's real pre-existing start.
+        """
+        validate_error_message(error_message)
+
+        def operation(connection: Connection) -> FailureOutcome:
+            return self._failure_on_connection(
+                connection,
+                claim,
+                error_code=error_code,
+                error_message=error_message,
+                retry_disposition=retry_disposition,
+                usage=usage,
+                elapsed_ms=elapsed_ms,
+                anchor_at=anchor_at,
+                retry_policy=retry_policy,
+                now=now,
+            )
+
+        try:
+            return self._runner.run(operation)
+        except _Fenced:
+            return self._inspect_failure_once(
+                claim,
+                error_code=error_code,
+                retry_disposition=retry_disposition,
+                anchor_at=anchor_at,
+                retry_policy=retry_policy,
+                now=now,
+            )
+        except (PersistenceContention, PersistenceUnavailable):
+            return self._inspect_failure_once(
+                claim,
+                error_code=error_code,
+                retry_disposition=retry_disposition,
+                anchor_at=anchor_at,
+                retry_policy=retry_policy,
+                now=now,
+            )
+
+    def _failure_on_connection(
+        self,
+        connection: Connection,
+        claim: ClaimedAttempt,
+        *,
+        error_code: str,
+        error_message: str,
+        retry_disposition: RetryDisposition,
+        usage: ModelUsage,
+        elapsed_ms: int,
+        anchor_at: datetime,
+        retry_policy: RetryPolicy,
+        now: datetime,
+    ) -> FailureOutcome:
+        # Defense in depth: the disposition alone must never authorize a replay. Only a
+        # positively safe, exactly-identified failure may, and unknown codes fail closed to
+        # AMBIGUOUS upstream anyway.
+        retryable = (
+            retry_disposition is RetryDisposition.SAFE_TO_RETRY and error_code == MODEL_RATE_LIMITED
+        )
+        self._fail_attempt_on_connection(
+            connection,
+            claim,
+            error_code=error_code,
+            error_message=error_message,
+            retry_disposition=retry_disposition,
+            now=now,
+        )
+        job = (
+            connection.execute(
+                select(
+                    JobRecord.status,
+                    JobRecord.claimed_by,
+                    JobRecord.claim_token,
+                    JobRecord.lease_expires_at,
+                    JobRecord.attempt_count,
+                    JobRecord.max_attempts,
+                ).where(JobRecord.id == claim.job_id)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if (
+            job is None
+            or job["status"] != JobStatus.RUNNING.value
+            or job["claimed_by"] != claim.worker_id
+            or job["claim_token"] != claim.claim_token
+            or job["lease_expires_at"] is None
+            or job["lease_expires_at"] <= now
+        ):
+            raise _Fenced
+        budget_remaining = int(job["attempt_count"]) < int(job["max_attempts"])
+        if not retryable or not budget_remaining:
+            self._close_terminal_on_connection(
+                connection,
+                claim,
+                error_code=error_code,
+                error_message=error_message,
+                usage=usage,
+                elapsed_ms=elapsed_ms,
+                now=now,
+            )
+            return FailureOutcome.TERMINAL_FAILED
+
+        # The ordinal counts *started* execution failures, not committed claims: a Worker that
+        # died before the execution-start boundary consumed budget but never called a provider,
+        # so letting it inflate the delay would slow a retry for a request that never happened.
+        # The Attempt was just closed as `failed` above, so this count already includes it.
+        ordinal = self._retry_ordinal_on_connection(connection, claim.job_id)
+        due_at = retry_due_at(retry_policy, anchor_at=anchor_at, ordinal=max(ordinal, 1))
+        job_update = connection.execute(
+            update(JobRecord)
+            .where(
+                JobRecord.id == claim.job_id,
+                JobRecord.status == JobStatus.RUNNING.value,
+                JobRecord.claimed_by == claim.worker_id,
+                JobRecord.claim_token == claim.claim_token,
+                JobRecord.lease_expires_at > now,
+            )
+            .values(
+                status=JobStatus.RETRY_WAIT.value,
+                available_at=due_at,
+                updated_at=now,
+                finished_at=None,
+                error_code=None,
+                error_message=None,
+                claimed_by=None,
+                claim_token=None,
+                lease_expires_at=None,
+                last_heartbeat_at=None,
+            )
+        )
+        if _rowcount(job_update) != 1:
+            raise _Fenced
+        run = (
+            connection.execute(
+                select(RunRecord.status, RunRecord.started_at).where(RunRecord.id == claim.run_id)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if run is None or run["status"] != RunStatus.RUNNING.value or run["started_at"] is None:
+            # A retry may only hang off a Run that genuinely already began executing; the Run
+            # itself is deliberately untouched here.
+            raise _Fenced
+        base = _sequence_base(connection, claim.run_id)
+        _append_event_on_connection(
+            connection,
+            run_id=claim.run_id,
+            job_id=claim.job_id,
+            attempt_id=claim.attempt_id,
+            sequence=base + 1,
+            event_type=RunEventType.ATTEMPT_FAILED,
+            code=error_code,
+            message=error_message,
+            attempt_number=claim.attempt_number,
+            created_at=now,
+        )
+        _append_event_on_connection(
+            connection,
+            run_id=claim.run_id,
+            job_id=claim.job_id,
+            attempt_id=claim.attempt_id,
+            sequence=base + 2,
+            event_type=RunEventType.RETRY_SCHEDULED,
+            code=error_code,
+            message=error_message,
+            attempt_number=claim.attempt_number,
+            available_at=due_at,
+            created_at=now,
+        )
+        return FailureOutcome.RETRY_SCHEDULED
+
+    def _retry_ordinal_on_connection(self, connection: Connection, job_id: int) -> int:
+        """Count this Job's prior started, safely-failed execution Attempts."""
+        return int(
+            connection.scalar(
+                select(func.count())
+                .select_from(JobAttemptRecord)
+                .where(
+                    JobAttemptRecord.job_id == job_id,
+                    JobAttemptRecord.status == AttemptStatus.FAILED.value,
+                    JobAttemptRecord.retry_disposition == RetryDisposition.SAFE_TO_RETRY.value,
+                    JobAttemptRecord.execution_started_at.is_not(None),
+                )
+            )
+            or 0
+        )
+
+    def inspect_failure(
+        self,
+        claim: ClaimedAttempt,
+        *,
+        error_code: str,
+        retry_disposition: RetryDisposition,
+        anchor_at: datetime,
+        retry_policy: RetryPolicy,
+        now: datetime,
+    ) -> FailureOutcome:
+        """Classify durable state after an unknown failure-settlement outcome."""
+        return self._inspect_failure_once(
+            claim,
+            error_code=error_code,
+            retry_disposition=retry_disposition,
+            anchor_at=anchor_at,
+            retry_policy=retry_policy,
+            now=now,
+        )
+
+    def _inspect_failure_once(
+        self,
+        claim: ClaimedAttempt,
+        *,
+        error_code: str,
+        retry_disposition: RetryDisposition,
+        anchor_at: datetime,
+        retry_policy: RetryPolicy,
+        now: datetime,
+    ) -> FailureOutcome:
+        with self._engine.connect() as connection:
+            attempt = (
+                connection.execute(
+                    select(
+                        JobAttemptRecord.status,
+                        JobAttemptRecord.retry_disposition,
+                        JobAttemptRecord.error_code,
+                        JobAttemptRecord.execution_started_at,
+                    ).where(JobAttemptRecord.id == claim.attempt_id)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            job = (
+                connection.execute(
+                    select(
+                        JobRecord.status,
+                        JobRecord.claimed_by,
+                        JobRecord.claim_token,
+                        JobRecord.lease_expires_at,
+                        JobRecord.available_at,
+                    ).where(JobRecord.id == claim.job_id)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            run_status = connection.scalar(
+                select(RunRecord.status).where(RunRecord.id == claim.run_id)
+            )
+            retry_event = (
+                connection.execute(
+                    select(RunEventRecord.available_at).where(
+                        RunEventRecord.attempt_id == claim.attempt_id,
+                        RunEventRecord.event_type == RunEventType.RETRY_SCHEDULED.value,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            ordinal = self._retry_ordinal_on_connection(connection, claim.job_id)
+
+        if attempt is None or job is None or run_status is None:
+            return FailureOutcome.UNRESOLVED
+        # Checked before any settlement shape: an Attempt still running under this exact live
+        # claim means nothing committed, so the durable write — and only the durable write — may
+        # be replayed. Reporting this as unresolved would strand an otherwise healthy claim.
+        if (
+            attempt["status"] == AttemptStatus.RUNNING.value
+            and job["status"] == JobStatus.RUNNING.value
+            and job["claimed_by"] == claim.worker_id
+            and job["claim_token"] == claim.claim_token
+            and job["lease_expires_at"] is not None
+            and job["lease_expires_at"] > now
+        ):
+            return FailureOutcome.UNSETTLED
+        settled = (
+            attempt["status"] == AttemptStatus.FAILED.value
+            and attempt["error_code"] == error_code
+            and attempt["retry_disposition"] == retry_disposition.value
+        )
+        if not settled:
+            return FailureOutcome.UNRESOLVED
+        if (
+            job["status"] == JobStatus.RETRY_WAIT.value
+            and job["claimed_by"] is None
+            and job["claim_token"] is None
+            and run_status == RunStatus.RUNNING.value
+            and retry_event is not None
+        ):
+            # The due time must match the one this exact logical operation computes from the
+            # same stable anchor and the same durable ordinal. A mismatch means some *other*
+            # transition wrote this state, so it is not our commit and must not be adopted.
+            expected = retry_due_at(retry_policy, anchor_at=anchor_at, ordinal=max(ordinal, 1))
+            if (
+                retry_event["available_at"] != job["available_at"]
+                or job["available_at"] != expected
+            ):
+                return FailureOutcome.UNRESOLVED
+            return FailureOutcome.RETRY_SCHEDULED
+        if (
+            job["status"] == JobStatus.FAILED.value
+            and run_status == RunStatus.FAILED.value
+            and job["claimed_by"] is None
+            and job["claim_token"] is None
+        ):
+            return FailureOutcome.ALREADY_SETTLED
+        # A settled Attempt under a still-live claim is not a shape either branch produces, and
+        # anything else is equally unexplainable. Fail closed: no replay, and no provider call.
+        return FailureOutcome.UNRESOLVED
 
     def _run_fenced(self, operation: Callable[[Connection], bool]) -> bool:
         try:

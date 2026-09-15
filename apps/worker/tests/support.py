@@ -88,7 +88,7 @@ def run_row(engine: Engine, run_id: int) -> dict[str, object]:
             connection.execute(
                 text(
                     "SELECT status, output_text, finish_reason, error_code, error_message,"
-                    " elapsed_ms FROM runs WHERE id=:r"
+                    " elapsed_ms, started_at FROM runs WHERE id=:r"
                 ),
                 {"r": run_id},
             )
@@ -97,13 +97,30 @@ def run_row(engine: Engine, run_id: int) -> dict[str, object]:
         )
 
 
+class MutableClock:
+    """An injectable clock so a durable due instant can be reached without sleeping.
+
+    C4's retry wait is an absolute instant on disk, so proving that a later Worker claims it
+    requires advancing time, not waiting out the backoff.
+    """
+
+    def __init__(self, value: datetime = NOW) -> None:
+        self.value = value
+
+    def __call__(self) -> datetime:
+        return self.value
+
+    def advance(self, seconds: float) -> None:
+        self.value = self.value + timedelta(seconds=seconds)
+
+
 def job_row(engine: Engine, run_id: int) -> dict[str, object]:
     with engine.connect() as connection:
         return dict(
             connection.execute(
                 text(
-                    "SELECT id, status, attempt_count, claimed_by, claim_token FROM jobs"
-                    " WHERE run_id=:r"
+                    "SELECT id, status, attempt_count, claimed_by, claim_token, error_code,"
+                    " available_at FROM jobs WHERE run_id=:r"
                 ),
                 {"r": run_id},
             )
@@ -184,7 +201,9 @@ class RecordingCompletion:
 
 
 def build_execution_service(
-    engine: Engine, completions: dict[str, ModelCompletion]
+    engine: Engine,
+    completions: dict[str, ModelCompletion],
+    clock: Callable[[], datetime] | None = None,
 ) -> tuple[SqlAlchemyJobExecutionPersistence, JobExecutionService]:
     """Compose the shipped execution service over disposable persistence."""
     persistence = SqlAlchemyJobExecutionPersistence(engine, sleep=lambda _: None)
@@ -192,7 +211,7 @@ def build_execution_service(
         persistence,
         RunExecutor(create_builtin_handler_registry()),
         completions,
-        lambda: NOW,
+        clock or (lambda: NOW),
     )
     return persistence, service
 
@@ -219,7 +238,9 @@ def build_worker(
     the way of tests that are not about them.
     """
     now = clock or (lambda: NOW)
-    _persistence, execution = build_execution_service(engine, completions)
+    # The orchestration clock must be the same object the Worker uses: a start committed with a
+    # clock behind the claim's own heartbeat would violate the ordering the schema enforces.
+    _persistence, execution = build_execution_service(engine, completions, now)
     registry = WorkerRegistry(_persistence, worker_id, clock=now)
     worker = Worker(
         _persistence,
@@ -264,6 +285,59 @@ async def run_until_stopped(worker: Worker, engine: Engine) -> None:
                     or 0
                 )
             if active == 0:
+                break
+        stop.set()
+
+    await asyncio.gather(worker.run(stop), watch())
+
+
+async def run_until_job_status(worker: Worker, engine: Engine, status: str) -> None:
+    """Run the Worker until some Job reaches `status`, then stop.
+
+    C4 needs this because `retry_wait` is deliberately *not* terminal: a watcher that stops when
+    no Job is active would tear the Worker down mid-wait and prove nothing about the schedule.
+    """
+    import asyncio
+
+    stop = asyncio.Event()
+
+    async def watch() -> None:
+        for _ in range(2000):
+            await asyncio.sleep(0.02)
+            with engine.connect() as connection:
+                matched = int(
+                    connection.scalar(
+                        text("SELECT count(*) FROM jobs WHERE status=:s"), {"s": status}
+                    )
+                    or 0
+                )
+            if matched:
+                break
+        stop.set()
+
+    await asyncio.gather(worker.run(stop), watch())
+
+
+async def run_until_all_jobs_terminal(worker: Worker, engine: Engine) -> None:
+    """Run the Worker until no Job remains queued, claimed, running, or waiting to retry."""
+    import asyncio
+
+    stop = asyncio.Event()
+
+    async def watch() -> None:
+        for _ in range(2000):
+            await asyncio.sleep(0.02)
+            with engine.connect() as connection:
+                pending = int(
+                    connection.scalar(
+                        text(
+                            "SELECT count(*) FROM jobs WHERE status IN"
+                            " ('queued','claimed','running','retry_wait')"
+                        )
+                    )
+                    or 0
+                )
+            if pending == 0:
                 break
         stop.set()
 

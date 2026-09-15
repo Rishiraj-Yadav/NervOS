@@ -2,7 +2,7 @@
 
 ## Status
 
-Stage C3 Worker registry, expired-lease reconciliation, and fencing hardening are implemented. Stage B's trusted `nervos.chat@1` behavior and the two reviewed production provider adapters remain the only executable agent/model surface, but execution is no longer awaited inside the API process, and work lost by a Worker is now recovered or closed truthfully instead of staying stranded.
+Stage C3 Worker registry, expired-lease reconciliation, and fencing hardening are implemented, and C4 adds the durable execution retry engine. Stage B's trusted `nervos.chat@1` behavior and the two reviewed production provider adapters remain the only executable agent/model surface, but execution is no longer awaited inside the API process, a Worker's work is recovered or closed truthfully instead of staying stranded, and a failure the provider positively declined is retried durably rather than lost.
 
 ## Durable execution path
 
@@ -66,7 +66,26 @@ The pending cap is intentionally global in C2: one owner's backlog can refuse an
 
 ## Failure, retry, and recovery truth
 
-The Worker records one Attempt per execution and records a `RetryDisposition` for failed Attempts. It **does not retry execution**, it never writes `retry_wait`, and it never re-executes after a provider failure. Persistence-finalization retry replays only the terminal database transaction; it never invokes the provider again.
+The Worker records one Attempt per execution and records a `RetryDisposition` for failed Attempts. Since C4 it replays **exactly one** failure class: a normalized rate limit (`model_rate_limited`), which is evidence that the provider declined the request. Every other failure — a timeout, an unavailable transport, an internal failure, or anything unrecognized — stays terminal and is never replayed, because its remote outcome cannot be excluded.
+
+A safe failure settles like this:
+
+```text
+model_rate_limited
+  -> the current Attempt becomes failed evidence (SAFE_TO_RETRY, the original error)
+  -> the Job moves to retry_wait
+  -> available_at stores the durable due instant
+  -> claim authority is released
+  -> the Run stays running
+  -> a compatible Worker may claim it once due
+  -> a fresh Attempt and a fresh claim token execute it
+```
+
+The backoff is **1 second, then 2, then 4, capped at 4**, with no jitter and no provider-supplied `Retry-After`. `available_at` is an earliest-eligibility boundary, not an appointment: the retry runs when a compatible Worker next polls. Nothing else carries the retry — there is no scheduler process or timer row — so a committed retry survives a restart and needs no recovery.
+
+If the retry budget is exhausted, the Attempt, Job, and Run terminalize with the original `model_rate_limited` and its safe message. There is no separate `retry_exhausted` code: the recorded history shows that the retry could not be scheduled.
+
+Persistence-finalization retry replays only the fenced database transaction; it never invokes the provider again, so a database error can never cause a second model request.
 
 C3 reconciles expired claims automatically, and the authority for that is the **Job lease**, never the Worker registry. Reconciliation selects a Job whose `lease_expires_at` has passed, re-reads its active Attempt, and re-checks the exact claim tuple before mutating:
 
@@ -106,4 +125,6 @@ It closes legacy `running` Runs that have no Job as `failed` with `execution_out
 
 ## Still not implemented
 
-Conversation sessions, memory, tools/MCP, scheduling, event triggers, package installation, marketplace, cancellation, execution retry scheduling, per-Agent and per-provider concurrency, fairness, queue partitions, a public Run Events API, an event timeline, a Worker dashboard, and persistent secret management all remain outside C3.
+Conversation sessions, memory, tools/MCP, scheduling, event triggers, package installation, marketplace, and persistent secret management remain unimplemented. Cancellation and execution-timeout orchestration remain C5 (and `jobs.cancel_requested_at` is still dormant: nothing reads or writes it). Fairness, queue partitions, and per-Agent or per-provider concurrency remain C6. A public Run Events API, an event timeline, richer execution observability, and a Worker dashboard remain C7.
+
+Two C4 limitations are worth knowing when reading a retried Run. First, `elapsed_ms` and the usage counters describe the **terminal Attempt** only: they exclude earlier Attempts, the retry wait, and total Run wall-clock duration, and there is no cumulative cross-Attempt token accounting. Second, the read-only UI polls for a bounded period and then stops; that bound is not a completion guarantee, because a Run can outlast it through Worker downtime, provider duration, pre-start loss, lease recovery, or host downtime. The Run's durable state is still correct, and reloading the page shows the current state.

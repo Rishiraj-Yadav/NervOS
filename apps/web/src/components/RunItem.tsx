@@ -68,7 +68,9 @@ export function RunItem({ run }: { run: Run }) {
       {run.status === "running" ? (
         <p className="run-pending" role="note">
           Running. If the worker stops before it finishes, NervOS closes this run as failed
-          without replaying it, because the model request may already have been sent.
+          without replaying it, because the model request may already have been sent. A failure
+          the provider positively declined may be retried, so this run can be waiting briefly
+          before it executes again.
         </p>
       ) : null}
     </article>
