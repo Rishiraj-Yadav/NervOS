@@ -10,7 +10,6 @@ from nervos_core.application.agents import (
     AgentInstanceNotFound,
     AgentInstanceUnavailable,
     RunNotFound,
-    RunTransitionRejected,
 )
 from nervos_core.application.authentication import (
     AuthenticationRequired,
@@ -24,6 +23,7 @@ from nervos_core.application.authentication import (
 from nervos_core.application.errors import (
     PersistenceUnavailable as ApplicationPersistenceUnavailable,
 )
+from nervos_core.application.errors import QueueCapacityExceeded
 from nervos_core.application.model_providers import (
     ModelProviderUnavailable,
     UnknownModelProvider,
@@ -106,7 +106,11 @@ AGENT_ERROR_MAP: dict[type[Exception], tuple[int, str, str]] = {
         "service_unavailable",
         "The trusted agent behavior is unavailable.",
     ),
-    RunTransitionRejected: (503, "service_unavailable", "NervOS could not record the run outcome."),
+    QueueCapacityExceeded: (
+        429,
+        "queue_capacity_exceeded",
+        "NervOS cannot accept more runs until its pending queue drains.",
+    ),
     ApplicationPersistenceUnavailable: (
         503,
         "service_unavailable",

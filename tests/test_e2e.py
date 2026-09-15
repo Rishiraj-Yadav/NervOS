@@ -161,7 +161,10 @@ def test_run_e2e_detects_default_database_mutation_after_owned_cleanup(
             default_database.write_bytes(b"after")
             return 0
 
-    processes = iter(Process(name) for name in ("api", "web", "playwright"))
+        def poll(self) -> None:
+            return None
+
+    processes = iter(Process(name) for name in ("api", "worker", "web", "playwright"))
 
     def fake_start_process(*_args: object, **_kwargs: object) -> Process:
         return next(processes)
@@ -180,6 +183,9 @@ def test_run_e2e_detects_default_database_mutation_after_owned_cleanup(
     def wait_for_http_ready(*_args: object) -> None:
         return None
 
+    def fake_worker_ready(*_args: object) -> str:
+        return "schema_revision=test\nproviders=anthropic,openai\n"
+
     monkeypatch.setattr(e2e, "DEFAULT_DATABASE", default_database)
     monkeypatch.setattr(e2e.tempfile, "TemporaryDirectory", TemporaryDirectory)
     monkeypatch.setattr(e2e, "PortReservation", Reservation)
@@ -187,12 +193,13 @@ def test_run_e2e_detects_default_database_mutation_after_owned_cleanup(
     monkeypatch.setattr(e2e.subprocess, "run", fake_migration)
     monkeypatch.setattr(e2e, "start_process", fake_start_process)
     monkeypatch.setattr(e2e, "wait_for_http_ready", wait_for_http_ready)
+    monkeypatch.setattr(e2e, "wait_for_worker_ready", fake_worker_ready)
     monkeypatch.setattr(e2e, "terminate_process_tree", fake_terminate)
 
     with pytest.raises(RuntimeError, match="E2E modified the default database"):
         e2e.run_e2e()
 
-    assert cleanup_order == ["playwright", "web", "api"]
+    assert cleanup_order == ["playwright", "web", "worker", "api"]
 
 
 def test_port_reservation_uses_ipv4_loopback() -> None:
@@ -343,3 +350,57 @@ def test_posix_cleanup_targets_process_group(monkeypatch: pytest.MonkeyPatch) ->
 
     assert e2e.terminate_process_tree(Process()) is True
     assert signals == [(654, e2e.signal.SIGTERM)]
+
+
+def test_wait_for_worker_ready_reads_the_marker(tmp_path: Path) -> None:
+    e2e = load_module()
+    marker = tmp_path / "worker-ready.txt"
+    marker.write_text("schema_revision=0003\nproviders=anthropic\n", encoding="utf-8")
+
+    class Alive:
+        def poll(self) -> None:
+            return None
+
+    assert (
+        e2e.wait_for_worker_ready(marker, Alive(), e2e.WORKER_READY_TIMEOUT)
+        == "schema_revision=0003\nproviders=anthropic\n"
+    )
+
+
+def test_wait_for_worker_ready_reports_an_early_exit(tmp_path: Path) -> None:
+    e2e = load_module()
+
+    class Exited:
+        def poll(self) -> int:
+            return 2
+
+    with pytest.raises(RuntimeError, match="Worker exited before readiness with status 2"):
+        e2e.wait_for_worker_ready(tmp_path / "absent.txt", Exited(), e2e.WORKER_READY_TIMEOUT)
+
+
+def test_wait_for_worker_ready_times_out_when_no_marker_is_written(tmp_path: Path) -> None:
+    e2e = load_module()
+
+    class Alive:
+        def poll(self) -> None:
+            return None
+
+    with pytest.raises(RuntimeError, match="Timed out waiting for the Worker readiness marker"):
+        e2e.wait_for_worker_ready(tmp_path / "absent.txt", Alive(), 0.3)
+
+
+def test_the_supervisor_launches_the_deterministic_worker_script() -> None:
+    """The Worker is a third supervised process, driven by the test-only doubles."""
+    source = (ROOT / "scripts" / "e2e.py").read_text(encoding="utf-8")
+
+    assert "tests/e2e_support/e2e_worker.py" in source
+    assert "NERVOS_WORKER_READY_FILE" in source
+    assert "wait_for_worker_ready" in source
+
+    worker = ROOT / "tests" / "e2e_support" / "e2e_worker.py"
+    assert worker.is_file()
+    text = worker.read_text(encoding="utf-8")
+    # The deterministic doubles replace only the provider mapping; the loop is production code.
+    assert "build_deterministic_completions" in text
+    assert "nervos_worker.service" in text
+    assert "ANTHROPIC_API_KEY" not in text

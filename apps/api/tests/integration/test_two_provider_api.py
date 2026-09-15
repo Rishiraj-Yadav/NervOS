@@ -1,21 +1,18 @@
-"""Two-provider portability proofs at the authenticated B3 API surface.
+"""Two-provider portability proofs at the authenticated API surface.
 
-These tests use the existing seven B3 operations only. They prove that the second
-provider is a configuration choice of the same execution path, never a fallback.
+C2 makes the control plane capability-blind: it accepts a Run for any provider identifier
+NervOS knows, and the durable Job records which provider must execute it. These tests prove
+that the second provider is a *configuration choice of the same acceptance path* — no
+fallback, no second route, and a per-Run immutable snapshot — while execution routing itself
+is proven in the Worker suite, where the provider call actually happens.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from fastapi.testclient import TestClient
-from nervos_core.application.model_completion import (
-    ModelProviderError,
-    ModelRequest,
-    ModelResponse,
-    ModelUsage,
-    StopOutcome,
-)
 from nervos_core.application.model_providers import ModelProviderCatalog
 
 PROVIDER_ID = "anthropic"
@@ -24,218 +21,122 @@ INSTANCES = "/api/v1/agent-instances"
 ORIGIN = {"Origin": "http://localhost:5173"}
 
 
-class RecordingCompletion:
-    """Offline provider double that reports one exact canonical provider identity."""
+class RecordingCredentialFreeCompletion:
+    """A double that must never be called by the control plane."""
 
-    def __init__(self, provider_id: str, text: str) -> None:
+    def __init__(self, provider_id: str, model_name: str) -> None:
         self.provider_id = provider_id
-        self.text = text
+        self.model_name = model_name
         self.calls = 0
-        self.requests: list[ModelRequest] = []
-        self.error: Exception | None = None
 
-    async def complete(self, request: ModelRequest) -> ModelResponse:
+    async def complete(self, request: Any) -> Any:  # pragma: no cover - must stay uncalled
+        del request
         self.calls += 1
-        self.requests.append(request)
-        if self.error is not None:
-            raise self.error
-        return ModelResponse(
-            self.text,
-            self.provider_id,
-            request.model_name,
-            StopOutcome.STOP,
-            ModelUsage(11, 3, None),
-        )
+        raise AssertionError("the control plane must never invoke a model provider")
 
 
-def instance_body(**overrides: Any) -> dict[str, Any]:
-    body: dict[str, Any] = {
-        "agent_key": "nervos.chat",
-        "agent_definition_version": "1",
-        "display_name": "Two Provider Chat",
-        "model_provider": PROVIDER_ID,
-        "model_name": "opaque/anthropic-model",
-    }
-    body.update(overrides)
-    return body
-
-
-def install(install_provider_catalog: Any, **completions: str) -> tuple[Any, Any]:
-    """Install a two-provider catalog and return both recording doubles.
-
-    Each canonical ID gets its own double, so a misrouted lookup or a fallback shows up
-    as a call on the wrong recorder rather than as a passing test.
-    """
-    anthropic = RecordingCompletion(PROVIDER_ID, completions.get("anthropic", "answer a"))
-    openai = RecordingCompletion(SECOND_PROVIDER_ID, completions.get("openai", "answer b"))
-    install_provider_catalog(
-        ModelProviderCatalog(
-            [(PROVIDER_ID, lambda: anthropic), (SECOND_PROVIDER_ID, lambda: openai)],
-            known=[PROVIDER_ID, SECOND_PROVIDER_ID],
-        )
+def two_provider_catalog(
+    anthropic: RecordingCredentialFreeCompletion, openai: RecordingCredentialFreeCompletion
+) -> ModelProviderCatalog:
+    """Return a catalog configuring both providers with distinct, never-invoked doubles."""
+    return ModelProviderCatalog(
+        [(PROVIDER_ID, lambda: anthropic), (SECOND_PROVIDER_ID, lambda: openai)],
+        known=[PROVIDER_ID, SECOND_PROVIDER_ID],
     )
-    return anthropic, openai
 
 
-def install_only_first_configured(install_provider_catalog: Any) -> RecordingCompletion:
-    """Install a catalog where both IDs are known but only the first is configured."""
-    anthropic = RecordingCompletion(PROVIDER_ID, "answer a")
-    install_provider_catalog(
-        ModelProviderCatalog(
-            [(PROVIDER_ID, lambda: anthropic)], known=[PROVIDER_ID, SECOND_PROVIDER_ID]
-        )
+def bare_catalog() -> ModelProviderCatalog:
+    """Return a catalog where both providers are known but neither is configured."""
+    return ModelProviderCatalog([], known=[PROVIDER_ID, SECOND_PROVIDER_ID])
+
+
+def create_instance(client: TestClient, provider: str, model: str) -> dict[str, Any]:
+    response = client.post(
+        INSTANCES,
+        json={
+            "agent_key": "nervos.chat",
+            "agent_definition_version": "1",
+            "display_name": "Two provider",
+            "model_provider": provider,
+            "model_name": model,
+        },
+        headers=ORIGIN,
     )
-    return anthropic
-
-
-def execute(client: TestClient, instance_id: int, text: str = "hello") -> Any:
-    return client.post(f"{INSTANCES}/{instance_id}/runs", json={"input": text}, headers=ORIGIN)
-
-
-def create(client: TestClient, **overrides: Any) -> dict[str, Any]:
-    response = client.post(INSTANCES, json=instance_body(**overrides), headers=ORIGIN)
     assert response.status_code == 201, response.text
     return response.json()
 
 
-def test_the_second_provider_is_known_without_a_process_credential(
-    owner_client: TestClient, install_provider_catalog: Any
+def submit(client: TestClient, instance_id: int, prompt: str = "hello") -> Any:
+    return client.post(f"{INSTANCES}/{instance_id}/runs", json={"input": prompt}, headers=ORIGIN)
+
+
+def test_both_providers_are_known_and_neither_is_a_fallback(
+    owner_client: TestClient, install_provider_catalog: Callable[..., None]
 ) -> None:
-    """Known-but-unconfigured stays storable; only execution is unavailable."""
-    install_only_first_configured(install_provider_catalog)
+    anthropic = RecordingCredentialFreeCompletion(PROVIDER_ID, "opaque/anthropic-model")
+    openai = RecordingCredentialFreeCompletion(SECOND_PROVIDER_ID, "opaque/openai-model")
+    install_provider_catalog(two_provider_catalog(anthropic, openai))
 
-    body = create(owner_client, model_provider=SECOND_PROVIDER_ID, model_name="opaque/second")
+    created = create_instance(owner_client, SECOND_PROVIDER_ID, "opaque/openai-model")
 
-    assert body["model_provider"] == SECOND_PROVIDER_ID
-    assert body["model_name"] == "opaque/second"
+    assert created["model_provider"] == SECOND_PROVIDER_ID
+    response = submit(owner_client, created["id"])
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == "created"
+    assert response.json()["model_provider"] == SECOND_PROVIDER_ID
+    # Acceptance never touches a provider, so neither double was invoked or resolved away.
+    assert anthropic.calls == 0 and openai.calls == 0
 
 
 def test_an_unknown_third_provider_is_still_rejected(
-    owner_client: TestClient, install_provider_catalog: Any
+    owner_client: TestClient, install_provider_catalog: Callable[..., None]
 ) -> None:
-    install(install_provider_catalog)
-
+    install_provider_catalog(bare_catalog())
     response = owner_client.post(
-        INSTANCES, json=instance_body(model_provider="gemini"), headers=ORIGIN
-    )
-
-    assert response.status_code == 422
-    assert response.json()["error"]["code"] == "unknown_model_provider"
-    assert owner_client.get(INSTANCES, headers=ORIGIN).json()["items"] == []
-
-
-def test_updating_configuration_to_the_second_provider_is_accepted(
-    owner_client: TestClient, install_provider_catalog: Any
-) -> None:
-    install(install_provider_catalog)
-    created = create(owner_client)
-
-    response = owner_client.patch(
-        f"{INSTANCES}/{created['id']}",
+        INSTANCES,
         json={
-            "display_name": created["display_name"],
-            "model_provider": SECOND_PROVIDER_ID,
-            "model_name": "opaque/second",
+            "agent_key": "nervos.chat",
+            "agent_definition_version": "1",
+            "display_name": "Unknown",
+            "model_provider": "not-a-provider",
+            "model_name": "opaque/model",
         },
         headers=ORIGIN,
     )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "unknown_model_provider"
 
-    assert response.status_code == 200
-    assert response.json()["model_provider"] == SECOND_PROVIDER_ID
 
-
-def test_unconfigured_second_provider_execution_is_rejected_before_any_run(
-    owner_client: TestClient, install_provider_catalog: Any
+def test_a_known_but_locally_unconfigured_provider_is_accepted(
+    owner_client: TestClient, install_provider_catalog: Callable[..., None]
 ) -> None:
-    anthropic = install_only_first_configured(install_provider_catalog)
-    created = create(owner_client, model_provider=SECOND_PROVIDER_ID)
+    """C2 behaviour change: execution capability belongs to the Worker, not to admission.
 
-    response = execute(owner_client, created["id"])
+    A known provider whose credential this process does not hold is accepted and waits in the
+    durable queue until a Worker capable of it exists. Rejecting it here would make the
+    control plane's credential inventory a silent admission policy.
+    """
+    install_provider_catalog(bare_catalog())
+    created = create_instance(owner_client, SECOND_PROVIDER_ID, "opaque/openai-model")
 
-    assert response.status_code == 409
-    assert response.json()["error"]["code"] == "model_provider_unavailable"
-    assert owner_client.get(f"{INSTANCES}/{created['id']}/runs", headers=ORIGIN).json() == {
-        "items": [],
-        "next_before_id": None,
-    }
-    assert anthropic.calls == 0
+    response = submit(owner_client, created["id"])
 
-
-def test_second_provider_executes_through_the_unchanged_endpoint(
-    owner_client: TestClient, install_provider_catalog: Any
-) -> None:
-    anthropic, openai = install(install_provider_catalog, openai="openai answer")
-    created = create(owner_client, model_provider=SECOND_PROVIDER_ID)
-
-    response = execute(owner_client, created["id"])
-
-    assert response.status_code == 201
+    assert response.status_code == 202, response.text
     body = response.json()
-    assert body["status"] == "succeeded"
-    assert body["output_text"] == "openai answer"
+    assert body["status"] == "created"
     assert body["model_provider"] == SECOND_PROVIDER_ID
-    assert response.headers["Location"] == f"/api/v1/runs/{body['id']}"
-    assert openai.calls == 1
-    assert anthropic.calls == 0
+    assert body["output_text"] is None and body["error_code"] is None
 
 
-def test_a_failed_second_provider_run_is_persisted_not_a_platform_error(
-    owner_client: TestClient, install_provider_catalog: Any
+def test_each_run_keeps_its_own_immutable_provider_snapshot(
+    owner_client: TestClient, install_provider_catalog: Callable[..., None]
 ) -> None:
-    anthropic, openai = install(install_provider_catalog)
-    openai.error = ModelProviderError("model_rate_limited")
-    created = create(owner_client, model_provider=SECOND_PROVIDER_ID)
+    anthropic = RecordingCredentialFreeCompletion(PROVIDER_ID, "opaque/anthropic-model")
+    openai = RecordingCredentialFreeCompletion(SECOND_PROVIDER_ID, "opaque/openai-model")
+    install_provider_catalog(two_provider_catalog(anthropic, openai))
+    created = create_instance(owner_client, PROVIDER_ID, "opaque/anthropic-model")
 
-    response = execute(owner_client, created["id"])
-
-    assert response.status_code == 201
-    body = response.json()
-    assert body["status"] == "failed"
-    assert body["error_code"] == "model_rate_limited"
-    assert body["output_text"] is None
-    assert anthropic.calls == 0
-
-
-def test_a_failing_second_provider_never_falls_back_to_the_first(
-    owner_client: TestClient, install_provider_catalog: Any
-) -> None:
-    """Portability is explicit configuration, so a configured peer provider stays untouched."""
-    anthropic, openai = install(install_provider_catalog)
-    openai.error = ModelProviderError("model_unavailable")
-    created = create(owner_client, model_provider=SECOND_PROVIDER_ID)
-
-    response = execute(owner_client, created["id"])
-
-    assert response.status_code == 201
-    assert response.json()["status"] == "failed"
-    assert openai.calls == 1
-    assert anthropic.calls == 0
-
-
-def test_a_failing_first_provider_never_falls_back_to_the_second(
-    owner_client: TestClient, install_provider_catalog: Any
-) -> None:
-    anthro, openai = install(install_provider_catalog)
-    anthropic = anthro
-    anthropic.error = ModelProviderError("model_unavailable")
-    created = create(owner_client)
-
-    response = execute(owner_client, created["id"])
-
-    assert response.status_code == 201
-    assert response.json()["status"] == "failed"
-    assert anthropic.calls == 1
-    assert openai.calls == 0
-
-
-def test_switching_provider_leaves_existing_runs_untouched(
-    owner_client: TestClient, install_provider_catalog: Any
-) -> None:
-    """The Run snapshot is immutable; a later configuration change affects future Runs only."""
-    anthropic, openai = install(install_provider_catalog, anthropic="first answer")
-    created = create(owner_client, model_name="opaque/anthropic-model")
-    first = execute(owner_client, created["id"]).json()
-
+    first = submit(owner_client, created["id"]).json()
     patched = owner_client.patch(
         f"{INSTANCES}/{created['id']}",
         json={
@@ -246,8 +147,8 @@ def test_switching_provider_leaves_existing_runs_untouched(
         headers=ORIGIN,
     )
     assert patched.status_code == 200
+    second = submit(owner_client, created["id"]).json()
 
-    second = execute(owner_client, created["id"]).json()
     reread = owner_client.get(f"/api/v1/runs/{first['id']}", headers=ORIGIN).json()
 
     assert first["model_provider"] == PROVIDER_ID
@@ -255,5 +156,4 @@ def test_switching_provider_leaves_existing_runs_untouched(
     assert second["model_provider"] == SECOND_PROVIDER_ID
     assert second["model_name"] == "opaque/openai-model"
     assert reread == first
-    assert anthropic.requests[0].model_name == "opaque/anthropic-model"
-    assert openai.requests[0].model_name == "opaque/openai-model"
+    assert first["id"] != second["id"]

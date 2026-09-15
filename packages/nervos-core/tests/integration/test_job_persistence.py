@@ -7,7 +7,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from nervos_core.domain.agents import AgentDefinitionId
-from nervos_core.domain.runs import STAGE_B_LIMITS
+from nervos_core.domain.runs import STAGE_B_LIMITS, RunStatus
 from nervos_core.infrastructure.database import create_sqlite_engine
 from nervos_core.infrastructure.database.jobs import (
     DurableSubmissionRejected,
@@ -51,17 +51,20 @@ def test_atomic_submission_snapshots_and_creates_initial_events(
 ) -> None:
     engine = setup_db(tmp_path / "c1.db", monkeypatch)
     try:
-        run_id, job_id = SqlAlchemyJobPersistence(engine).submit(
+        run = SqlAlchemyJobPersistence(engine).submit(
             owner_user_id=1, agent_instance_id=1, input_text="hello", limits=STAGE_B_LIMITS, now=NOW
         )
+        assert run.status is RunStatus.CREATED
+        assert run.input_text == "hello"
         with engine.connect() as c:
             assert c.scalar(text("SELECT count(*) FROM runs")) == 1
             assert c.scalar(text("SELECT count(*) FROM jobs")) == 1
             assert c.execute(
                 text("SELECT event_type FROM run_events WHERE run_id=:r ORDER BY sequence"),
-                {"r": run_id},
+                {"r": run.id},
             ).scalars().all() == ["run.created", "run.queued"]
-            assert c.scalar(text("SELECT run_id FROM jobs WHERE id=:j"), {"j": job_id}) == run_id
+            job_id = c.scalar(text("SELECT id FROM jobs WHERE run_id=:r"), {"r": run.id})
+            assert job_id is not None
     finally:
         engine.dispose()
 
@@ -104,18 +107,21 @@ def test_append_event_sequences_independent_writers(
 ) -> None:
     engine = setup_db(tmp_path / "events.db", monkeypatch)
     try:
-        run_id, job_id = SqlAlchemyJobPersistence(engine).submit(
+        run = SqlAlchemyJobPersistence(engine).submit(
             owner_user_id=1, agent_instance_id=1, input_text="hello", limits=STAGE_B_LIMITS, now=NOW
         )
+        with engine.connect() as c:
+            job_id = c.scalar(text("SELECT id FROM jobs WHERE run_id=:r"), {"r": run.id})
+        assert job_id is not None
         assert (
             SqlAlchemyJobPersistence(engine).append_event(
-                run_id=run_id, job_id=job_id, event_type="run.failed", created_at=NOW
+                run_id=run.id, job_id=job_id, event_type="run.failed", created_at=NOW
             )
             == 3
         )
         assert (
             SqlAlchemyJobPersistence(engine).append_event(
-                run_id=run_id, job_id=job_id, event_type="run.failed", created_at=NOW
+                run_id=run.id, job_id=job_id, event_type="run.failed", created_at=NOW
             )
             == 4
         )

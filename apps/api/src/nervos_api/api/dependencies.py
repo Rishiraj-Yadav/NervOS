@@ -13,7 +13,6 @@ from nervos_core.application.authentication import (
     PublicUser,
 )
 from nervos_core.application.model_providers import ModelProviderCatalog
-from nervos_core.application.run_coordinator import RunCoordinator
 
 from nervos_api.api.cookies import SESSION_COOKIE_NAME
 from nervos_api.api.errors import InvalidOrigin
@@ -40,9 +39,9 @@ def get_agent_service(request: Request) -> AgentService:
     return cast(AgentService, request.app.state.agent_service)
 
 
-def get_run_coordinator(request: Request) -> RunCoordinator:
-    """Return the composed one-shot Run coordinator; routes never build one."""
-    return cast(RunCoordinator, request.app.state.run_coordinator)
+def get_run_submission_service(request: Request) -> AgentService:
+    """Return the durable Run submission service; routes never build one."""
+    return cast(AgentService, request.app.state.run_submission_service)
 
 
 def get_model_provider_catalog(request: Request) -> ModelProviderCatalog:
@@ -75,7 +74,7 @@ AuthenticationServiceDependency = Annotated[
     Depends(get_authentication_service),
 ]
 AgentServiceDependency = Annotated[AgentService, Depends(get_agent_service)]
-RunCoordinatorDependency = Annotated[RunCoordinator, Depends(get_run_coordinator)]
+RunSubmissionDependency = Annotated[AgentService, Depends(get_run_submission_service)]
 ModelProviderCatalogDependency = Annotated[
     ModelProviderCatalog,
     Depends(get_model_provider_catalog),

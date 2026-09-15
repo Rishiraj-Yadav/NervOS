@@ -1,7 +1,9 @@
 """Narrow provider-neutral model completion boundary and normalized provider outcomes."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Protocol
 
 from nervos_core.domain.runs import ModelUsage
@@ -19,21 +21,34 @@ MODEL_OUTPUT_INCOMPLETE = "model_output_incomplete"
 MODEL_OUTPUT_TOO_LARGE = "model_output_too_large"
 MODEL_REFUSED = "model_refused"
 INTERNAL_EXECUTION_ERROR = "internal_execution_error"
+# Infrastructural closeout code. It names a durable-execution outcome rather than a provider
+# response, and it lives in the same allowlist as every provider code precisely so that there
+# is exactly one place that decides which codes may ever be persisted and what they say.
+EXECUTION_OUTCOME_AMBIGUOUS = "execution_outcome_ambiguous"
 
-_PROVIDER_ERROR_MESSAGES: dict[str, str] = {
-    MODEL_AUTHENTICATION_FAILED: "The model provider rejected its configured credential.",
-    MODEL_PERMISSION_DENIED: "The model provider denied access to this request.",
-    MODEL_ACCOUNT_UNAVAILABLE: "The model provider account cannot execute this request.",
-    MODEL_RATE_LIMITED: "The model provider is temporarily rate limited.",
-    MODEL_TIMED_OUT: "The model request exceeded its time limit.",
-    MODEL_UNAVAILABLE: "The model provider is temporarily unavailable.",
-    MODEL_REQUEST_REJECTED: "The model provider rejected the request configuration.",
-    MODEL_RESPONSE_INVALID: "The model provider returned an unusable response.",
-    MODEL_OUTPUT_INCOMPLETE: "The model response ended before completion.",
-    MODEL_OUTPUT_TOO_LARGE: "The model response exceeded the configured limit.",
-    MODEL_REFUSED: "The model could not complete this request.",
-    INTERNAL_EXECUTION_ERROR: "The model execution failed safely.",
-}
+# The single authority for every persistable code and its static NervOS-owned message.
+# The database bounds `error_code` only by length, so nothing in SQLite stops a raw exception
+# string from being written as a code: the allowlist has to be enforced here, in code.
+SAFE_ERROR_MESSAGES: Mapping[str, str] = MappingProxyType(
+    {
+        MODEL_AUTHENTICATION_FAILED: "The model provider rejected its configured credential.",
+        MODEL_PERMISSION_DENIED: "The model provider denied access to this request.",
+        MODEL_ACCOUNT_UNAVAILABLE: "The model provider account cannot execute this request.",
+        MODEL_RATE_LIMITED: "The model provider is temporarily rate limited.",
+        MODEL_TIMED_OUT: "The model request exceeded its time limit.",
+        MODEL_UNAVAILABLE: "The model provider is temporarily unavailable.",
+        MODEL_REQUEST_REJECTED: "The model provider rejected the request configuration.",
+        MODEL_RESPONSE_INVALID: "The model provider returned an unusable response.",
+        MODEL_OUTPUT_INCOMPLETE: "The model response ended before completion.",
+        MODEL_OUTPUT_TOO_LARGE: "The model response exceeded the configured limit.",
+        MODEL_REFUSED: "The model could not complete this request.",
+        INTERNAL_EXECUTION_ERROR: "The model execution failed safely.",
+        EXECUTION_OUTCOME_AMBIGUOUS: (
+            "NervOS could not determine whether this run's model request completed, so it was "
+            "closed as failed rather than replayed."
+        ),
+    }
+)
 
 
 class ModelProviderError(Exception):
@@ -69,7 +84,16 @@ class ModelProviderError(Exception):
 
 def provider_error_message(code: str) -> str:
     """Return the static safe message for a normalized provider failure code."""
-    return _PROVIDER_ERROR_MESSAGES[code]
+    return SAFE_ERROR_MESSAGES[code]
+
+
+def safe_error_message(code: str) -> str:
+    """Return the allowlisted static message, falling back to the internal error's text.
+
+    Anything that is not in the allowlist is refused rather than persisted as itself, so an
+    unrecognized exception can never smuggle its own text into durable state.
+    """
+    return SAFE_ERROR_MESSAGES.get(code, SAFE_ERROR_MESSAGES[INTERNAL_EXECUTION_ERROR])
 
 
 class ModelAuthenticationError(ModelProviderError):

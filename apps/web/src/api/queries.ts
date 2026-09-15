@@ -12,10 +12,40 @@ import {
   listAgentInstances,
   listRuns,
   updateAgentInstance,
+  type Run,
   type RunPage,
 } from "./agentInstances";
 import type { Credentials, SetupStatus, User } from "./types";
 import { queryOptions, useMutation, useQueryClient } from "@tanstack/react-query";
+
+export const RUN_POLL_INTERVAL_MS = 2000;
+// Bounded polling budget: ~300 s of continuous polling across nonterminal runs at 2 s.
+// A permanently stranded Run will stop polling rather than spinning forever, honoring the rule
+// in `docs/runtime.md` that an abandoned Run must not be presented as actively progressing.
+export const MAX_NONTERMINAL_POLL_COUNT = 150;
+
+/**
+ * Pure polling predicate for the Run history page.
+ *
+ * Polls every 2 seconds while at least one displayed Run is nonterminal (`created` or `running`)
+ * and the polling budget has not been exhausted. Once every Run is terminal, or the budget is
+ * reached, polling stops.
+ */
+export function runPollInterval(
+  data: RunPage | undefined,
+  dataUpdateCount: number = 0,
+): number | false {
+  if (data === undefined || data.items.length === 0) {
+    return false;
+  }
+  if (dataUpdateCount >= MAX_NONTERMINAL_POLL_COUNT) {
+    return false;
+  }
+  const hasNonterminal = data.items.some(
+    (run: Run) => run.status === "created" || run.status === "running",
+  );
+  return hasNonterminal ? RUN_POLL_INTERVAL_MS : false;
+}
 
 export const queryKeys = {
   setup: ["setup-status"] as const,
@@ -87,6 +117,8 @@ export const agentRunsQuery = (agentInstanceId: number) =>
     queryKey: queryKeys.agentRuns(agentInstanceId),
     queryFn: () => listRuns(agentInstanceId),
     retry: false,
+    refetchInterval: (query) =>
+      runPollInterval(query.state.data, query.state.dataUpdateCount),
   });
 
 export function useCreateAgentInstance() {
@@ -110,8 +142,8 @@ export function useUpdateAgentInstance(agentInstanceId: number) {
 }
 
 /**
- * Execute one Run. The returned value is the Run the server persisted and committed, so it is
- * the only thing rendered as a result — there is never a fabricated assistant answer.
+ * Durably accept one Run. The returned value is the Run the server persisted and committed
+ * as `created`; a separately-running Worker executes it and terminal persistence updates it.
  */
 export function useCreateRun(agentInstanceId: number) {
   const queryClient = useQueryClient();

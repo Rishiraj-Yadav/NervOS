@@ -8,8 +8,7 @@ from typing import Protocol
 
 from nervos_core.application.agent_definitions import AgentDefinitionResolver
 from nervos_core.application.clock import Clock, require_utc
-from nervos_core.application.model_providers import ModelProviderCatalog
-from nervos_core.application.trusted_chat import TrustedAgentHandlerResolver
+from nervos_core.application.model_providers import ModelProviderCatalog, UnknownModelProvider
 from nervos_core.domain.agents import (
     AgentDefinitionId,
     AgentInstance,
@@ -18,13 +17,9 @@ from nervos_core.domain.agents import (
     validate_model_provider,
 )
 from nervos_core.domain.runs import (
-    ModelUsage,
     Run,
     RunLimits,
-    validate_error_message,
     validate_input_text,
-    validate_outcome_code,
-    validate_output_text,
 )
 
 
@@ -40,8 +35,31 @@ class RunNotFound(LookupError):
     pass
 
 
-class RunTransitionRejected(RuntimeError):
-    pass
+class DurableSubmissionRejected(ValueError):
+    """The owned enabled Agent Instance was unavailable at commit time.
+
+    The durable submission primitive re-checks ownership, enabled state, and exact definition
+    identity inside its own transaction, so this is the one race that a pre-flight read cannot
+    close. The application layer translates it into the same owner-visible failure a
+    pre-flight read would have produced.
+    """
+
+
+class RunSubmissionPersistence(Protocol):
+    """Durable acceptance of one Run: Run + Job + initial events, atomically."""
+
+    def submit(
+        self,
+        *,
+        owner_user_id: int,
+        agent_instance_id: int,
+        input_text: str,
+        limits: RunLimits,
+        definition_id: AgentDefinitionId | None = None,
+        now: datetime,
+        max_attempts: int = 3,
+        max_pending: int | None = None,
+    ) -> Run: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,56 +97,32 @@ class AgentPersistence(Protocol):
     def set_instance_enabled(
         self, owner_user_id: int, instance_id: int, enabled: bool, now: datetime
     ) -> AgentInstance: ...
-    def create_run_for_owned_instance(
-        self,
-        owner_user_id: int,
-        instance_id: int,
-        definition_id: AgentDefinitionId,
-        input_text: str,
-        limits: RunLimits,
-        now: datetime,
-    ) -> Run: ...
     def get_run(self, owner_user_id: int, run_id: int) -> Run: ...
     def list_runs(
         self, owner_user_id: int, instance_id: int, limit: int, before_id: int | None
     ) -> tuple[Run, ...]: ...
-    def mark_running(self, owner_user_id: int, run_id: int, now: datetime) -> Run: ...
-    def mark_succeeded(
-        self,
-        owner_user_id: int,
-        run_id: int,
-        output_text: str,
-        finish_reason: str | None,
-        usage: ModelUsage,
-        elapsed_ms: int,
-        now: datetime,
-    ) -> Run: ...
-    def mark_failed(
-        self,
-        owner_user_id: int,
-        run_id: int,
-        error_code: str,
-        error_message: str,
-        usage: ModelUsage,
-        elapsed_ms: int,
-        now: datetime,
-    ) -> Run: ...
 
 
 class AgentService:
+    """Own Agent Instances and Run history, and durably accept new Runs.
+
+    The service holds no handler registry and no executor: it validates structure and commits
+    the durable obligation, and the execution plane is what runs it.
+    """
+
     def __init__(
         self,
         persistence: AgentPersistence,
         definitions: AgentDefinitionResolver,
         clock: Clock,
-        handlers: TrustedAgentHandlerResolver | None = None,
         providers: ModelProviderCatalog | None = None,
+        submissions: RunSubmissionPersistence | None = None,
     ) -> None:
         self._persistence = persistence
         self._definitions = definitions
         self._clock = clock
-        self._handlers = handlers
         self._providers = providers
+        self._submissions = submissions
 
     def create_instance(
         self,
@@ -202,84 +196,37 @@ class AgentService:
         self._persistence.get_instance(owner_user_id, instance_id)
         return self._persistence.list_runs(owner_user_id, instance_id, limit, before_id)
 
-    def create_run(
-        self,
-        owner_user_id: int,
-        instance_id: int,
-        input_text: str,
-        handlers: TrustedAgentHandlerResolver | None = None,
-        providers: ModelProviderCatalog | None = None,
-    ) -> Run:
-        """Insert one `created` Run snapshot after every known pre-run check passes.
+    def submit_run(self, owner_user_id: int, instance_id: int, input_text: str) -> Run:
+        """Durably accept one Run without executing anything.
 
-        Handler resolution, provider resolution, and provider configuration availability are
-        verified before the insert, so a known pre-run rejection persists no Run at all. The
-        insert itself re-checks ownership, enabled state, and exact definition identity
-        atomically.
+        The control plane validates structure only: the owned Agent Instance is resolved, the
+        exact definition identity is pinned, the provider identifier must be one NervOS
+        knows, and the input must satisfy the definition's limits. Whether *this* process
+        holds a credential is deliberately not part of admission, because execution is a
+        Worker capability; a known but locally unconfigured provider is accepted and waits
+        in the queue until a capable Worker exists.
+
+        The Run, its Job, and both initial Run Events commit together inside one
+        `BEGIN IMMEDIATE` transaction, so a rejected submission leaves no partial state and
+        consumes no identifier.
         """
         instance = self._persistence.get_instance(owner_user_id, instance_id)
         definition = self._definitions.resolve(instance.definition_id)
-        limits = definition.limits
-        resolved_handlers = handlers or self._handlers
-        resolved_providers = providers or self._providers
-        if resolved_handlers is None or resolved_providers is None:
+        if self._providers is None:
             raise RuntimeError("agent execution resolvers are not configured")
-        resolved_handlers.resolve(instance.definition_id)
-        resolved_providers.resolve(instance.model_provider)
-        validate_input_text(input_text, limits)
-        return self._persistence.create_run_for_owned_instance(
-            owner_user_id,
-            instance_id,
-            instance.definition_id,
-            input_text,
-            limits,
-            require_utc(self._clock()),
-        )
-
-    def start(self, owner_user_id: int, run_id: int) -> Run:
-        """Atomically transition an owned `created` Run to `running` and return it."""
-        return self._persistence.mark_running(owner_user_id, run_id, require_utc(self._clock()))
-
-    def succeed(
-        self,
-        owner_user_id: int,
-        run_id: int,
-        output_text: str,
-        finish_reason: str | None,
-        usage: ModelUsage,
-        elapsed_ms: int,
-    ) -> Run:
-        run = self._persistence.get_run(owner_user_id, run_id)
-        validate_output_text(output_text, run.limits)
-        if finish_reason is not None:
-            validate_outcome_code(finish_reason)
-        return self._persistence.mark_succeeded(
-            owner_user_id,
-            run_id,
-            output_text,
-            finish_reason,
-            usage,
-            elapsed_ms,
-            require_utc(self._clock()),
-        )
-
-    def fail(
-        self,
-        owner_user_id: int,
-        run_id: int,
-        error_code: str,
-        error_message: str,
-        usage: ModelUsage,
-        elapsed_ms: int,
-    ) -> Run:
-        validate_outcome_code(error_code)
-        validate_error_message(error_message)
-        return self._persistence.mark_failed(
-            owner_user_id,
-            run_id,
-            error_code,
-            error_message,
-            usage,
-            elapsed_ms,
-            require_utc(self._clock()),
-        )
+        if not self._providers.is_known(instance.model_provider):
+            raise UnknownModelProvider(instance.model_provider)
+        validate_input_text(input_text, definition.limits)
+        if self._submissions is None:
+            raise RuntimeError("durable submission is not configured")
+        try:
+            return self._submissions.submit(
+                owner_user_id=owner_user_id,
+                agent_instance_id=instance_id,
+                input_text=input_text,
+                limits=definition.limits,
+                definition_id=instance.definition_id,
+                now=require_utc(self._clock()),
+            )
+        except DurableSubmissionRejected as error:
+            raise AgentInstanceUnavailable from error

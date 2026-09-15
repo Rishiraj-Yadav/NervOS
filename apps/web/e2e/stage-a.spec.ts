@@ -1,8 +1,24 @@
+import { writeFileSync } from "node:fs";
+
 import { expect, test } from "@playwright/test";
 
 const username = "Stage-A.Admin";
 const canonicalUsername = "stage-a.admin";
 const password = "StageA test password 2026!";
+// The Worker is held at the claim gate until the journey has observed the queued Run, so the
+// asynchronous cutover is proved rather than raced. The terminal result still has to travel
+// through a Worker claim, a durable terminal write, and a browser poll, so it gets a bound
+// wider than the 7.5s default; the whole-test budget is untouched.
+const ASYNC_TIMEOUT = 15_000;
+function releaseWorkerClaimGate(): void {
+  const gate = process.env.NERVOS_E2E_CLAIM_GATE;
+  if (gate === undefined || gate === "") {
+    throw new Error(
+      "NERVOS_E2E_CLAIM_GATE is required; run the journey through scripts/check.py e2e",
+    );
+  }
+  writeFileSync(gate, "released\n", "utf-8");
+}
 
 function storageContainsAuthenticationState(entries: [string, string][]): boolean {
   return entries.some(([key]) => /auth|session|user|token|login/i.test(key));
@@ -77,11 +93,27 @@ test("completes the Stage A setup and authentication journey", async ({ page }) 
 
   await page.getByLabel("Message").fill("first question from the browser");
   await page.getByRole("button", { name: /run agent/i }).click();
-  await expect(page.getByText(/Deterministic Anthropic reply from NervOS\./)).toBeVisible();
+
+  // C2 proof: the accepted Run is observably queued before any Worker may claim it. A
+  // synchronous POST would return a terminal Run, so `.run-status-created` would never appear
+  // and this assertion would fail.
+  await expect(page.locator(".run-status-created")).toHaveText("Queued");
+  await expect(
+    page.getByText(/Accepted and queued\. A worker must be running to execute this run\./),
+  ).toBeVisible();
+
+  // Only now may the Worker claim, execute, terminalize, and be observed by the browser poll.
+  releaseWorkerClaimGate();
+
+  await expect(page.getByText(/Deterministic Anthropic reply from NervOS\./)).toBeVisible({
+    timeout: ASYNC_TIMEOUT,
+  });
 
   // The result survives a reload because it was persisted, not held in browser state.
   await page.reload();
-  await expect(page.getByText(/Deterministic Anthropic reply from NervOS\./)).toBeVisible();
+  await expect(page.getByText(/Deterministic Anthropic reply from NervOS\./)).toBeVisible({
+    timeout: ASYNC_TIMEOUT,
+  });
   await expect(page.getByText("first question from the browser")).toBeVisible();
 
   // Switch the same instance explicitly; the model stays operator-controlled.
@@ -90,10 +122,16 @@ test("completes the Stage A setup and authentication journey", async ({ page }) 
   await page.getByRole("button", { name: /save configuration/i }).click();
   await page.getByLabel("Message").fill("second question from the browser");
   await page.getByRole("button", { name: /run agent/i }).click();
-  await expect(page.getByText(/Deterministic OpenAI reply from NervOS\./)).toBeVisible();
+  await expect(page.getByText(/Deterministic OpenAI reply from NervOS\./)).toBeVisible({
+    timeout: ASYNC_TIMEOUT,
+  });
   await page.reload();
-  await expect(page.getByText(/Deterministic Anthropic reply from NervOS\./)).toBeVisible();
-  await expect(page.getByText(/Deterministic OpenAI reply from NervOS\./)).toBeVisible();
+  await expect(page.getByText(/Deterministic Anthropic reply from NervOS\./)).toBeVisible({
+    timeout: ASYNC_TIMEOUT,
+  });
+  await expect(page.getByText(/Deterministic OpenAI reply from NervOS\./)).toBeVisible({
+    timeout: ASYNC_TIMEOUT,
+  });
   await expect(page.getByText("anthropic · opaque/e2e-model")).toBeVisible();
   await expect(page.getByText("openai · opaque/openai-e2e-model")).toBeVisible();
 

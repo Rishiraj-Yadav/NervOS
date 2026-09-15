@@ -8,9 +8,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]
 CORE_SOURCE = ROOT / "packages" / "nervos-core" / "src" / "nervos_core"
+CORE_APPLICATION = CORE_SOURCE / "application"
 MODELS_SOURCE = ROOT / "packages" / "nervos-models" / "src" / "nervos_models"
 API_SOURCE = ROOT / "apps" / "api" / "src" / "nervos_api"
 API_ROUTES = API_SOURCE / "api" / "routes"
+WORKER_SOURCE = ROOT / "apps" / "worker" / "src" / "nervos_worker"
 FRONTEND_SOURCE = ROOT / "apps" / "web" / "src"
 ORM_MODELS = CORE_SOURCE / "infrastructure" / "database" / "models.py"
 
@@ -101,6 +103,7 @@ def test_provider_sdk_exists_only_in_the_models_infrastructure_package() -> None
         module for path in python_files(CORE_SOURCE) for module in imported_modules(path)
     }
     api_imports_by_file = {path: imported_modules(path) for path in python_files(API_SOURCE)}
+    worker_imports_by_file = {path: imported_modules(path) for path in python_files(WORKER_SOURCE)}
     model_imports = {
         module for path in python_files(MODELS_SOURCE) for module in imported_modules(path)
     }
@@ -109,11 +112,19 @@ def test_provider_sdk_exists_only_in_the_models_infrastructure_package() -> None
     for sdk in ("anthropic", "openai"):
         assert not any(module.startswith(sdk) for module in core_imports), sdk
         assert any(module.startswith(sdk) for module in model_imports), sdk
+        assert not any(
+            module.startswith(sdk)
+            for imports in worker_imports_by_file.values()
+            for module in imports
+        ), sdk
     assert not any(module.startswith("nervos_models") for module in core_imports)
-    assert all(
-        path.name == "app.py" or not any(module.startswith("nervos_models") for module in imports)
-        for path, imports in api_imports_by_file.items()
-    )
+    # Composition roots are the only modules allowed to reach the concrete adapter package.
+    for imports_by_file in (api_imports_by_file, worker_imports_by_file):
+        assert all(
+            path.name == "app.py"
+            or not any(module.startswith("nervos_models") for module in imports)
+            for path, imports in imports_by_file.items()
+        )
 
 
 def test_api_routes_never_reach_persistence_or_a_provider_adapter() -> None:
@@ -142,10 +153,10 @@ def test_exactly_two_production_providers_are_known() -> None:
         assert dynamic not in text, dynamic
 
 
-def test_trusted_chat_and_coordinator_stay_provider_neutral() -> None:
+def test_trusted_chat_and_execution_stay_provider_neutral() -> None:
     """No provider-specific branch may appear in the shared execution path."""
-    for name in ("trusted_chat.py", "run_coordinator.py", "model_completion.py"):
-        text = (CORE_SOURCE / "application" / name).read_text(encoding="utf-8")
+    for name in ("trusted_chat.py", "run_execution.py", "job_execution.py", "model_completion.py"):
+        text = (CORE_APPLICATION / name).read_text(encoding="utf-8")
         for provider in ("anthropic", "openai", "Anthropic", "OpenAI"):
             assert provider not in text, (name, provider)
 
@@ -166,14 +177,16 @@ def test_b3_route_surface_and_migration_freeze() -> None:
     ]
 
 
-def test_only_one_run_coordinator_execution_call_exists() -> None:
-    """Exactly one canonical execution path: no route may drive the coordinator itself."""
+def test_only_one_durable_submission_call_exists() -> None:
+    """Exactly one canonical acceptance path: no route may drive execution or the coordinator."""
     calls = sum(
-        path.read_text(encoding="utf-8").count("coordinator.execute(")
+        path.read_text(encoding="utf-8").count("submission.submit_run(")
         for path in python_files(API_ROUTES)
     )
 
     assert calls == 1
+    api_sources = {path: path.read_text(encoding="utf-8") for path in python_files(API_SOURCE)}
+    assert not any("RunCoordinator" in text for text in api_sources.values())
 
 
 def test_b3_creation_gate_pins_the_shared_trusted_definition() -> None:
@@ -184,7 +197,8 @@ def test_b3_creation_gate_pins_the_shared_trusted_definition() -> None:
     assert "nervos.chat" not in source
 
 
-def test_c1_schema_is_frozen_without_active_worker_runtime() -> None:
+def test_the_schema_is_frozen_and_no_execution_table_was_added_by_c2() -> None:
+    """C2 activates the execution plane without widening the persisted schema."""
     tables = set(re.findall(r'__tablename__ = "([a-z_]+)"', ORM_MODELS.read_text(encoding="utf-8")))
     assert tables == EXPECTED_TABLES
     router_text = (API_SOURCE / "api" / "router.py").read_text(encoding="utf-8").lower()
@@ -209,13 +223,86 @@ def test_frontend_never_references_a_provider_credential_or_sdk() -> None:
 
 def test_production_composition_cannot_reach_the_test_only_provider() -> None:
     """The deterministic double lives outside shipped packages and is never referenced by them."""
-    for path in python_files(API_SOURCE):
-        text = path.read_text(encoding="utf-8")
-        for forbidden in ("e2e_support", "e2e_app", "DeterministicCompletion"):
-            assert forbidden not in text, (path, forbidden)
+    for root in (API_SOURCE, WORKER_SOURCE):
+        for path in python_files(root):
+            text = path.read_text(encoding="utf-8")
+            for forbidden in (
+                "e2e_support",
+                "e2e_app",
+                "e2e_worker",
+                "deterministic",
+                "DeterministicCompletion",
+            ):
+                assert forbidden not in text, (path, forbidden)
 
     main_source = (API_SOURCE / "main.py").read_text(encoding="utf-8")
     assert "create_app" in main_source
+
+
+def test_the_control_plane_cannot_execute_or_hold_a_credential() -> None:
+    """Acceptance and execution are different planes, and only one of them may hold a key."""
+    for path in python_files(API_SOURCE):
+        text = path.read_text(encoding="utf-8")
+        for forbidden in (
+            "RunExecutor",
+            "ModelCompletion",
+            "create_builtin_handler_registry",
+            "RunCoordinator",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "AsyncAnthropic",
+            "AsyncOpenAI",
+            "anthropic_api_key",
+            "openai_api_key",
+            "anthropic",
+            "openai",
+        ):
+            assert forbidden not in text, (path, forbidden)
+
+
+def test_the_control_plane_cannot_claim_start_or_terminalize() -> None:
+    """The persistence split makes execution-plane writes structurally unreachable here."""
+    for path in python_files(API_SOURCE):
+        text = path.read_text(encoding="utf-8")
+        for forbidden in (
+            "claim_next",
+            "start_attempt",
+            "renew_lease",
+            "inspect_claim",
+            "close_legacy",
+            "SqlAlchemyJobExecutionPersistence",
+        ):
+            assert forbidden not in text, (path, forbidden)
+
+
+def test_the_worker_cannot_control_and_exposes_no_http_surface() -> None:
+    imports = {module for path in python_files(WORKER_SOURCE) for module in imported_modules(path)}
+    assert not any(module.startswith("nervos_api") for module in imports)
+    assert not any(module.startswith("fastapi") for module in imports)
+    assert not any(module.startswith("uvicorn") for module in imports)
+    assert not any(module.startswith("alembic") for module in imports)
+
+
+def test_no_retry_recovery_or_speculative_surface_was_added() -> None:
+    """C2 records retry evidence and ships neither a retry engine nor a reconciler."""
+    application_names = " ".join(path.name for path in python_files(CORE_APPLICATION))
+    for forbidden in ("retry", "reconcil", "recover"):
+        assert forbidden not in application_names, forbidden
+    worker_names = " ".join(path.name for path in python_files(ROOT / "apps" / "worker" / "src"))
+    for forbidden in ("retry", "reconcil", "recover", "worker_table"):
+        assert forbidden not in worker_names, forbidden
+    for path in python_files(CORE_APPLICATION) + python_files(WORKER_SOURCE):
+        text = path.read_text(encoding="utf-8")
+        assert "retry_wait" not in text, path
+    router_text = (API_SOURCE / "api" / "router.py").read_text(encoding="utf-8").lower()
+    for forbidden in ("recovery", "events", "cancel", "health/worker"):
+        assert forbidden not in router_text, forbidden
+
+
+def test_both_provider_adapters_keep_sdk_retries_disabled() -> None:
+    for name in ("anthropic.py", "openai.py"):
+        text = (MODELS_SOURCE / name).read_text(encoding="utf-8")
+        assert "max_retries=0" in text, name
 
 
 def test_base_metadata_create_all_is_not_used() -> None:

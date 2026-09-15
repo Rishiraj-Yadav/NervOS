@@ -10,10 +10,11 @@ import sys
 from pathlib import Path
 
 from nervos_api.config import Settings
+from nervos_worker.config import WorkerSettings
 
 ROOT = Path(__file__).resolve().parents[1]
 ALEMBIC_CONFIG = ROOT / "apps" / "api" / "alembic.ini"
-SERVICES = ("api", "web")
+SERVICES = ("api", "web", "worker")
 
 
 def parse_args() -> argparse.Namespace:
@@ -79,6 +80,32 @@ def run_api(settings: Settings | None = None) -> int:
     return server.returncode
 
 
+def run_worker(settings: WorkerSettings | None = None) -> int:
+    """Run the execution worker. The Worker never migrates the database itself."""
+    resolved = settings or WorkerSettings()
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "NERVOS_ENVIRONMENT": resolved.environment,
+            "NERVOS_DATABASE_PATH": str(resolved.database_path),
+            "NERVOS_LOG_LEVEL": resolved.log_level,
+            "NERVOS_WORKER_CONCURRENCY": str(resolved.worker_concurrency),
+            "NERVOS_MAX_ACTIVE_JOBS": str(resolved.max_active_jobs),
+        }
+    )
+    server = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "nervos_worker",
+        ],
+        cwd=ROOT,
+        check=False,
+        env=environment,
+    )
+    return server.returncode
+
+
 def run_web() -> int:
     """Start the Vite development server through the root pnpm script."""
     pnpm = shutil.which("pnpm")
@@ -101,6 +128,8 @@ def main() -> int:
     args = parse_args()
     if args.service == "api":
         return run_api()
+    if args.service == "worker":
+        return run_worker()
     return run_web()
 
 

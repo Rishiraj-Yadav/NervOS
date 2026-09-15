@@ -123,7 +123,7 @@ function AgentInstanceView({ agentInstanceId }: { agentInstanceId: number }) {
                   type="submit"
                   disabled={!instance.data.enabled || createRun.isPending}
                 >
-                  {createRun.isPending ? "Running…" : "Run agent"}
+                  {createRun.isPending ? "Submitting…" : "Run agent"}
                 </button>
               </form>
               {!instance.data.enabled ? (
@@ -133,7 +133,7 @@ function AgentInstanceView({ agentInstanceId }: { agentInstanceId: number }) {
               ) : null}
               {createRun.isPending ? (
                 <p className="run-pending" role="status">
-                  Waiting for the model. This can take up to a minute.
+                  Submitting the run…
                 </p>
               ) : null}
               {createRun.error ? <InlineError error={createRun.error} /> : null}

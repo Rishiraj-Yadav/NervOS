@@ -1,10 +1,10 @@
 # NervOS
 
-NervOS is a self-hosted AI-agent runtime and management platform. The repository is currently in **Stage B — Trusted-agent runtime proof**.
+NervOS is a self-hosted AI-agent runtime and management platform. The repository is currently in **Stage C — Persistent execution engine**.
 
 The A1 repository/tooling foundation, A2 API/configuration/database foundation, A3 local-authentication boundary, A4 React dashboard foundation, A5 deterministic browser journey, and A6 continuous-integration/security-scanning milestone are implemented. The browser supports first-run setup, cookie-backed login/session restoration, a protected minimal dashboard, and server-confirmed logout.
 
-Within Stage B, B1 implements the Agent Instance and Run domain/persistence, B2 implements the internal one-shot Anthropic execution path, B3 exposes it as authenticated, owner-scoped Agent Instance and Run HTTP resources with a minimal trusted Chat dashboard interaction at `/agents`, and B4 proves provider portability by running the unchanged Chat behavior through a second production adapter (OpenAI Responses) behind the same provider-neutral port. One submission is one independent Run: no conversation context, memory, queue, worker, retry, streaming, or provider fallback exists. Each Run is attributed to the immutable provider/model snapshot it was created with. MCP/tools, scheduling, memory, marketplace, IoT, multi-agent execution, and persistent secret management are not implemented.
+Stage B implemented the trusted `nervos.chat@1` Agent Instance and Run surface plus Anthropic/OpenAI portability. Stage C1 added the durable Job/Attempt/RunEvent schema, and C2 activates asynchronous submission plus a separate Worker process. One submission is one independent Run: the API returns `202 Accepted` after durable queueing, and a capable Worker executes the immutable provider/model snapshot later. There is still no crash recovery or reconciler, no automatic retry engine, no Worker registry or health surface, and no conversation context, memory, cancellation, streaming, provider fallback, MCP/tools, scheduling, marketplace, IoT, multi-agent orchestration, or persistent secret management.
 
 See [implementation status](docs/implementation-status.md) for the verified current state and [architecture](docs/architecture.md) for target boundaries.
 
@@ -46,6 +46,7 @@ Do not use `--with-deps` locally; Stage A bootstrap provisions Chromium only. Th
 ```bash
 make bootstrap
 make dev-api
+make dev-worker
 make dev-web
 make lint
 make typecheck
@@ -61,6 +62,7 @@ GNU Make is not required. The equivalent cross-platform commands are:
 ```bash
 python scripts/bootstrap.py
 uv run python scripts/dev.py api
+uv run python scripts/dev.py worker
 uv run python scripts/dev.py web
 uv run python scripts/check.py lint
 uv run python scripts/check.py typecheck
@@ -71,7 +73,9 @@ uv run python scripts/check.py check
 uv run python scripts/clean_check.py
 ```
 
-`check` is the routine gate and covers lint, typecheck, tests and the tracked-file security scan. It is deliberately **not** the whole story: the deterministic browser journey lives in the separate `e2e` group because it needs Chromium and spawns services. Full verification is therefore `check` then `e2e`, which is exactly what CI runs. See [continuous integration](docs/ci.md).
+For local development, start `dev-api`, then `dev-worker`, then `dev-web` in separate terminals; the API migrates the database, while the Worker only validates the existing schema before claiming Jobs.
+
+`check` is the routine gate and covers lint, typecheck, tests and the tracked-file security scan. It is deliberately **not** the whole story: the deterministic browser journey lives in the separate `e2e` group because it needs Chromium and spawns API, Worker, and Web services. Full verification is therefore `check` then `e2e`, which is exactly what CI runs. See [continuous integration](docs/ci.md).
 
 Start the A2 API development server with:
 
@@ -109,6 +113,7 @@ Both workflows declare `permissions: contents: read`, reference no secrets, use 
 Python uv workspace members:
 
 - `apps/api`
+- `apps/worker`
 - `packages/nervos-core`
 - `packages/nervos-models`
 
@@ -116,7 +121,7 @@ pnpm workspace members:
 
 - `apps/web`
 
-`apps/worker`, `apps/marketplace`, `packages/nervos-sdk`, and `packages/nervos-mcp` are future placeholders. They are not active workspaces and contain no implemented behavior. `packages/nervos-core` and `packages/nervos-models` are active workspaces: the former holds the domain/application logic and the latter the concrete model-provider adapters, currently exactly two — canonical `anthropic` and canonical `openai`.
+`apps/worker` is the active Stage C execution plane: a real process entrypoint that owns no HTTP surface, never runs Alembic, and holds provider credentials exclusively. It claims queued Jobs, renews leases, executes the immutable Run snapshot, and terminalizes Attempt, Job, and Run. `apps/marketplace`, `packages/nervos-sdk`, and `packages/nervos-mcp` remain future placeholders: they are not active workspaces and contain no implemented behavior. `packages/nervos-core` holds the domain/application logic and `packages/nervos-models` holds the concrete model-provider adapters, currently exactly two — canonical `anthropic` and canonical `openai`.
 
 ## Configuration and security
 

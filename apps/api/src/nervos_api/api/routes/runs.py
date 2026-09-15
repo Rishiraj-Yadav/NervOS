@@ -1,4 +1,4 @@
-"""Owner-scoped Run resources and the single canonical execution endpoint."""
+"""Owner-scoped Run resources and the single canonical durable-submission endpoint."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from nervos_api.api.dependencies import (
     AgentServiceDependency,
     CurrentUserDependency,
     OriginDependency,
-    RunCoordinatorDependency,
+    RunSubmissionDependency,
 )
 from nervos_api.api.routes.agent_instances import next_before_id
 from nervos_api.api.schemas import (
@@ -28,27 +28,28 @@ BeforeId = Annotated[int | None, Query(gt=0)]
 @router.post(
     "/agent-instances/{agent_instance_id}/runs",
     response_model=RunResponse,
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_202_ACCEPTED,
 )
-async def create_run(
+def create_run(
     agent_instance_id: int,
     body: RunCreateRequest,
     response: Response,
     origin: OriginDependency,
     user: CurrentUserDependency,
-    coordinator: RunCoordinatorDependency,
+    submission: RunSubmissionDependency,
 ) -> RunResponse:
-    """Execute one bounded one-shot Run and return the persisted terminal Run.
+    """Durably accept one Run and return it as `created`, without executing anything.
 
-    This is the only execution path in NervOS. It delegates entirely to the accepted B2
-    coordinator, which owns preflight, Run creation, the single provider call, and terminal
-    persistence. The route adds no lifecycle behavior of its own.
+    This is the only way a Run is created. The control plane validates structure, commits the
+    Run with its Job and initial lifecycle events in one transaction, and returns. No model
+    call happens in this process, because this process composes no executor and no credential.
 
-    The status describes the HTTP resource operation, never the model outcome: a Run that
-    executed and was durably recorded as `failed` still returns 201 with that Run.
+    The status describes the HTTP resource operation, never the model outcome: a Run that a
+    Worker later executes and records as `failed` still returned 202. Acceptance and execution
+    failure are different things, and conflating them would make a durable queue unrepresentable.
     """
     del origin
-    run = await coordinator.execute(user.id, agent_instance_id, body.input)
+    run = submission.submit_run(user.id, agent_instance_id, body.input)
     response.headers["Location"] = f"/api/v1/runs/{run.id}"
     return RunResponse.from_domain(run)
 

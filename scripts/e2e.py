@@ -23,6 +23,7 @@ from typing import IO
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATABASE = Path("~/.nervos/nervos.db").expanduser().resolve(strict=False)
 API_READY_TIMEOUT = 15.0
+WORKER_READY_TIMEOUT = 20.0
 WEB_READY_TIMEOUT = 20.0
 PLAYWRIGHT_TIMEOUT = 120.0
 
@@ -176,6 +177,24 @@ def api_ready(status: int, body: bytes, _content_type: str) -> bool:
     return status == 200 and payload == {"status": "ok"}
 
 
+def wait_for_worker_ready(marker: Path, process: subprocess.Popen[bytes], timeout: float) -> str:
+    """Wait for the Worker's readiness marker while checking child liveness.
+
+    The Worker exposes no HTTP surface, so readiness is a file it writes only after settings
+    load, schema validation, and provider resolution all succeed. A production Worker never
+    sets the variable, so production never writes a file.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        returncode = process.poll()
+        if returncode is not None:
+            raise RuntimeError(f"Worker exited before readiness with status {returncode}")
+        if marker.exists():
+            return marker.read_text(encoding="utf-8")
+        time.sleep(0.15)
+    raise RuntimeError("Timed out waiting for the Worker readiness marker")
+
+
 def web_ready(status: int, body: bytes, content_type: str) -> bool:
     """Require a successful HTML application response."""
     return status == 200 and "text/html" in content_type.lower() and bool(body)
@@ -214,8 +233,14 @@ def run_e2e() -> int:
         if database == DEFAULT_DATABASE:
             raise RuntimeError("E2E database resolved to the default NervOS database")
         api_log_path = temporary / "api.log"
+        worker_log_path = temporary / "worker.log"
         vite_log_path = temporary / "vite.log"
         playwright_log_path = temporary / "playwright.log"
+        worker_marker = temporary / "worker-ready.txt"
+        # Test-only claim gate. The supervisor deliberately never creates this file: the
+        # browser journey creates it after it has observed the queued Run, which makes the
+        # queued state a deterministic precondition of execution instead of a race.
+        worker_claim_gate = temporary / "worker-claim-gate.txt"
         api_reservation = PortReservation()
         web_reservation = PortReservation()
         api_port = api_reservation.port
@@ -223,8 +248,17 @@ def run_e2e() -> int:
         api_origin = f"http://127.0.0.1:{api_port}"
         web_origin = f"http://127.0.0.1:{web_port}"
         environment = e2e_environment(database, web_origin)
+        worker_environment = {
+            **environment,
+            "NERVOS_WORKER_READY_FILE": str(worker_marker),
+            "NERVOS_E2E_CLAIM_GATE": str(worker_claim_gate),
+        }
         web_environment = {**environment, "NERVOS_E2E_API_ORIGIN": api_origin}
-        playwright_environment = {**environment, "NERVOS_E2E_WEB_ORIGIN": web_origin}
+        playwright_environment = {
+            **environment,
+            "NERVOS_E2E_WEB_ORIGIN": web_origin,
+            "NERVOS_E2E_CLAIM_GATE": str(worker_claim_gate),
+        }
         pnpm = resolve_required_command("pnpm")
 
         try:
@@ -238,6 +272,7 @@ def run_e2e() -> int:
             )
             with (
                 api_log_path.open("wb") as api_log,
+                worker_log_path.open("wb") as worker_log,
                 vite_log_path.open("wb") as vite_log,
                 playwright_log_path.open("wb") as playwright_log,
             ):
@@ -269,6 +304,19 @@ def run_e2e() -> int:
                 except RuntimeError as error:
                     raise RuntimeError(
                         f"API readiness failed: {error}\n{log_tail(api_log_path)}"
+                    ) from error
+
+                worker = start_process(
+                    [sys.executable, "tests/e2e_support/e2e_worker.py"],
+                    worker_environment,
+                    worker_log,
+                )
+                processes.append(worker)
+                try:
+                    wait_for_worker_ready(worker_marker, worker, WORKER_READY_TIMEOUT)
+                except RuntimeError as error:
+                    raise RuntimeError(
+                        f"Worker readiness failed: {error}\n{log_tail(worker_log_path)}"
                     ) from error
 
                 web_reservation.close()

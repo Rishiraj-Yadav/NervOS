@@ -21,6 +21,7 @@ Repository scripts do not install global or system packages.
 The uv workspace has explicit members so future placeholders are not activated accidentally:
 
 - `apps/api`
+- `apps/worker` (activated in C2 for durable execution)
 - `packages/nervos-core`
 - `packages/nervos-models` (activated in B2 for Anthropic and extended in B4 with the OpenAI Responses adapter)
 
@@ -28,7 +29,7 @@ The pnpm workspace contains only:
 
 - `apps/web`
 
-The worker, marketplace, SDK, and MCP directories remain future placeholders outside the active workspaces. `packages/nervos-models` is active only for concrete provider infrastructure; `nervos-core` remains provider-SDK-free, and both provider SDKs are isolated there.
+The marketplace, SDK, and MCP directories remain future placeholders outside the active workspaces. `apps/worker` is a real process entrypoint but owns no HTTP surface and never runs Alembic. `packages/nervos-models` is active only for concrete provider infrastructure; `nervos-core` remains provider-SDK-free, and both provider SDKs are isolated there.
 
 ## Bootstrap
 
@@ -61,6 +62,7 @@ Pass `--skip-browser` to install the frozen Python and pnpm dependency sets with
 ```bash
 make bootstrap
 make dev-api
+make dev-worker
 make dev-web
 make test
 make test-e2e
@@ -71,7 +73,7 @@ make check
 make clean-check
 ```
 
-Lint, typecheck, backend/database tests, the tracked-file security scan, deterministic Playwright E2E, and both development launchers are implemented. `dev-api` migrates the configured SQLite database before starting Uvicorn; migration failure prevents server startup. `dev-web` starts the A4 Vite application. The production frontend build is verified separately with `pnpm build`.
+Lint, typecheck, backend/database tests, the tracked-file security scan, deterministic Playwright E2E, and the development launchers are implemented. `dev-api` migrates the configured SQLite database before starting Uvicorn; migration failure prevents server startup. `dev-worker` starts the C2 Worker against the already-migrated database and never runs Alembic. `dev-web` starts the Vite application. The production frontend build is verified separately with `pnpm build`.
 
 `check` is the routine gate: lint, typecheck, tests, and the security scan. It deliberately excludes E2E, because routine work must never require Chromium or spawn services. **Full verification is `check` then `e2e`**, exactly as CI runs it. See [continuous integration](ci.md).
 
@@ -79,6 +81,7 @@ When Make is unavailable, use:
 
 ```bash
 uv run python scripts/dev.py api
+uv run python scripts/dev.py worker
 uv run python scripts/dev.py web
 uv run python scripts/check.py test
 uv run python scripts/check.py security
@@ -116,7 +119,7 @@ A2 provides typed process configuration, synchronous SQLite/SQLAlchemy infrastru
 
 A4 implements `/`, `/setup`, `/login`, `/dashboard`, and an accessible not-found route. TanStack Query owns setup status and the current server session through the stable `setup-status` and `auth-session` queries. One shared API client uses relative `/api/v1/...` URLs with browser credentials. Authentication credentials and tokens are never stored in localStorage or sessionStorage.
 
-For local development, start the API and web launcher in separate terminals, then open exactly `http://localhost:5173`. Vite proxies `/api` without rewriting it to `http://127.0.0.1:8000`; using a different browser hostname will fail A3's exact-Origin policy. Frontend component behavior is tested with Vitest, Testing Library, and MSW.
+For local development, start the API, Worker, and web launcher in separate terminals, in that order, then open exactly `http://localhost:5173`. The API applies migrations; the Worker validates the existing schema revision and refuses to start if it is not current; Vite proxies `/api` without rewriting it to `http://127.0.0.1:8000`. Using a different browser hostname will fail A3's exact-Origin policy. Frontend component behavior is tested with Vitest, Testing Library, and MSW.
 
 ## A5 browser E2E
 
@@ -132,11 +135,11 @@ Or, where GNU Make is available:
 make test-e2e
 ```
 
-The Python supervisor creates a unique temporary run directory and SQLite database on every invocation, runs Alembic before starting any server, selects distinct dynamic IPv4 loopback ports, and derives one consistent `127.0.0.1` browser Origin for FastAPI, Vite, and Playwright. Vite keeps `/api` relative and unrewritten with `changeOrigin: false`; the E2E-only environment override changes only its proxy target.
+The Python supervisor creates a unique temporary run directory and SQLite database on every invocation, runs Alembic before starting any server, starts the API, Worker, Vite, and Playwright processes, selects distinct dynamic IPv4 loopback ports, and derives one consistent `127.0.0.1` browser Origin for FastAPI, Vite, and Playwright. Worker readiness is a test-only marker file written after settings load, schema validation, and deterministic provider resolution. Vite keeps `/api` relative and unrewritten with `changeOrigin: false`; the E2E-only environment override changes only its proxy target.
 
 Readiness uses bounded semantic HTTP polling and child-liveness checks rather than startup sleeps. The supervisor owns and cleans the exact Uvicorn, Vite, Playwright, and Chromium process trees on success, failure, timeout, or interruption. It fingerprints the default NervOS database before and after each run. Playwright traces and screenshots are retained only on failure under ignored output paths; temporary databases and logs are removed after process handles close.
 
-The one Chromium journey uses the real UI, API, migrations, and opaque cookie session without MSW or external services. It proves fresh setup, dashboard identity, logout, login, browser-reload restoration, final logout, and direct `/dashboard` redirection to login. Since B4 it also proves deterministic two-provider portability: the same Agent Instance executes through the Anthropic double, reloads, is reconfigured to OpenAI, executes again, and shows both immutable provider/model snapshots after another reload. The supervisor removes both `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` from every child environment and installs two distinct offline provider doubles, so the journey cannot reach a real provider even when the operator has credentials exported. Unexpected non-loopback browser requests are rejected. Aggregate `check` remains E2E-free; run both `check` and `e2e` for full local verification, which is exactly what `.github/workflows/ci.yml` does in two separate jobs.
+The one Chromium journey uses the real UI, API, Worker, migrations, and opaque cookie session without MSW or external services. It proves fresh setup, dashboard identity, logout, login, browser-reload restoration, final logout, and direct `/dashboard` redirection to login. Since B4 it also proves deterministic two-provider portability: the same Agent Instance executes through the Anthropic double, reloads, is reconfigured to OpenAI, executes again, and shows both immutable provider/model snapshots after another reload. The supervisor removes both `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` from every child environment and installs two distinct offline provider doubles, so the journey cannot reach a real provider even when the operator has credentials exported. Unexpected non-loopback browser requests are rejected. Aggregate `check` remains E2E-free; run both `check` and `e2e` for full local verification, which is exactly what `.github/workflows/ci.yml` does in two separate jobs.
 
 Troubleshooting:
 

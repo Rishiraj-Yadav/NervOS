@@ -1,4 +1,9 @@
-"""FastAPI application composition."""
+"""FastAPI application composition.
+
+The control plane accepts work and never executes it. It composes no handler registry, no
+executor, and no credential-bearing provider client, so "the API cannot run a model" is a
+structural property rather than a convention.
+"""
 
 from __future__ import annotations
 
@@ -13,16 +18,12 @@ from nervos_core.application.authentication import (
     AuthenticationError,
     AuthenticationService,
 )
-from nervos_core.application.run_coordinator import (
-    RunCoordinator,
-    system_monotonic_nanoseconds,
-)
-from nervos_core.application.trusted_chat import create_builtin_handler_registry
 from nervos_core.infrastructure.database import create_session_factory, create_sqlite_engine
 from nervos_core.infrastructure.database.agents import SqlAlchemyAgentPersistence
 from nervos_core.infrastructure.database.authentication import SqlAlchemyAuthenticationPersistence
+from nervos_core.infrastructure.database.jobs import SqlAlchemyJobPersistence
 from nervos_core.infrastructure.security import Argon2PasswordHasher, SecureSessionTokens
-from nervos_models import close_model_providers, compose_model_providers
+from nervos_models import compose_model_providers
 
 from nervos_api.api.dependencies import utc_now
 from nervos_api.api.errors import (
@@ -49,52 +50,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         SecureSessionTokens(),
         utc_now,
     )
-    handlers = create_builtin_handler_registry()
-    anthropic_secret = (
-        resolved_settings.anthropic_api_key.get_secret_value()
-        if resolved_settings.anthropic_api_key is not None
-        else None
-    )
-    openai_secret = (
-        resolved_settings.openai_api_key.get_secret_value()
-        if resolved_settings.openai_api_key is not None
-        else None
-    )
-    # Both credentials are now held only by the clients built below. Everything reachable
-    # after composition - the middleware and every ``app.state`` consumer - gets this
-    # credential-free copy instead, so no secret-bearing settings object is reachable from
-    # the running application.
-    sanitized_settings = resolved_settings.without_provider_credentials()
-    model_providers = compose_model_providers(anthropic_secret, openai_secret)
-    providers = model_providers.catalog
+    # Composed with no credential at all: this yields the known-provider set and constructs
+    # zero clients, so nothing credential-bearing is reachable from ``app.state``.
+    known_providers = compose_model_providers(None, None).catalog
     agent_service = AgentService(
         SqlAlchemyAgentPersistence(session_factory),
         create_builtin_definition_registry(),
         utc_now,
-        handlers,
-        providers,
-    )
-    run_coordinator = RunCoordinator(
-        agent_service, handlers, providers, system_monotonic_nanoseconds
+        known_providers,
+        SqlAlchemyJobPersistence(engine, max_pending=resolved_settings.max_pending_jobs),
     )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         del app
         yield
-        await close_model_providers(model_providers)
         engine.dispose()
 
     app = FastAPI(title="NervOS API", lifespan=lifespan)
-    app.add_middleware(AuthenticationBoundaryMiddleware, settings=sanitized_settings)
+    app.add_middleware(AuthenticationBoundaryMiddleware, settings=resolved_settings)
     app.add_middleware(ApiSecurityHeadersMiddleware)
-    app.state.settings = sanitized_settings
+    app.state.settings = resolved_settings
     app.state.database_engine = engine
     app.state.session_factory = session_factory
     app.state.authentication_service = authentication_service
     app.state.agent_service = agent_service
-    app.state.model_provider_catalog = providers
-    app.state.run_coordinator = run_coordinator
+    # The route depends on the submission service; it is the same owner-scoped Agent service,
+    # exposed under the name that describes what the cutover made it responsible for.
+    app.state.run_submission_service = agent_service
+    app.state.model_provider_catalog = known_providers
     app.add_exception_handler(Exception, unexpected_error_handler)
     app.add_exception_handler(AuthenticationError, authentication_error_handler)
     app.add_exception_handler(InvalidOrigin, authentication_error_handler)

@@ -10,6 +10,7 @@ package = false
 [tool.uv.workspace]
 members = [
     "apps/api",
+    "apps/worker",
     "packages/nervos-core",
     "packages/nervos-models",
 ]
@@ -28,6 +29,7 @@ addopts = "--strict-config --strict-markers"
 testpaths = [
     "tests",
     "apps/api/tests",
+    "apps/worker/tests",
     "packages/nervos-core/tests",
     "packages/nervos-models/tests",
 ]
@@ -48,6 +50,8 @@ include = [
     "apps/api/src",
     "apps/api/alembic",
     "apps/api/tests",
+    "apps/worker/src",
+    "apps/worker/tests",
     "packages/nervos-core/src",
     "packages/nervos-core/tests",
     "packages/nervos-models/src",
@@ -61,6 +65,7 @@ exclude = [
 ]
 extraPaths = [
     "apps/api/src",
+    "apps/worker/src",
     "packages/nervos-core/src",
     "packages/nervos-models/src",
 ]

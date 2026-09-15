@@ -2,7 +2,7 @@
 
 ## Current phase
 
-Stage C — Persistent execution engine is IN PROGRESS. The C0 architecture freeze is complete, and C1 — the durable execution foundation — is implemented, merged to `main`, and post-merge verified. C2 is not started.
+Stage C — Persistent execution engine is IN PROGRESS. The C0 architecture freeze and C1 durable execution foundation are implemented, merged to `main`, and post-merge verified. C2 — asynchronous submission and minimal durable Worker execution — is implemented in this working tree and awaiting final review/merge.
 
 Stage B — Trusted-agent runtime proof is complete and accepted. B1 domain/persistence, B2 internal one-call execution, B3 trusted Agent/Run HTTP API with the minimal Chat dashboard interaction, and B4 second-provider portability are implemented, merged to `main`, and post-merge verified.
 
@@ -10,9 +10,11 @@ Stage B — Trusted-agent runtime proof is complete and accepted. B1 domain/pers
 
 - [x] C0 — Durable execution architecture freeze (documentation/governance only; no schema, no implementation)
 - [x] C1 — Durable execution foundation (dormant Job/Attempt/RunEvent domain, `0003` migration, schema-parity protection)
-- [ ] C2 — Not started
+- [ ] C2 — Asynchronous submission and minimal durable Worker execution (implemented locally; external acceptance pending)
 
-C2 through C8 have no implementation. Work after C1 remains separately authorized.
+C2 is implemented in the working tree but has **not** received external acceptance. A source audit
+found remediation items, so the milestone stays unchecked until that remediation and a re-review
+pass. C3 through C8 have no implementation. Work after C2 remains separately authorized.
 
 ## Stage B milestones
 
@@ -59,7 +61,7 @@ B0 is a documentation/governance milestone. ADR 0007 freezes a one-shot trusted 
 ## Not implemented in Stage A
 
 - AgentPackage/AgentInstance execution
-- job queue/workers
+- retry/recovery worker engine beyond the minimal C2 durable Worker
 - scheduler/event router
 - model providers
 - MCP/tool gateway
@@ -255,6 +257,18 @@ ANTHROPIC LIVE PROOF — NOT EXECUTED
 OPENAI LIVE PROOF — NOT EXECUTED
 ```
 
+## C2 implementation verification
+
+C2 changes the product from awaited API-process execution to durable asynchronous execution. `POST /api/v1/agent-instances/{id}/runs` now returns `202 Accepted` after committing exactly one immutable `Run(status=created)`, one `Job(status=queued)`, and the initial `run.created`/`run.queued` events. The API/control plane validates ownership, exact `nervos.chat@1`, input bounds, and known provider identifiers, but it holds no provider credential, constructs no provider SDK client, composes no handler registry, and cannot claim/start/heartbeat/terminalize Jobs.
+
+A separate `apps/worker` uv workspace member runs the execution plane. The Worker validates the existing Alembic revision, resolves its configured providers once at startup, claims only Jobs for providers it can execute, creates one active Attempt under `BEGIN IMMEDIATE`, commits the execution-start boundary before any provider call, renews the lease while execution and finalization run, invokes the existing trusted Chat path exactly once per Attempt, and atomically terminalizes Attempt + Job + Run with safe Run Events. Claim tokens, prompts, outputs, provider bodies, raw exceptions, and credentials are never logged or written to Run Events.
+
+C2 enforces a global pending cap (`NERVOS_MAX_PENDING_JOBS`) in the submission transaction and a node-wide active cap (`NERVOS_MAX_ACTIVE_JOBS`) in the claim transaction. A Worker with no provider credentials starts successfully and claims nothing. A known-provider Run with no capable Worker remains queued rather than being failed. Failed Attempts record `SAFE_TO_RETRY`, `DO_NOT_RETRY`, or `AMBIGUOUS` as evidence, but C2 never writes `retry_wait` and never retries execution. Persistence-finalization retry replays only the fenced terminal database transaction and never re-invokes a model.
+
+Still absent after C2: crash recovery, retry scheduling, cancellation, fairness, per-Agent/per-provider limits, Workers table/registry, worker-health surface, Run Events endpoint, streaming, scheduling, tools/MCP, memory, package installation, marketplace, and persistent secret management. A Job that is already `claimed` or `running` when its Worker dies remains stranded until C3 reconciliation; expired leases stop consuming active capacity but are not recovered in C2. Legacy `running` Runs with no Job can be closed only by the explicit operator command `python -m nervos_worker --reconcile-legacy-runs`; legacy `created` Runs with no Job are left untouched.
+
+C2 verification added durable submission, capacity, claim-concurrency, terminalization, lease/heartbeat, contention/replay, Worker-loop, Worker-config/credential, multi-Agent, API, frontend polling, E2E-supervisor, and architecture-guard coverage. Focused gates, `uv run python scripts/check.py check`, and `uv run python scripts/check.py e2e` passed locally against temporary databases.
+
 ## C0 architecture verification
 
 C0 was an architecture freeze and governance milestone only: it changed no repository file, added no schema, and implemented no behavior. It fixed the durable single-host execution engine boundaries that C1 onward must honor — the separation of Agent Definition, Agent Instance, Run, Job, Attempt, Run Event, and Worker; the Run, Job, and Attempt state vocabularies; the internal `SAFE_TO_RETRY`/`DO_NOT_RETRY`/`AMBIGUOUS` retry disposition; the rule that worker loss before external execution starts is safely recoverable while loss after `execution_started_at` is ambiguous and never blindly replayed; `BEGIN IMMEDIATE` claim serialization with commit before dispatch; the partial unique active-Attempt index; and per-Run `MAX(sequence) + 1` Run Event allocation.
@@ -265,7 +279,7 @@ C1 adds the durable execution foundation without changing product behavior. Migr
 
 The durable foundation is dormant. A Job is one internal durable obligation per Run, one Attempt is one claim/execution episode for a Job, and a Run Event is an append-only safe lifecycle fact sequenced within one Run and carrying only narrow typed safe fields. The single partial unique index `uq_job_attempts_one_active` permits at most one active `claimed` or `running` Attempt per Job while leaving multiple historical terminal Attempts legal. The `SAFE_TO_RETRY`, `DO_NOT_RETRY`, and `AMBIGUOUS` retry dispositions are persisted, but no retry engine consumes them. `jobs.cancel_requested_at` is the sole dormant future cancellation-request authority, and no cancellation behavior exists.
 
-The atomic Run + Job + initial-event submission primitive and the per-Run event appender have no production caller. The public `POST /api/v1/agent-instances/{id}/runs` route is unchanged and still executes synchronously, returning HTTP 201 with the terminal Run, so normal Stage B execution creates no Job, Attempt, or Run Event row. No Worker process exists, there is no asynchronous HTTP 202 cutover, and no retry, recovery, cancellation, concurrency, fairness, or backpressure engine is active. No `active_attempt_id` exists in either the schema or the domain.
+At C1 completion, before the C2 cutover, the atomic Run + Job + initial-event submission primitive and the per-Run event appender had no production caller. The public `POST /api/v1/agent-instances/{id}/runs` route was unchanged and still executed synchronously, returning HTTP 201 with the terminal Run, so normal Stage B execution created no Job, Attempt, or Run Event row, and no Worker process existed. C2 replaced that route behaviour with durable HTTP 202 acceptance and a separate Worker; see the C2 section above for the current state. No `active_attempt_id` exists in either the schema or the domain.
 
 Schema-parity protection: `alembic check` does not compare SQLite CHECK constraints, so a permanent integration test asserts the migrated schema against the ORM metadata on constraint names, normalized expressions, server defaults, foreign keys, and indexes, and fails if that contract drifts. A pre-acceptance audit found the applied schema was weaker than the ORM declared — 19 CHECK constraints were missing, four expressions differed, and `jobs.max_attempts` lacked its `DEFAULT 3` — and migration `0003` was corrected in place, so the applied schema and the ORM metadata now agree exactly for every table. A negative control confirms the guard fails when a constraint is removed.
 
@@ -275,7 +289,9 @@ Verification: the full Python suite (569 tests), the frontend suite (85 tests), 
 
 Stage C — Persistent execution engine is in progress. The C0 architecture freeze is complete. C1 passed external implementation and remediation review, was finalized as implementation commit `8e9c9da`, and was merged to `main` in merge commit `6d54eac`. Local `main` is synchronized with `origin/main`, and the working tree was clean after synchronization.
 
-C1 is a dormant foundation only. The production Run `POST` remains a synchronous HTTP 201, no Worker exists, there is no asynchronous HTTP 202 cutover, and no retry, recovery, cancellation, or concurrency engine is active. C2 is not started and requires its own authorization; no milestone after C1 has any implementation.
+C2 is implemented locally and has not been accepted. The production Run `POST` now accepts work durably with HTTP 202, a separate `apps/worker` process executes claimed Jobs, and the control plane holds no provider credential — but external review has not accepted the milestone. The C2 source audit passed every executable gate and found no functional, schema, security, or architectural defect; it required a bounded remediation pass covering the status document, the README workspace description, browser-journey coverage of the queued state, claim-token `repr` containment, and detached-task cancellation.
+
+The next action is external re-review of C2, whose source audit and remediation are complete in this working tree and still uncommitted. C3 is **not** started and is not authorized; no milestone after C2 has any implementation.
 
 Stage B implementation is complete. B4 passed external implementation review and hosted checks, was finalized as implementation commit `faa52a2`, and was merged to `main` by pull request #8 in merge commit `acb55b3`.
 
