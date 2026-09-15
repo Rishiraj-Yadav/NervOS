@@ -11,6 +11,7 @@ members = [
     "nervos-api",
     "nervos-core",
     "nervos-models",
+    "nervos-worker",
     "nervos-workspace",
 ]
 
@@ -788,6 +789,23 @@ requires-dist = [
     { name = "anthropic", specifier = ">=1.5,<2" },
     { name = "nervos-core", editable = "packages/nervos-core" },
     { name = "openai", specifier = ">=3.13,<4" },
+]
+
+[[package]]
+name = "nervos-worker"
+version = "0.1.0"
+source = { editable = "apps/worker" }
+dependencies = [
+    { name = "nervos-core" },
+    { name = "nervos-models" },
+    { name = "pydantic-settings" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "nervos-core", editable = "packages/nervos-core" },
+    { name = "nervos-models", editable = "packages/nervos-models" },
+    { name = "pydantic-settings", specifier = ">=2,<3" },
 ]
 
 [[package]]

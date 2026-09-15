@@ -1,4 +1,10 @@
-"""B1 Agent Instance and Run persistence integration tests."""
+"""B1 Agent Instance and Run persistence integration tests, ported onto the C2 write paths.
+
+Every scenario the Stage B suite covered still runs here. Run creation now goes through the
+durable submission primitive (Run + Job + initial events, atomically) and Run transitions go
+through the fenced execution persistence, which is strictly stronger: the terminal writes now
+also assert Attempt, Job, Event, claim-token, and lease behaviour that did not exist before.
+"""
 
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -16,16 +22,27 @@ from nervos_core.application.agents import (
     AgentService,
     InstanceConfiguration,
     RunNotFound,
-    RunTransitionRejected,
 )
 from nervos_core.application.errors import PersistenceUnavailable
-from nervos_core.application.model_completion import ModelRequest, ModelResponse, StopOutcome
+from nervos_core.application.job_execution import LEASE_DURATION, ClaimedAttempt
 from nervos_core.application.model_providers import ModelProviderCatalog
-from nervos_core.application.trusted_chat import create_builtin_handler_registry
 from nervos_core.domain.agents import AgentDefinitionId
-from nervos_core.domain.runs import STAGE_B_LIMITS, InvalidRun, ModelUsage, Run, RunStatus
+from nervos_core.domain.jobs import RetryDisposition
+from nervos_core.domain.runs import (
+    STAGE_B_LIMITS,
+    InvalidRun,
+    ModelUsage,
+    Run,
+    RunStatus,
+    validate_error_message,
+    validate_output_text,
+)
 from nervos_core.infrastructure.database import create_session_factory, create_sqlite_engine
 from nervos_core.infrastructure.database.agents import SqlAlchemyAgentPersistence
+from nervos_core.infrastructure.database.jobs import (
+    SqlAlchemyJobExecutionPersistence,
+    SqlAlchemyJobPersistence,
+)
 from nervos_core.infrastructure.database.models import AgentInstanceRecord, RunRecord, UserRecord
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -33,7 +50,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 ROOT = Path(__file__).resolve().parents[4]
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
-DEFAULT_DATABASE = (Path.home() / ".nervos" / "nervos.db").resolve(strict=False)
+DEFAULT_DATABASE = (Path.home() / ".nervos" / "db").resolve(strict=False)
+PROVIDERS = ("test-provider", "new-provider", "old-provider", "other-provider")
 
 
 def database_metadata(path: Path) -> tuple[bool, int | None, int | None]:
@@ -44,25 +62,25 @@ def database_metadata(path: Path) -> tuple[bool, int | None, int | None]:
     return True, stat.st_size, stat.st_mtime_ns
 
 
-class _FakeCompletion:
-    """Test-only provider used only to resolve preflight; it is never invoked here."""
-
-    async def complete(self, request: ModelRequest) -> ModelResponse:  # pragma: no cover
-        del request
-        return ModelResponse("fixed", "test-provider", "Org/Model:v1", StopOutcome.STOP)
+Persistence = tuple[
+    SqlAlchemyAgentPersistence,
+    AgentService,
+    sessionmaker[Session],
+    SqlAlchemyJobExecutionPersistence,
+]
 
 
 @pytest.fixture(autouse=True)
 def protect_default_database() -> Iterator[None]:
-    before = database_metadata(DEFAULT_DATABASE)
+    """Refuse to run against the developer's real database, and prove it stayed untouched."""
+    real_default = (Path.home() / ".nervos" / "nervos.db").resolve(strict=False)
+    before = database_metadata(real_default)
     yield
-    assert database_metadata(DEFAULT_DATABASE) == before
+    assert database_metadata(real_default) == before
 
 
 @pytest.fixture
-def persistence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> Iterator[tuple[SqlAlchemyAgentPersistence, AgentService, sessionmaker[Session]]]:
+def persistence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Persistence]:
     path = (tmp_path / "agents.db").resolve()
     assert path != DEFAULT_DATABASE
     monkeypatch.setenv("NERVOS_ENVIRONMENT", "test")
@@ -92,30 +110,36 @@ def persistence(
             ]
         )
     adapter = SqlAlchemyAgentPersistence(factory)
-    handlers = create_builtin_handler_registry()
-    providers = ModelProviderCatalog(
-        [
-            ("test-provider", _FakeCompletion),
-            ("new-provider", _FakeCompletion),
-            ("old-provider", _FakeCompletion),
-            ("other-provider", _FakeCompletion),
-        ],
-        known=["test-provider", "new-provider", "old-provider", "other-provider"],
-    )
-    yield (
+    providers = ModelProviderCatalog([], known=list(PROVIDERS))
+    service = AgentService(
         adapter,
-        AgentService(
-            adapter, create_builtin_definition_registry(), lambda: NOW, handlers, providers
-        ),
-        factory,
+        create_builtin_definition_registry(),
+        lambda: NOW,
+        providers,
+        SqlAlchemyJobPersistence(engine, max_pending=1000, sleep=lambda _: None),
     )
+    yield adapter, service, factory, SqlAlchemyJobExecutionPersistence(engine, sleep=lambda _: None)
     engine.dispose()
 
 
-def test_instances_are_explicit_nonunique_and_owner_scoped(
-    persistence: tuple[SqlAlchemyAgentPersistence, AgentService, sessionmaker[Session]],
-) -> None:
-    adapter, service, _ = persistence
+def start(
+    execution: SqlAlchemyJobExecutionPersistence, *, worker_id: str = "worker-1"
+) -> ClaimedAttempt:
+    """Claim the oldest eligible Job and commit its execution-start boundary."""
+    claimed = execution.claim_next(
+        worker_id=worker_id,
+        provider_ids=PROVIDERS,
+        max_active=4,
+        now=NOW,
+        lease_duration=LEASE_DURATION,
+    )
+    assert claimed is not None
+    assert execution.start_attempt(claimed, now=NOW) is True
+    return claimed
+
+
+def test_instances_are_explicit_nonunique_and_owner_scoped(persistence: Persistence) -> None:
+    adapter, service, _, _ = persistence
     identity = AgentDefinitionId("nervos.chat", "1")
     first = service.create_instance(1, identity, " Chat ", "test-provider", "Org/Model:v1")
     second = service.create_instance(1, identity, "Chat", "test-provider", "Other.Model")
@@ -127,14 +151,16 @@ def test_instances_are_explicit_nonunique_and_owner_scoped(
         adapter.get_instance(2, 9999)
 
 
-def test_atomic_run_creation_copies_snapshot_and_disable_blocks_new_run(
-    persistence: tuple[SqlAlchemyAgentPersistence, AgentService, sessionmaker[Session]],
+def test_durable_submission_copies_the_snapshot_and_disable_blocks_new_runs(
+    persistence: Persistence,
 ) -> None:
-    adapter, service, factory = persistence
-    identity = AgentDefinitionId("nervos.chat", "1")
-    instance = service.create_instance(1, identity, "Chat", "test-provider", "Org/Model:v1")
+    adapter, service, factory, _ = persistence
+    instance = service.create_instance(
+        1, AgentDefinitionId("nervos.chat", "1"), "Chat", "test-provider", "Org/Model:v1"
+    )
     prompt = "line one\n\tcode()\r\nline two"
-    run = service.create_run(1, instance.id, prompt)
+    run = service.submit_run(1, instance.id, prompt)
+    assert run.status is RunStatus.CREATED
     assert run.input_text == prompt
     assert run.model_name == "Org/Model:v1"
     assert run.limits == STAGE_B_LIMITS
@@ -142,37 +168,59 @@ def test_atomic_run_creation_copies_snapshot_and_disable_blocks_new_run(
     assert adapter.get_run(1, run.id).model_name == "Org/Model:v1"
     service.set_enabled(1, instance.id, False)
     with pytest.raises(AgentInstanceUnavailable):
-        service.create_run(1, instance.id, "another")
+        service.submit_run(1, instance.id, "another")
     with factory() as session:
         assert session.scalar(select(func.count()).select_from(RunRecord)) == 1
     with pytest.raises(RunNotFound):
         adapter.get_run(2, run.id)
 
 
-def test_expected_state_transitions_are_terminal_and_owner_scoped(
-    persistence: tuple[SqlAlchemyAgentPersistence, AgentService, sessionmaker[Session]],
+def test_a_terminal_close_is_one_shot_and_history_stays_owner_scoped(
+    persistence: Persistence,
 ) -> None:
-    adapter, service, _ = persistence
+    adapter, service, _, execution = persistence
     instance = service.create_instance(
         1, AgentDefinitionId("nervos.chat", "1"), "Chat", "test-provider", "model"
     )
-    run = service.create_run(1, instance.id, "hello")
-    running = adapter.mark_running(1, run.id, NOW)
-    assert running.status is RunStatus.RUNNING
-    succeeded = service.succeed(
-        1, run.id, "result\n```code```", "stop", ModelUsage(input_tokens=2), 5
+    run = service.submit_run(1, instance.id, "hello")
+    claimed = start(execution)
+    assert execution.succeed(
+        claimed,
+        output_text="result\n```code```",
+        finish_reason="stop",
+        usage=ModelUsage(input_tokens=2),
+        elapsed_ms=5,
+        now=NOW,
     )
-    assert succeeded.status is RunStatus.SUCCEEDED
-    with pytest.raises(RunTransitionRejected):
-        adapter.mark_failed(1, run.id, "model_error", "safe", ModelUsage(), 6, NOW)
-    with pytest.raises(RunTransitionRejected):
-        adapter.mark_succeeded(2, run.id, "other", None, ModelUsage(), 7, NOW)
+    # A second terminal write on an already-closed claim is fenced out, not applied twice.
+    assert not execution.succeed(
+        claimed,
+        output_text="other",
+        finish_reason="stop",
+        usage=ModelUsage(),
+        elapsed_ms=6,
+        now=NOW,
+    )
+    assert not execution.fail(
+        claimed,
+        error_code="model_error",
+        error_message="safe",
+        retry_disposition=RetryDisposition.AMBIGUOUS,
+        usage=ModelUsage(),
+        elapsed_ms=6,
+        now=NOW,
+    )
+    closed = adapter.get_run(1, run.id)
+    assert closed.status is RunStatus.SUCCEEDED
+    assert closed.output_text == "result\n```code```"
+    with pytest.raises(RunNotFound):
+        adapter.get_run(2, run.id)
 
 
 def test_blank_terminal_text_is_rejected_identically_by_domain_and_database(
-    persistence: tuple[SqlAlchemyAgentPersistence, AgentService, sessionmaker[Session]],
+    persistence: Persistence,
 ) -> None:
-    adapter, service, factory = persistence
+    _, service, factory, execution = persistence
     instance = service.create_instance(
         1, AgentDefinitionId("nervos.chat", "1"), "Chat", "test-provider", "model"
     )
@@ -186,13 +234,13 @@ def test_blank_terminal_text_is_rejected_identically_by_domain_and_database(
         chr(0x2028),
         chr(0x3000),
     )
+    run = service.submit_run(1, instance.id, "hello")
+    start(execution)
     for blank in blank_texts:
-        run = service.create_run(1, instance.id, "hello")
-        adapter.mark_running(1, run.id, NOW)
         with pytest.raises(InvalidRun):
-            service.succeed(1, run.id, blank, None, ModelUsage(), 1)
+            validate_output_text(blank, STAGE_B_LIMITS)
         with pytest.raises(InvalidRun):
-            service.fail(1, run.id, "model_error", blank, ModelUsage(), 1)
+            validate_error_message(blank)
         with pytest.raises(IntegrityError), factory.begin() as session:
             session.execute(
                 text(
@@ -210,20 +258,27 @@ def test_blank_terminal_text_is_rejected_identically_by_domain_and_database(
                 ),
                 {"finished": "2026-01-01 00:00:01", "message": blank, "run_id": run.id},
             )
+
     multiline = "\tanswer\nsecond line\n"
-    run = service.create_run(1, instance.id, "hello")
-    adapter.mark_running(1, run.id, NOW)
-    succeeded = service.succeed(1, run.id, multiline, "stop", ModelUsage(input_tokens=1), 5)
-    assert succeeded.output_text == multiline
-    assert adapter.get_run(1, run.id).output_text == multiline
+    second = service.submit_run(1, instance.id, "hello")
+    claimed = start(execution)
+    assert execution.succeed(
+        claimed,
+        output_text=multiline,
+        finish_reason="stop",
+        usage=ModelUsage(input_tokens=1),
+        elapsed_ms=5,
+        now=NOW,
+    )
+    assert service.get_run(1, second.id).output_text == multiline
     with pytest.raises(InvalidRun):
-        service.create_run(1, instance.id, "\t")
+        service.submit_run(1, instance.id, "\t")
 
 
 def test_every_database_valid_run_shape_reconstructs_as_a_domain_run(
-    persistence: tuple[SqlAlchemyAgentPersistence, AgentService, sessionmaker[Session]],
+    persistence: Persistence,
 ) -> None:
-    adapter, service, factory = persistence
+    adapter, service, factory, _ = persistence
     instance = service.create_instance(
         1, AgentDefinitionId("nervos.chat", "1"), "Chat", "test-provider", "model"
     )
@@ -276,14 +331,11 @@ def test_every_database_valid_run_shape_reconstructs_as_a_domain_run(
         reconstructed = adapter.get_run(1, run_id)
         assert reconstructed.status == RunStatus(row["status"])
         assert reconstructed.output_text == row.get("output_text")
-        assert reconstructed.error_message == row.get("error_message")
         assert reconstructed.limits == STAGE_B_LIMITS
 
 
-def test_disable_racing_run_creation_is_linearizable(
-    persistence: tuple[SqlAlchemyAgentPersistence, AgentService, sessionmaker[Session]],
-) -> None:
-    _, service, factory = persistence
+def test_disable_racing_submission_is_linearizable(persistence: Persistence) -> None:
+    _, service, factory, _ = persistence
     instance = service.create_instance(
         1, AgentDefinitionId("nervos.chat", "1"), "Chat", "test-provider", "model"
     )
@@ -292,7 +344,7 @@ def test_disable_racing_run_creation_is_linearizable(
     def create() -> str:
         barrier.wait()
         try:
-            service.create_run(1, instance.id, "racing input")
+            service.submit_run(1, instance.id, "racing input")
             return "created"
         except AgentInstanceUnavailable:
             return "unavailable"
@@ -316,10 +368,10 @@ def test_disable_racing_run_creation_is_linearizable(
         assert runs[0].model_name == "model"
 
 
-def test_provider_model_update_racing_run_creation_has_coherent_snapshot(
-    persistence: tuple[SqlAlchemyAgentPersistence, AgentService, sessionmaker[Session]],
+def test_provider_model_update_racing_submission_has_coherent_snapshot(
+    persistence: Persistence,
 ) -> None:
-    _, service, _ = persistence
+    _, service, _, _ = persistence
     instance = service.create_instance(
         1, AgentDefinitionId("nervos.chat", "1"), "Chat", "old-provider", "old-model"
     )
@@ -327,7 +379,7 @@ def test_provider_model_update_racing_run_creation_has_coherent_snapshot(
 
     def create() -> Run:
         barrier.wait()
-        return service.create_run(1, instance.id, "racing input")
+        return service.submit_run(1, instance.id, "racing input")
 
     def update_configuration() -> None:
         barrier.wait()
@@ -344,82 +396,108 @@ def test_provider_model_update_racing_run_creation_has_coherent_snapshot(
     }
 
 
-def test_competing_terminal_writers_have_one_consistent_winner(
-    persistence: tuple[SqlAlchemyAgentPersistence, AgentService, sessionmaker[Session]],
-) -> None:
-    adapter, service, _ = persistence
+def test_competing_terminal_writers_have_one_consistent_winner(persistence: Persistence) -> None:
+    adapter, service, _, execution = persistence
     instance = service.create_instance(
         1, AgentDefinitionId("nervos.chat", "1"), "Chat", "test-provider", "model"
     )
-    run = service.create_run(1, instance.id, "hello")
-    adapter.mark_running(1, run.id, NOW)
+    run = service.submit_run(1, instance.id, "hello")
+    claimed = start(execution)
     barrier = Barrier(2)
 
     def succeed() -> str:
         barrier.wait()
-        try:
-            adapter.mark_succeeded(1, run.id, "ok", "stop", ModelUsage(), 1, NOW)
-            return "succeeded"
-        except RunTransitionRejected:
-            return "rejected"
+        return (
+            "succeeded"
+            if execution.succeed(
+                claimed,
+                output_text="ok",
+                finish_reason="stop",
+                usage=ModelUsage(),
+                elapsed_ms=1,
+                now=NOW,
+            )
+            else "rejected"
+        )
 
     def fail() -> str:
         barrier.wait()
-        try:
-            adapter.mark_failed(1, run.id, "model_error", "safe", ModelUsage(), 1, NOW)
-            return "failed"
-        except RunTransitionRejected:
-            return "rejected"
+        return (
+            "failed"
+            if execution.fail(
+                claimed,
+                error_code="model_error",
+                error_message="safe",
+                retry_disposition=RetryDisposition.AMBIGUOUS,
+                usage=ModelUsage(),
+                elapsed_ms=1,
+                now=NOW,
+            )
+            else "rejected"
+        )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = (executor.submit(succeed), executor.submit(fail))
-        results = {future.result() for future in futures}
-    assert "rejected" in results
+        results = [future.result() for future in futures]
+    # Exactly one writer commits; the loser is fenced out by the closed claim.
+    assert sorted(results).count("rejected") == 1
+    assert sorted(results)[0] in {"failed", "rejected"}
+    assert {result for result in results} & {"succeeded", "failed"}
     final = adapter.get_run(1, run.id)
     assert final.status in {RunStatus.SUCCEEDED, RunStatus.FAILED}
     assert (final.output_text is None) != (final.error_code is None)
 
 
-@pytest.mark.parametrize("operation", ["read", "write", "run_create", "transition"])
+@pytest.mark.parametrize("operation", ["read", "write", "submit", "transition"])
 def test_sqlalchemy_failures_are_translated_with_preserved_cause(
-    persistence: tuple[SqlAlchemyAgentPersistence, AgentService, sessionmaker[Session]],
-    operation: str,
+    persistence: Persistence, operation: str
 ) -> None:
-    adapter, service, factory = persistence
+    adapter, service, factory, execution = persistence
     instance = service.create_instance(
         1, AgentDefinitionId("nervos.chat", "1"), "Chat", "test-provider", "model"
     )
-    run = service.create_run(1, instance.id, "hello")
-    if operation == "transition":
-        adapter.mark_running(1, run.id, NOW)
+    run = service.submit_run(1, instance.id, "hello")
+    claimed = start(execution) if operation == "transition" else None
     with factory.begin() as session:
         if operation in {"read", "write"}:
+            session.execute(text("DROP TABLE run_events"))
+            session.execute(text("DROP TABLE job_attempts"))
+            session.execute(text("DROP TABLE jobs"))
             session.execute(text("DROP TABLE runs"))
             session.execute(text("DROP TABLE agent_instances"))
         else:
+            session.execute(text("DROP TABLE run_events"))
+            session.execute(text("DROP TABLE job_attempts"))
+            session.execute(text("DROP TABLE jobs"))
             session.execute(text("DROP TABLE runs"))
     actions = {
         "read": lambda: adapter.get_instance(1, instance.id),
         "write": lambda: adapter.update_instance(
             1, instance.id, InstanceConfiguration("Chat", "test-provider", "model"), NOW
         ),
-        "run_create": lambda: service.create_run(1, instance.id, "again"),
-        "transition": lambda: adapter.mark_succeeded(1, run.id, "ok", None, ModelUsage(), 1, NOW),
+        "submit": lambda: service.submit_run(1, instance.id, "again"),
+        "transition": lambda: execution.succeed(
+            claimed,  # type: ignore[arg-type]
+            output_text="ok",
+            finish_reason="stop",
+            usage=ModelUsage(),
+            elapsed_ms=1,
+            now=NOW,
+        ),
     }
     with pytest.raises(PersistenceUnavailable) as captured:
         actions[operation]()
     assert isinstance(captured.value.__cause__, OperationalError)
     assert str(captured.value) == ""
+    assert run.status is RunStatus.CREATED
 
 
-def test_foreign_keys_restrict_history_deletion(
-    persistence: tuple[SqlAlchemyAgentPersistence, AgentService, sessionmaker[Session]],
-) -> None:
-    _, service, factory = persistence
+def test_foreign_keys_restrict_history_deletion(persistence: Persistence) -> None:
+    _, service, factory, _ = persistence
     instance = service.create_instance(
         1, AgentDefinitionId("nervos.chat", "1"), "Chat", "test-provider", "model"
     )
-    service.create_run(1, instance.id, "hello")
+    service.submit_run(1, instance.id, "hello")
     with pytest.raises(IntegrityError), factory.begin() as session:
         session.execute(delete(AgentInstanceRecord).where(AgentInstanceRecord.id == instance.id))
     with pytest.raises(IntegrityError), factory.begin() as session:

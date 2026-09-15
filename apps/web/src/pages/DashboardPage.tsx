@@ -36,10 +36,10 @@ export function DashboardPage({ user }: { user: User }) {
         <div className="panel ready-card">
           <div className="ready-indicator" aria-hidden="true" />
           <div>
-            <h2>Trusted chat is available</h2>
+            <h2>Create a Chat agent</h2>
             <p>
-              Create a Chat agent and run it here. Every submission is one independent run that
-              keeps its own result.
+              Create a Chat agent and submit runs to the durable queue. Accepted runs are executed
+              by the Worker process; the control plane accepts them even when no worker is running.
             </p>
             <Link className="button-link" to="/agents">
               Open agents

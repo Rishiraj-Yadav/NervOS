@@ -20,7 +20,9 @@ def test_app_starts_without_provider_credential_or_provider_network(tmp_path: Pa
             client.get("/api/v1/health"),  # pyright: ignore[reportUnknownMemberType]
         )
     assert response.status_code == 200
-    assert app.state.run_coordinator is not None
+    # The control plane accepts work and executes nothing, and holds no configured provider.
+    assert app.state.run_submission_service is not None
+    assert app.state.model_provider_catalog.configured_ids == ()
     with pytest.raises(ModelProviderUnavailable):
         app.state.model_provider_catalog.resolve("anthropic")
     assert not database_path.exists()

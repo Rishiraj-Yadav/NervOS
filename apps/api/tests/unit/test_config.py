@@ -4,13 +4,14 @@ from pathlib import Path
 
 import pytest
 from nervos_api.config import Settings
-from pydantic import SecretStr, ValidationError
+from pydantic import ValidationError
 
 VARIABLES = (
     "NERVOS_ENVIRONMENT",
     "NERVOS_DATABASE_PATH",
     "NERVOS_APP_ORIGIN",
     "NERVOS_LOG_LEVEL",
+    "NERVOS_MAX_PENDING_JOBS",
     "ANTHROPIC_API_KEY",
     "NERVOS_ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
@@ -24,126 +25,48 @@ def clear_nervos_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(variable, raising=False)
 
 
-def _secret(value: str | None) -> SecretStr | None:
-    """Wrap a synthetic credential the way process configuration does."""
-    return SecretStr(value) if value is not None else None
-
-
-def test_anthropic_credential_uses_exact_external_alias_and_is_secret(
+def test_the_api_settings_cannot_represent_a_provider_credential(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    credential = "synthetic-test-credential"
-    monkeypatch.setenv("ANTHROPIC_API_KEY", credential)
-    settings = Settings()
-    assert settings.anthropic_api_key is not None
-    assert settings.anthropic_api_key.get_secret_value() == credential
-    assert credential not in repr(settings)
-    assert credential not in str(settings.model_dump())
-
-
-def test_prefixed_anthropic_variable_is_not_read(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("NERVOS_ANTHROPIC_API_KEY", "must-not-be-read")
-    assert Settings().anthropic_api_key is None
-
-
-@pytest.mark.parametrize("value", ["", " ", "\t\r\n"])
-def test_blank_anthropic_credential_is_unavailable(
-    value: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("ANTHROPIC_API_KEY", value)
-    assert Settings().anthropic_api_key is None
-
-
-def test_openai_credential_uses_exact_external_alias_and_is_secret(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    credential = "synthetic-second-provider-credential"
-    monkeypatch.setenv("OPENAI_API_KEY", credential)
-    settings = Settings()
-    assert settings.openai_api_key is not None
-    assert settings.openai_api_key.get_secret_value() == credential
-    assert credential not in repr(settings)
-    assert credential not in str(settings.model_dump())
-
-
-def test_prefixed_openai_variable_is_not_read(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("NERVOS_OPENAI_API_KEY", "must-not-be-read")
-    assert Settings().openai_api_key is None
-
-
-@pytest.mark.parametrize("value", ["", " ", "\t\r\n"])
-def test_blank_openai_credential_is_unavailable(
-    value: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("OPENAI_API_KEY", value)
-    assert Settings().openai_api_key is None
-
-
-def test_provider_credentials_are_independent(monkeypatch: pytest.MonkeyPatch) -> None:
-    """One provider's credential never configures or leaks into the other."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "synthetic-anthropic-only")
-    settings = Settings()
-    assert settings.anthropic_api_key is not None
-    assert settings.openai_api_key is None
-
-    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-openai-only")
-    both = Settings()
-    assert both.anthropic_api_key is not None
-    assert both.openai_api_key is not None
-    assert both.anthropic_api_key.get_secret_value() == "synthetic-anthropic-only"
-    assert both.openai_api_key.get_secret_value() == "synthetic-openai-only"
-
-
-def test_provider_credentials_are_absent_from_repr_and_serialization(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A credential field is never rendered by repr and never emitted by serialization."""
-    anthropic = "synthetic-anthropic-serialization"
-    openai = "synthetic-openai-serialization"
-    monkeypatch.setenv("ANTHROPIC_API_KEY", anthropic)
-    monkeypatch.setenv("OPENAI_API_KEY", openai)
-
+    """Execution is a Worker capability, so the control plane holds no key at all."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "synthetic-anthropic-credential")
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-openai-credential")
     settings = Settings()
 
+    assert not hasattr(settings, "anthropic_api_key")
+    assert not hasattr(settings, "openai_api_key")
+    assert not hasattr(settings, "without_provider_credentials")
     dumped = settings.model_dump()
     assert "anthropic_api_key" not in dumped
     assert "openai_api_key" not in dumped
-    assert anthropic not in repr(settings)
-    assert openai not in repr(settings)
-    assert anthropic not in str(settings.model_dump())
-    assert openai not in str(settings.model_dump())
+    assert set(dumped) == {
+        "environment",
+        "database_path",
+        "app_origin",
+        "log_level",
+        "max_pending_jobs",
+    }
+    for field in type(settings).model_fields:
+        assert "anthropic" not in field and "openai" not in field
 
 
-@pytest.mark.parametrize(
-    ("anthropic", "openai"),
-    [
-        (None, None),
-        ("synthetic-anthropic-only", None),
-        (None, "synthetic-openai-only"),
-        ("synthetic-anthropic-both", "synthetic-openai-both"),
-    ],
-)
-def test_sanitized_copy_drops_both_credentials_and_changes_nothing_else(
-    anthropic: str | None, openai: str | None
+def test_the_pending_cap_defaults_and_reads_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One credential-free copy serves every consumer that outlives composition."""
-    settings = Settings(
-        anthropic_api_key=_secret(anthropic),
-        openai_api_key=_secret(openai),
-    )
+    assert Settings().max_pending_jobs == 1000
+    monkeypatch.setenv("NERVOS_MAX_PENDING_JOBS", "17")
+    assert Settings().max_pending_jobs == 17
 
-    sanitized = settings.without_provider_credentials()
 
-    assert sanitized.anthropic_api_key is None
-    assert sanitized.openai_api_key is None
-    assert sanitized.environment == settings.environment
-    assert sanitized.database_path == settings.database_path
-    assert sanitized.app_origin == settings.app_origin
-    assert sanitized.log_level == settings.log_level
+@pytest.mark.parametrize("value", ["0", "-1", "100001", "not-a-number"])
+def test_the_pending_cap_is_bounded(value: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NERVOS_MAX_PENDING_JOBS", value)
+    with pytest.raises(ValidationError):
+        Settings()
 
 
 def test_settings_load_no_environment_file() -> None:
-    """Credentials are process-only; no dotenv file is read automatically."""
+    """No dotenv file is read automatically."""
     assert Settings.model_config.get("env_file") is None
 
 

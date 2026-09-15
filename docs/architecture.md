@@ -71,7 +71,7 @@ Responsible for management rather than executing agent work:
 
 ### Implemented API surface today
 
-Beyond health, setup, and authentication, the API currently serves exactly two owner-scoped resources, delivered by B3:
+Beyond health, setup, and authentication, the API currently serves exactly two owner-scoped resources:
 
 ```text
 /api/v1/agent-instances
@@ -80,9 +80,9 @@ Beyond health, setup, and authentication, the API currently serves exactly two o
 /api/v1/runs/{run_id}
 ```
 
-Routes depend on **application services** (`AgentService`, `RunCoordinator`, `ModelProviderCatalog`) resolved from `app.state`. No route module imports SQLAlchemy, `nervos_core.infrastructure`, `anthropic`, or `nervos_models`, and exactly one route calls `RunCoordinator.execute` — the single canonical execution path. Architecture tests enforce both properties.
+Routes depend on **application services** (`AgentService`, the durable submission service, and `ModelProviderCatalog`) resolved from `app.state`. No route module imports SQLAlchemy, `nervos_core.infrastructure`, `anthropic`, or `nervos_models`, and exactly one route calls the durable submission service. The control plane cannot claim, start, heartbeat, or terminalize Jobs.
 
-Everything else in this document — registry, installation, schedules, workers, tools, memory, permissions, Marketplace, SDK — remains target architecture.
+C2 activates only the minimal Worker execution plane. Registry, installation, schedules, tools, memory, permissions, Marketplace, SDK, cancellation, retries, recovery, worker health, and event streaming remain target architecture.
 
 ## Execution plane
 
@@ -112,7 +112,7 @@ React dashboard. It never accesses the database directly.
 
 ### `apps/worker`
 
-Future execution worker entrypoint. It claims jobs and delegates to runtime services.
+C2 execution Worker entrypoint. It claims eligible queued Jobs, renews leases while executing, delegates trusted Run execution to core services, and writes terminal Job/Attempt/Run state. It has no HTTP surface and never runs Alembic.
 
 ### `packages/nervos-core`
 

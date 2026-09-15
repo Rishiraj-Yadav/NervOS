@@ -14,7 +14,7 @@ from nervos_core.application.agents import (
     RunNotFound,
 )
 from nervos_core.domain.agents import AgentDefinitionId, AgentInstance
-from nervos_core.domain.runs import STAGE_B_LIMITS, ModelUsage, Run, RunLimits, RunStatus
+from nervos_core.domain.runs import STAGE_B_LIMITS, ModelUsage, Run, RunStatus
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 IDENTITY = AgentDefinitionId("nervos.chat", "1")
@@ -54,7 +54,9 @@ class RecordingPersistence:
 
     The write half of the `AgentPersistence` Protocol is implemented as a loud refusal: these
     tests prove the read pass-throughs delegate without re-deriving anything, so any write
-    reaching this double would mean the read path had grown behaviour it must not have.
+    reaching this double would mean the read path had grown behaviour it must not have. The
+    Run lifecycle writes no longer exist on this protocol at all: execution is the Worker's,
+    through the fenced execution persistence, so there is nothing here to refuse.
     """
 
     def __init__(self, *, instances: tuple[AgentInstance, ...] = (), runs: tuple[Run, ...] = ()):
@@ -111,44 +113,6 @@ class RecordingPersistence:
         self, owner_user_id: int, instance_id: int, enabled: bool, now: datetime
     ) -> AgentInstance:
         raise AssertionError("a read pass-through must never toggle an instance")
-
-    def create_run_for_owned_instance(
-        self,
-        owner_user_id: int,
-        instance_id: int,
-        definition_id: AgentDefinitionId,
-        input_text: str,
-        limits: RunLimits,
-        now: datetime,
-    ) -> Run:
-        raise AssertionError("a read pass-through must never create a run")
-
-    def mark_running(self, owner_user_id: int, run_id: int, now: datetime) -> Run:
-        raise AssertionError("a read pass-through must never transition a run")
-
-    def mark_succeeded(
-        self,
-        owner_user_id: int,
-        run_id: int,
-        output_text: str,
-        finish_reason: str | None,
-        usage: ModelUsage,
-        elapsed_ms: int,
-        now: datetime,
-    ) -> Run:
-        raise AssertionError("a read pass-through must never transition a run")
-
-    def mark_failed(
-        self,
-        owner_user_id: int,
-        run_id: int,
-        error_code: str,
-        error_message: str,
-        usage: ModelUsage,
-        elapsed_ms: int,
-        now: datetime,
-    ) -> Run:
-        raise AssertionError("a read pass-through must never transition a run")
 
 
 def service(persistence: RecordingPersistence) -> AgentService:

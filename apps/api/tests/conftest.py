@@ -26,10 +26,9 @@ from nervos_core.application.model_completion import (
     StopOutcome,
 )
 from nervos_core.application.model_providers import ModelProviderCatalog
-from nervos_core.application.run_coordinator import RunCoordinator
-from nervos_core.application.trusted_chat import create_builtin_handler_registry
 from nervos_core.infrastructure.database.agents import SqlAlchemyAgentPersistence
 from nervos_core.infrastructure.database.authentication import SqlAlchemyAuthenticationPersistence
+from nervos_core.infrastructure.database.jobs import SqlAlchemyJobPersistence
 from nervos_core.infrastructure.database.models import UserRecord
 from nervos_core.infrastructure.security.passwords import Argon2PasswordHasher
 from nervos_core.infrastructure.security.session_tokens import SecureSessionTokens
@@ -90,19 +89,24 @@ def fast_password_hasher() -> Argon2PasswordHasher:
     )
 
 
-def install_catalog(app: FastAPI, catalog: ModelProviderCatalog) -> None:
-    """Install a provider catalog and rebuild the Agent service and coordinator over it."""
-    handlers = create_builtin_handler_registry()
+def install_catalog(
+    app: FastAPI, catalog: ModelProviderCatalog, *, max_pending: int = 1000
+) -> None:
+    """Install a known-provider catalog and rebuild the durable submission service over it.
+
+    The control plane composes no executor and no credential, so a test can only vary which
+    provider *identifiers* are known; execution capability lives entirely in the Worker.
+    """
     service = AgentService(
         SqlAlchemyAgentPersistence(app.state.session_factory),
         create_builtin_definition_registry(),
         utc_now,
-        handlers,
         catalog,
+        SqlAlchemyJobPersistence(app.state.database_engine, max_pending=max_pending),
     )
     app.state.model_provider_catalog = catalog
     app.state.agent_service = service
-    app.state.run_coordinator = RunCoordinator(service, handlers, catalog)
+    app.state.run_submission_service = service
 
 
 def deterministic_catalog(completion: DeterministicCompletion) -> ModelProviderCatalog:
@@ -263,12 +267,12 @@ def sign_in_as(client: TestClient) -> Callable[[str], None]:
 @pytest.fixture
 def install_provider_catalog(
     migrated_app: tuple[FastAPI, Settings],
-) -> Callable[[ModelProviderCatalog], None]:
-    """Return a factory that swaps the composed provider catalog for another one."""
+) -> Callable[..., None]:
+    """Return a factory that swaps the composed known-provider catalog for another one."""
     app, _ = migrated_app
 
-    def install(catalog: ModelProviderCatalog) -> None:
-        install_catalog(app, catalog)
+    def install(catalog: ModelProviderCatalog, *, max_pending: int = 1000) -> None:
+        install_catalog(app, catalog, max_pending=max_pending)
 
     return install
 

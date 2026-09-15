@@ -25,8 +25,6 @@ interface Handlers {
 
 function detailHandlers(options: Handlers = {}) {
   const instance = options.instance ?? apiAgentInstance();
-  // The history is stateful so a refetch after execution returns the persisted run, exactly as
-  // the server would.
   const history: ApiRun[] = [...(options.runs ?? [])];
 
   return [
@@ -48,9 +46,9 @@ function detailHandlers(options: Handlers = {}) {
       const body = (await request.json()) as { input: string };
       const created = options.createdRun
         ? options.createdRun(body.input)
-        : apiRun({ id: history.length + 1, input_text: body.input });
+        : apiRun({ id: history.length + 1, input_text: body.input, status: "created", output_text: null, finish_reason: null, elapsed_ms: null, usage: null });
       history.unshift(created);
-      return HttpResponse.json(created, { status: 201 });
+      return HttpResponse.json(created, { status: 202 });
     }),
   ];
 }
@@ -146,13 +144,21 @@ describe("agent detail page", () => {
     expect(Object.keys(body as object)).toEqual(["enabled"]);
   });
 
-  it("runs the agent and renders the persisted run", async () => {
+  it("submits the agent and renders the queued run", async () => {
     let body: unknown;
     server.use(
       ...detailHandlers({
         createdRun: (input) => {
           body = { input };
-          return apiRun({ id: 3, input_text: input });
+          return apiRun({
+            id: 3,
+            input_text: input,
+            status: "created",
+            output_text: null,
+            finish_reason: null,
+            elapsed_ms: null,
+            usage: null,
+          });
         },
       }),
     );
@@ -162,25 +168,30 @@ describe("agent detail page", () => {
     await user.type(screen.getByLabelText("Message"), "hello");
     await user.click(screen.getByRole("button", { name: /run agent/i }));
 
-    expect(await screen.findByText("deterministic answer")).toBeVisible();
+    expect(await screen.findByText("Queued")).toBeVisible();
+    expect(screen.getByText(/a worker must be running to execute this run/i)).toBeVisible();
     expect(screen.getByText("Run #3")).toBeVisible();
     expect(body).toEqual({ input: "hello" });
   });
 
-  it("disables submission while a run is in flight and never fakes progress", async () => {
+  it("disables submission while in flight and displays submitting state", async () => {
     let release: (() => void) | undefined;
     const history: ApiRun[] = [];
-    // Earlier handlers in the list take precedence, so the deferred POST is registered first.
-    // The history it appends to is the same one the list handler serves, so the post-run
-    // refetch agrees with the response — exactly as the server would.
     server.use(
       http.post("/api/v1/agent-instances/1/runs", async () => {
         await new Promise<void>((resolve) => {
           release = resolve;
         });
-        const created = apiRun({ id: 1 });
+        const created = apiRun({
+          id: 1,
+          status: "created",
+          output_text: null,
+          finish_reason: null,
+          elapsed_ms: null,
+          usage: null,
+        });
         history.unshift(created);
-        return HttpResponse.json(created, { status: 201 });
+        return HttpResponse.json(created, { status: 202 });
       }),
       setupStatusHandler(true),
       authenticatedHandler(),
@@ -195,64 +206,40 @@ describe("agent detail page", () => {
     await user.type(screen.getByLabelText("Message"), "hello");
     await user.click(screen.getByRole("button", { name: /run agent/i }));
 
-    const pending = await screen.findByRole("button", { name: /running/i });
+    const pending = await screen.findByRole("button", { name: /submitting/i });
     expect(pending).toBeDisabled();
     expect(screen.getByLabelText("Message")).toBeDisabled();
-    expect(screen.getByRole("status")).toHaveTextContent(/can take up to a minute/i);
+    expect(screen.getByRole("status")).toHaveTextContent(/submitting the run/i);
     expect(screen.queryByText(/%/)).toBeNull();
 
     release?.();
-    expect(await screen.findByText("deterministic answer")).toBeVisible();
+    expect(await screen.findByText("Queued")).toBeVisible();
   });
 
   it("renders a persisted failed run as a run card, not as a request error", async () => {
     server.use(
       ...detailHandlers({
-        createdRun: (input) =>
+        runs: [
           apiRun({
             id: 4,
-            input_text: input,
+            input_text: "failed prompt",
             status: "failed",
             output_text: null,
             finish_reason: null,
             error_code: "model_rate_limited",
             error_message: "The model provider is temporarily rate limited.",
           }),
+        ],
       }),
     );
-    const { user } = await renderRoute("/agents/1");
-    await screen.findByRole("heading", { name: "Chat" });
 
-    await user.type(screen.getByLabelText("Message"), "hello");
-    await user.click(screen.getByRole("button", { name: /run agent/i }));
+    await renderRoute("/agents/1");
+    await screen.findByRole("heading", { name: "Chat" });
 
     expect(await screen.findByText(/temporarily rate limited/i)).toBeVisible();
     expect(screen.getByText(/model_rate_limited/)).toBeVisible();
     expect(screen.getByText("Failed")).toBeVisible();
-    // The request succeeded and the Run was persisted, so this must not be shown as a request error.
     expect(screen.queryByRole("alert")).toBeNull();
-  });
-
-  it("renders a pre-run rejection as an inline request error", async () => {
-    server.use(
-      ...detailHandlers({
-        runError: () =>
-          apiError(
-            409,
-            "model_provider_unavailable",
-            "The model provider is not configured for this NervOS process.",
-          ),
-      }),
-    );
-    const { user } = await renderRoute("/agents/1");
-    await screen.findByRole("heading", { name: "Chat" });
-
-    await user.type(screen.getByLabelText("Message"), "hello");
-    await user.click(screen.getByRole("button", { name: /run agent/i }));
-
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "The model provider is not configured for this NervOS process.",
-    );
   });
 
   it("blocks new runs while the agent is disabled and explains why", async () => {
@@ -267,8 +254,6 @@ describe("agent detail page", () => {
   });
 
   it("surfaces the server's disabled-instance rejection inline", async () => {
-    // The agent was disabled by another tab between load and submit, so the client-side block has
-    // already been bypassed and only the server's 409 can explain what happened.
     server.use(
       ...detailHandlers({
         runError: () =>
@@ -304,28 +289,30 @@ describe("agent detail page", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("NervOS storage is temporarily unavailable.");
-    // The failure belongs to the toggle, not to the model/name settings form.
     const configPanel = screen.getByRole("heading", { name: "Configuration" }).closest("section");
     expect(configPanel).not.toBeNull();
     expect(configPanel).not.toContainElement(alert);
   });
 
-  it("never claims a non-terminal run is queued for work", async () => {
-    // `created` means the run was persisted but is not being executed by anything. There is no
-    // queue or worker in this milestone, so the label must not imply one.
+  it("renders a created run with the truthful worker dependency copy", async () => {
     server.use(...detailHandlers({ runs: [apiRun({ status: "created", output_text: null })] }));
 
     await renderRoute("/agents/1");
 
-    expect(await screen.findByText("Created")).toBeVisible();
-    expect(screen.queryByText(/queued/i)).toBeNull();
-    expect(screen.getByText(/does not resume or retry it/i)).toBeVisible();
+    expect(await screen.findByText("Queued")).toBeVisible();
+    expect(screen.getByText(/a worker must be running to execute this run/i)).toBeVisible();
+  });
+
+  it("renders a running run with the truthful crash recovery limitation copy", async () => {
+    server.use(...detailHandlers({ runs: [apiRun({ status: "running", output_text: null })] }));
+
+    await renderRoute("/agents/1");
+
+    expect(await screen.findByText("Running")).toBeVisible();
+    expect(screen.getByText(/does not yet recover or retry it/i)).toBeVisible();
   });
 
   it("says so when the run history may be truncated rather than looking complete", async () => {
-    // A non-null cursor means the page was full, so more runs may exist beyond it. The note must
-    // not claim the list is complete — and must not claim older runs exist either, since the
-    // server returns a cursor for a final full page too.
     server.use(
       ...detailHandlers({
         runs: [apiRun({ id: 2, output_text: "Second answer" })],
@@ -397,8 +384,6 @@ describe("agent detail page", () => {
       http.get("/api/v1/agent-instances/1", () =>
         apiError(404, "agent_instance_not_found", "The agent instance was not found."),
       ),
-      // A missing or foreign instance fails both reads: the server resolves the parent before it
-      // lists runs, so the history is never a misleading empty page.
       http.get("/api/v1/agent-instances/1/runs", () =>
         apiError(404, "agent_instance_not_found", "The agent instance was not found."),
       ),

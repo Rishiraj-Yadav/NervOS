@@ -1,20 +1,36 @@
 # NervOS configuration
 
-Stage B uses one immutable API settings model backed only by process environment variables. NervOS does not automatically load `.env`, `.env.local`, or any other environment file. `.env.example` is documentation containing non-secret values only.
+NervOS uses typed settings backed only by process environment variables. It does not automatically load `.env`, `.env.local`, or any other environment file. `.env.example` is documentation containing non-secret values only.
 
-## Variables
+## Shared variables
 
 | Variable | Default | Rules |
 |---|---|---|
 | `NERVOS_ENVIRONMENT` | `development` | One of `development`, `test`, or `production`. |
 | `NERVOS_DATABASE_PATH` | `~/.nervos/nervos.db` | Must be non-blank and identify a file rather than an existing directory. User-home syntax is expanded and the path is resolved without creating it. |
-| `NERVOS_APP_ORIGIN` | `http://localhost:5173` | One exact HTTP(S) origin with a host. Wildcards, credentials, paths, trailing slashes, queries, fragments, and invalid ports are rejected. Production requires HTTPS. |
 | `NERVOS_LOG_LEVEL` | `INFO` | One of `DEBUG`, `INFO`, `WARNING`, or `ERROR`. |
-| `ANTHROPIC_API_KEY` | unavailable | Optional process-only credential for Anthropic. It is required only when executing an Anthropic-configured instance. Empty or whitespace-only values mean unavailable. |
-| `OPENAI_API_KEY` | unavailable | Optional process-only credential for OpenAI Responses. It is required only when executing an OpenAI-configured instance. Empty or whitespace-only values mean unavailable. |
 
-A relative database path is resolved from the process working directory. Repository commands run from the repository root; deployments should normally provide an absolute path.
+A relative database path is resolved from the process working directory. Repository commands run from the repository root; deployments should normally provide an absolute path. Settings validation performs no filesystem mutation. The API migration command creates the database parent directory immediately before connecting.
 
-Settings validation performs no filesystem mutation. The migration command creates the database parent directory immediately before connecting. Application construction and the health endpoint do not create the database.
+## API-only variables
 
-Real environment files, credentials, API keys, and session secrets must remain local and untracked. A3 authentication adds no operator-configurable secrets. Cookie security is derived from the existing validated settings: `Secure` is enabled in production and whenever `NERVOS_APP_ORIGIN` uses HTTPS. The cookie name, seven-day lifetime, SameSite policy, exact-Origin boundary, process-local Argon2 work bound, and password/token policies are fixed application security constants documented in `docs/authentication.md` and ADR 0006. The process-local work bound returns 429 under saturation; externally exposed deployments still require reverse-proxy or network rate limiting.
+| Variable | Default | Rules |
+|---|---|---|
+| `NERVOS_APP_ORIGIN` | `http://localhost:5173` | One exact HTTP(S) origin with a host. Wildcards, credentials, paths, trailing slashes, queries, fragments, and invalid ports are rejected. Production requires HTTPS. |
+| `NERVOS_MAX_PENDING_JOBS` | `1000` | Global hard cap for accepted-but-unfinished Jobs. Integer from 1 through 100000. |
+
+The API/control plane holds no provider credential and constructs no provider SDK client. It validates that a provider identifier is known and durably accepts Runs for known providers; actual provider capability belongs to Workers.
+
+## Worker-only variables
+
+| Variable | Default | Rules |
+|---|---|---|
+| `NERVOS_WORKER_CONCURRENCY` | `1` | Local execution slots for this Worker process. Integer from 1 through 16. |
+| `NERVOS_MAX_ACTIVE_JOBS` | `4` | Node-wide active Job cap enforced during claim. Integer from 1 through 16. |
+| `ANTHROPIC_API_KEY` | unavailable | Optional process-only credential for Anthropic. Empty or whitespace-only values mean unavailable. Read only by the Worker. |
+| `OPENAI_API_KEY` | unavailable | Optional process-only credential for OpenAI Responses. Empty or whitespace-only values mean unavailable. Read only by the Worker. |
+| `NERVOS_WORKER_READY_FILE` | unset | Test-only readiness marker path used by the deterministic E2E supervisor. Production should not set it. |
+
+A Worker claims only Jobs whose `model_provider` is in its configured provider set. A Worker with no provider credentials starts successfully, claims nothing, and fails nothing.
+
+Real environment files, credentials, API keys, and session secrets must remain local and untracked. A3 authentication adds no operator-configurable secrets. Cookie security is derived from the existing validated environment and origin settings.

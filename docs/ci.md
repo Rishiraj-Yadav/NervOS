@@ -62,7 +62,7 @@ It is a CI-runner concern and is deliberately absent from local bootstrap; see
 
 `check` deliberately excludes `e2e`. The dividing line is principled: `check` is
 everything fast, offline and deterministic; `e2e` is the one heavy journey that
-needs a downloaded browser and spawns API, Vite and Chromium process trees.
+needs a downloaded browser and spawns API, Worker, Vite and Chromium process trees.
 Folding E2E into `check` would make routine lint/typecheck runs require Chromium
 and make them environment-sensitive.
 
@@ -157,7 +157,7 @@ updating the table above in the same change. Automated update tooling
 
 - Browser binaries come from the **project-local, locked** `@playwright/test`, via `scripts/bootstrap.py` → `pnpm --dir apps/web exec playwright install chromium`. There is no reliance on a system Chrome, a global Playwright, or `--with-deps` locally.
 - `ci.yml` additionally runs `pnpm --dir apps/web exec playwright install-deps chromium` to install Linux runner system libraries. This touches OS packages on an ephemeral runner and never on a developer machine.
-- The A5 contract is preserved unchanged: one Chromium project, one worker, zero retries, a freshly migrated temporary SQLite database per invocation, dynamic loopback ports, bounded readiness checks, and no arbitrary sleeps.
+- The browser journey contract is preserved: one Chromium project, one Playwright worker, zero retries, a freshly migrated temporary SQLite database per invocation, dynamic loopback ports, bounded readiness checks for API/Worker/Web, and no arbitrary sleeps.
 - **Flakiness is never hidden with retries.** If the journey proves flaky, make it deterministic instead of raising `retries`.
 
 ## Security scanning

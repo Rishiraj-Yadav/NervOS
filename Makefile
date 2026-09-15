@@ -1,4 +1,4 @@
-.PHONY: bootstrap dev-api dev-web test test-e2e e2e lint typecheck security check clean-check
+.PHONY: bootstrap dev-api dev-worker dev-web test test-e2e e2e lint typecheck security check clean-check
 
 PYTHON ?= python
 
@@ -7,6 +7,9 @@ bootstrap:
 
 dev-api:
 	uv run python scripts/dev.py api
+
+dev-worker:
+	uv run python scripts/dev.py worker
 
 dev-web:
 	uv run python scripts/dev.py web

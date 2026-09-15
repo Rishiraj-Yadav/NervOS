@@ -51,6 +51,15 @@ class ModelProviderCatalog:
         """Return whether this process can build a completion for the identifier."""
         return provider_id in self._configured
 
+    @property
+    def configured_ids(self) -> tuple[str, ...]:
+        """Return the exact identifiers this process holds configuration for.
+
+        This is the capability set the execution plane filters queue eligibility by: a Worker
+        claims only Jobs whose provider it can actually execute.
+        """
+        return tuple(sorted(self._configured))
+
     def resolve(self, provider_id: str) -> ModelCompletion:
         """Return the configured completion or raise a safe pre-run provider error."""
         factory = self._configured.get(provider_id)

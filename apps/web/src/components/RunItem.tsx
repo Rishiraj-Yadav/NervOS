@@ -1,7 +1,7 @@
 import type { Run } from "../api/agentInstances";
 
 const STATUS_LABELS: Record<Run["status"], string> = {
-  created: "Created",
+  created: "Queued",
   running: "Running",
   succeeded: "Succeeded",
   failed: "Failed",
@@ -59,9 +59,16 @@ export function RunItem({ run }: { run: Run }) {
         </p>
       ) : null}
 
-      {run.status === "running" || run.status === "created" ? (
+      {run.status === "created" ? (
         <p className="run-pending" role="note">
-          This run has not reached a terminal state. NervOS does not resume or retry it.
+          Accepted and queued. A worker must be running to execute this run.
+        </p>
+      ) : null}
+
+      {run.status === "running" ? (
+        <p className="run-pending" role="note">
+          Running. If the worker stops before it finishes, this run will not complete; NervOS
+          does not yet recover or retry it.
         </p>
       ) : null}
     </article>
