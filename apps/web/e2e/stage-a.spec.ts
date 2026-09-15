@@ -6,10 +6,13 @@ const username = "Stage-A.Admin";
 const canonicalUsername = "stage-a.admin";
 const password = "StageA test password 2026!";
 // The Worker is held at the claim gate until the journey has observed the queued Run, so the
-// asynchronous cutover is proved rather than raced. The terminal result still has to travel
-// through a Worker claim, a durable terminal write, and a browser poll, so it gets a bound
+// asynchronous cutover is proved rather than raced. Releasing the gate hands the Job to Worker A,
+// which claims it and is then lost BEFORE the execution-start boundary; the supervisor starts a
+// recovery Worker, whose startup reclamation reconciles that expired claim and executes it once.
+// The terminal result therefore travels through a claim, a pre-start loss, a lease expiry, a
+// reclamation, a fresh claim, a durable terminal write, and a browser poll, so it gets a bound
 // wider than the 7.5s default; the whole-test budget is untouched.
-const ASYNC_TIMEOUT = 15_000;
+const ASYNC_TIMEOUT = 25_000;
 function releaseWorkerClaimGate(): void {
   const gate = process.env.NERVOS_E2E_CLAIM_GATE;
   if (gate === undefined || gate === "") {

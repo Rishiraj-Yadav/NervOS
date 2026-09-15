@@ -123,11 +123,11 @@ class RunRecord(Base):
         CheckConstraint("elapsed_ms IS NULL OR elapsed_ms >= 0", name="elapsed_nonnegative"),
         CheckConstraint("started_at IS NULL OR started_at >= created_at", name="started_order"),
         CheckConstraint(
-            "finished_at IS NULL OR (started_at IS NOT NULL AND finished_at >= started_at)",
+            "finished_at IS NULL OR (started_at IS NOT NULL AND finished_at >= started_at) OR (started_at IS NULL AND error_code = 'worker_recovery_exhausted' AND finished_at >= created_at)",
             name="finished_order",
         ),
         CheckConstraint(
-            "(status='created' AND started_at IS NULL AND finished_at IS NULL AND output_text IS NULL AND finish_reason IS NULL AND error_code IS NULL AND error_message IS NULL AND input_tokens IS NULL AND output_tokens IS NULL AND total_tokens IS NULL AND elapsed_ms IS NULL) OR (status='running' AND started_at IS NOT NULL AND finished_at IS NULL AND output_text IS NULL AND finish_reason IS NULL AND error_code IS NULL AND error_message IS NULL AND input_tokens IS NULL AND output_tokens IS NULL AND total_tokens IS NULL AND elapsed_ms IS NULL) OR (status='succeeded' AND started_at IS NOT NULL AND finished_at IS NOT NULL AND output_text IS NOT NULL AND length(trim(output_text, char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288))) > 0 AND error_code IS NULL AND error_message IS NULL AND elapsed_ms IS NOT NULL) OR (status='failed' AND started_at IS NOT NULL AND finished_at IS NOT NULL AND output_text IS NULL AND finish_reason IS NULL AND error_code IS NOT NULL AND error_message IS NOT NULL AND length(trim(error_message, char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288))) > 0 AND elapsed_ms IS NOT NULL)",
+            "(status='created' AND started_at IS NULL AND finished_at IS NULL AND output_text IS NULL AND finish_reason IS NULL AND error_code IS NULL AND error_message IS NULL AND input_tokens IS NULL AND output_tokens IS NULL AND total_tokens IS NULL AND elapsed_ms IS NULL) OR (status='running' AND started_at IS NOT NULL AND finished_at IS NULL AND output_text IS NULL AND finish_reason IS NULL AND error_code IS NULL AND error_message IS NULL AND input_tokens IS NULL AND output_tokens IS NULL AND total_tokens IS NULL AND elapsed_ms IS NULL) OR (status='succeeded' AND started_at IS NOT NULL AND finished_at IS NOT NULL AND output_text IS NOT NULL AND length(trim(output_text, char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288))) > 0 AND error_code IS NULL AND error_message IS NULL AND elapsed_ms IS NOT NULL) OR (status='failed' AND started_at IS NOT NULL AND finished_at IS NOT NULL AND output_text IS NULL AND finish_reason IS NULL AND error_code IS NOT NULL AND error_code <> 'worker_recovery_exhausted' AND error_message IS NOT NULL AND length(trim(error_message, char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288))) > 0 AND elapsed_ms IS NOT NULL) OR (status='failed' AND started_at IS NULL AND finished_at IS NOT NULL AND output_text IS NULL AND finish_reason IS NULL AND error_code = 'worker_recovery_exhausted' AND error_message IS NOT NULL AND length(trim(error_message, char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288))) > 0 AND input_tokens IS NULL AND output_tokens IS NULL AND total_tokens IS NULL AND elapsed_ms IS NULL)",
             name="lifecycle_shape",
         ),
         Index("ix_runs_agent_instance_id_id", "agent_instance_id", "id"),
@@ -373,3 +373,31 @@ class AuthSessionRecord(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class WorkerRecord(Base):
+    """Durable registry row for one Worker process incarnation (C3).
+
+    This row is *observability*, not execution authority: an expired Job lease is the only
+    signal that reclaims work. The registry records that an incarnation existed and when it
+    was last seen, so an operator can tell a stopped incarnation from a crashed one.
+    """
+
+    __tablename__ = "workers"
+    __table_args__ = (
+        UniqueConstraint("worker_id"),
+        CheckConstraint("length(worker_id) BETWEEN 1 AND 128", name="worker_id_shape"),
+        CheckConstraint("last_heartbeat_at >= started_at", name="heartbeat_order"),
+        CheckConstraint(
+            "stopped_at IS NULL OR stopped_at >= last_heartbeat_at",
+            name="stop_order",
+        ),
+        Index("ix_workers_last_heartbeat_at_id", "last_heartbeat_at", "id"),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    worker_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    last_heartbeat_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    stopped_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)

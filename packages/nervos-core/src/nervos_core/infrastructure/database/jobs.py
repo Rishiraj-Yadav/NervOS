@@ -28,9 +28,10 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TypeVar
+from typing import Any, TypeVar
 
-from sqlalchemy import Connection, Engine, func, insert, select, update
+from sqlalchemy import Connection, Engine, and_, func, insert, or_, select, update
+from sqlalchemy.engine import RowMapping
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -41,6 +42,13 @@ from nervos_core.application.errors import (
     QueueCapacityExceeded,
 )
 from nervos_core.application.job_execution import ClaimedAttempt, ClaimState
+from nervos_core.application.lease_reclamation import (
+    ReclaimedClaim,
+    ReclamationKind,
+    WorkerLiveness,
+    WorkerSnapshot,
+    classify_worker,
+)
 from nervos_core.application.model_completion import (
     EXECUTION_OUTCOME_AMBIGUOUS,
     safe_error_message,
@@ -48,6 +56,7 @@ from nervos_core.application.model_completion import (
 from nervos_core.domain.agents import AgentDefinitionId
 from nervos_core.domain.jobs import AttemptStatus, JobStatus, RetryDisposition, RunEventType
 from nervos_core.domain.runs import (
+    WORKER_RECOVERY_EXHAUSTED,
     ModelUsage,
     Run,
     RunLimits,
@@ -61,6 +70,7 @@ from nervos_core.infrastructure.database.models import (
     JobRecord,
     RunEventRecord,
     RunRecord,
+    WorkerRecord,
 )
 
 # SQLite primary result codes. Classification uses the driver's own numeric code rather than
@@ -1144,6 +1154,453 @@ class SqlAlchemyJobExecutionPersistence:
             return closed
 
         return self._runner.run(operation)
+
+    # -- worker registry -----------------------------------------------------------------
+
+    def register_worker(self, *, worker_id: str, now: datetime) -> None:
+        """Durably register one process incarnation. A restart draws a new identity."""
+
+        def operation(connection: Connection) -> bool:
+            connection.execute(
+                insert(WorkerRecord).values(
+                    worker_id=worker_id,
+                    started_at=now,
+                    last_heartbeat_at=now,
+                    stopped_at=None,
+                )
+            )
+            return True
+
+        self._runner.run(operation)
+
+    def heartbeat_worker(self, *, worker_id: str, now: datetime) -> WorkerLiveness:
+        """Renew registry liveness, monotonically.
+
+        A backwards wall clock must never make a healthy process look older, so the write refuses
+        to move `last_heartbeat_at` backwards. That makes a zero-row result ambiguous, which is
+        why the row is read back first: `REGRESSED` is benign, while `UNREGISTERED` and `STOPPED`
+        mean this incarnation may no longer claim.
+        """
+
+        def operation(connection: Connection) -> WorkerLiveness:
+            row = (
+                connection.execute(
+                    select(WorkerRecord.stopped_at, WorkerRecord.last_heartbeat_at).where(
+                        WorkerRecord.worker_id == worker_id
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
+                return WorkerLiveness.UNREGISTERED
+            if row["stopped_at"] is not None:
+                return WorkerLiveness.STOPPED
+            if row["last_heartbeat_at"] >= now:
+                return WorkerLiveness.REGRESSED
+            connection.execute(
+                update(WorkerRecord)
+                .where(
+                    WorkerRecord.worker_id == worker_id,
+                    WorkerRecord.stopped_at.is_(None),
+                    WorkerRecord.last_heartbeat_at < now,
+                )
+                .values(last_heartbeat_at=now)
+            )
+            return WorkerLiveness.RENEWED
+
+        return self._runner.run(operation)
+
+    def stop_worker(self, *, worker_id: str, now: datetime) -> bool:
+        """Record a graceful stop. `stopped_at` mirrors the final heartbeat exactly.
+
+        Mirroring rather than stamping `now` keeps `stopped_at >= last_heartbeat_at` true even if
+        the wall clock moved backwards during the process lifetime.
+        """
+
+        def operation(connection: Connection) -> bool:
+            connection.execute(
+                update(WorkerRecord)
+                .where(
+                    WorkerRecord.worker_id == worker_id,
+                    WorkerRecord.stopped_at.is_(None),
+                    WorkerRecord.last_heartbeat_at < now,
+                )
+                .values(last_heartbeat_at=now)
+            )
+            result = connection.execute(
+                update(WorkerRecord)
+                .where(
+                    WorkerRecord.worker_id == worker_id,
+                    WorkerRecord.stopped_at.is_(None),
+                )
+                .values(stopped_at=WorkerRecord.last_heartbeat_at)
+            )
+            return _rowcount(result) == 1
+
+        return self._runner.run(operation)
+
+    def list_workers(self, *, now: datetime, stale_after: timedelta) -> list[WorkerSnapshot]:
+        """Read-only registry report. Registry health never mutates a Job."""
+        with self._engine.connect() as connection:
+            rows = (
+                connection.execute(
+                    select(
+                        WorkerRecord.worker_id,
+                        WorkerRecord.started_at,
+                        WorkerRecord.last_heartbeat_at,
+                        WorkerRecord.stopped_at,
+                    ).order_by(WorkerRecord.id)
+                )
+                .mappings()
+                .all()
+            )
+        return [
+            WorkerSnapshot(
+                worker_id=row["worker_id"],
+                started_at=row["started_at"],
+                last_heartbeat_at=row["last_heartbeat_at"],
+                stopped_at=row["stopped_at"],
+                state=classify_worker(
+                    stopped_at=row["stopped_at"],
+                    last_heartbeat_at=row["last_heartbeat_at"],
+                    now=now,
+                    stale_after=stale_after,
+                ),
+            )
+            for row in rows
+        ]
+
+    # -- expired-lease reclamation -------------------------------------------------------
+
+    def reclaim_next_expired_claim(
+        self, *, now: datetime, backoff: timedelta
+    ) -> ReclaimedClaim | None:
+        """Reconcile at most one expired active claim, or return None when none is eligible.
+
+        Authority is the expired Job lease plus the exact current claim tuple. Registry health,
+        wall-clock age, and Run status are never consulted. The candidate predicate admits only
+        *consistent* Job/Attempt pairings, so a selected row is always actionable and the caller
+        can never spin on an unreclaimable one.
+        """
+
+        def operation(connection: Connection) -> ReclaimedClaim | None:
+            candidate = (
+                connection.execute(
+                    select(
+                        JobRecord.id,
+                        JobRecord.run_id,
+                        JobRecord.status,
+                        JobRecord.claimed_by,
+                        JobRecord.claim_token,
+                        JobRecord.attempt_count,
+                        JobRecord.max_attempts,
+                        JobAttemptRecord.id.label("attempt_id"),
+                        JobAttemptRecord.attempt_number,
+                    )
+                    .select_from(JobRecord)
+                    .join(JobAttemptRecord, JobAttemptRecord.job_id == JobRecord.id)
+                    .where(
+                        JobRecord.lease_expires_at.is_not(None),
+                        JobRecord.lease_expires_at <= now,
+                        JobAttemptRecord.status.in_(
+                            (AttemptStatus.CLAIMED.value, AttemptStatus.RUNNING.value)
+                        ),
+                        or_(
+                            and_(
+                                JobRecord.status == JobStatus.CLAIMED.value,
+                                JobAttemptRecord.status == AttemptStatus.CLAIMED.value,
+                                JobAttemptRecord.execution_started_at.is_(None),
+                            ),
+                            and_(
+                                JobRecord.status == JobStatus.RUNNING.value,
+                                JobAttemptRecord.status == AttemptStatus.RUNNING.value,
+                                JobAttemptRecord.execution_started_at.is_not(None),
+                            ),
+                        ),
+                    )
+                    .order_by(JobRecord.lease_expires_at.asc(), JobRecord.id.asc())
+                    .limit(1)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if candidate is None:
+                return None
+            if candidate["status"] == JobStatus.CLAIMED.value:
+                if candidate["attempt_count"] < candidate["max_attempts"]:
+                    return self._reclaim_pre_start_requeue(connection, candidate, now, backoff)
+                return self._reclaim_pre_start_exhausted(connection, candidate, now)
+            return self._reclaim_post_start_ambiguous(connection, candidate, now)
+
+        try:
+            return self._runner.run(operation)
+        except _Fenced:
+            # A concurrent authority change won the race. Nothing was written.
+            return None
+
+    def _expire_pre_start_attempt(
+        self, connection: Connection, candidate: RowMapping, now: datetime
+    ) -> None:
+        """Close an expired pre-start Attempt as evidence, atomically fenced on the old claim."""
+        result = connection.execute(
+            update(JobAttemptRecord)
+            .where(
+                JobAttemptRecord.id == candidate["attempt_id"],
+                JobAttemptRecord.job_id == candidate["id"],
+                JobAttemptRecord.status == AttemptStatus.CLAIMED.value,
+                JobAttemptRecord.execution_started_at.is_(None),
+                JobAttemptRecord.worker_id == candidate["claimed_by"],
+                JobAttemptRecord.claim_token == candidate["claim_token"],
+                JobAttemptRecord.lease_expires_at <= now,
+            )
+            .values(
+                status=AttemptStatus.EXPIRED.value,
+                finished_at=now,
+                retry_disposition=RetryDisposition.SAFE_TO_RETRY.value,
+                error_code=None,
+                error_message=None,
+            )
+        )
+        if _rowcount(result) != 1:
+            raise _Fenced
+
+    def _clear_claim_values(self, now: datetime) -> dict[str, Any]:
+        return {
+            "updated_at": now,
+            "claimed_by": None,
+            "claim_token": None,
+            "lease_expires_at": None,
+            "last_heartbeat_at": None,
+        }
+
+    def _reclaim_pre_start_requeue(
+        self,
+        connection: Connection,
+        candidate: RowMapping,
+        now: datetime,
+        backoff: timedelta,
+    ) -> ReclaimedClaim:
+        """Case A: the boundary never committed and another claim is available."""
+        self._expire_pre_start_attempt(connection, candidate, now)
+        values = self._clear_claim_values(now)
+        values.update(
+            status=JobStatus.QUEUED.value,
+            available_at=now + backoff,
+            finished_at=None,
+            error_code=None,
+            error_message=None,
+        )
+        result = connection.execute(
+            update(JobRecord)
+            .where(
+                JobRecord.id == candidate["id"],
+                JobRecord.status == JobStatus.CLAIMED.value,
+                JobRecord.claimed_by == candidate["claimed_by"],
+                JobRecord.claim_token == candidate["claim_token"],
+                JobRecord.lease_expires_at <= now,
+            )
+            .values(**values)
+        )
+        if _rowcount(result) != 1:
+            raise _Fenced
+        base = _sequence_base(connection, int(candidate["run_id"]))
+        self._append_recovery_events(
+            connection, candidate, now, base, RunEventType.RECOVERY_PRE_START
+        )
+        return self._reclaimed(ReclamationKind.PRE_START_REQUEUED, candidate)
+
+    def _reclaim_pre_start_exhausted(
+        self, connection: Connection, candidate: RowMapping, now: datetime
+    ) -> ReclaimedClaim:
+        """Case B: the boundary never committed and the claim budget is spent.
+
+        The Run never started, so it is closed as `failed` with no `started_at` and no
+        `elapsed_ms`. Fabricating either would assert an execution window that never existed.
+        """
+        self._expire_pre_start_attempt(connection, candidate, now)
+        message = safe_error_message(WORKER_RECOVERY_EXHAUSTED)
+        values = self._clear_claim_values(now)
+        values.update(
+            status=JobStatus.FAILED.value,
+            finished_at=now,
+            error_code=WORKER_RECOVERY_EXHAUSTED,
+            error_message=message,
+        )
+        job_update = connection.execute(
+            update(JobRecord)
+            .where(
+                JobRecord.id == candidate["id"],
+                JobRecord.status == JobStatus.CLAIMED.value,
+                JobRecord.claimed_by == candidate["claimed_by"],
+                JobRecord.claim_token == candidate["claim_token"],
+                JobRecord.lease_expires_at <= now,
+            )
+            .values(**values)
+        )
+        if _rowcount(job_update) != 1:
+            raise _Fenced
+        run_update = connection.execute(
+            update(RunRecord)
+            .where(
+                RunRecord.id == candidate["run_id"],
+                RunRecord.status == RunStatus.CREATED.value,
+                RunRecord.started_at.is_(None),
+            )
+            .values(
+                status=RunStatus.FAILED.value,
+                finished_at=now,
+                error_code=WORKER_RECOVERY_EXHAUSTED,
+                error_message=message,
+            )
+        )
+        if _rowcount(run_update) != 1:
+            raise _Fenced
+        base = _sequence_base(connection, int(candidate["run_id"]))
+        self._append_recovery_events(
+            connection, candidate, now, base, RunEventType.RECOVERY_PRE_START
+        )
+        _append_event_on_connection(
+            connection,
+            run_id=int(candidate["run_id"]),
+            job_id=int(candidate["id"]),
+            attempt_id=int(candidate["attempt_id"]),
+            sequence=base + 3,
+            event_type=RunEventType.RUN_FAILED,
+            code=WORKER_RECOVERY_EXHAUSTED,
+            message=message,
+            attempt_number=int(candidate["attempt_number"]),
+            created_at=now,
+        )
+        return self._reclaimed(ReclamationKind.PRE_START_EXHAUSTED, candidate)
+
+    def _reclaim_post_start_ambiguous(
+        self, connection: Connection, candidate: RowMapping, now: datetime
+    ) -> ReclaimedClaim:
+        """The start boundary committed, so a provider call may have been issued: never replay."""
+        result = connection.execute(
+            update(JobAttemptRecord)
+            .where(
+                JobAttemptRecord.id == candidate["attempt_id"],
+                JobAttemptRecord.job_id == candidate["id"],
+                JobAttemptRecord.status == AttemptStatus.RUNNING.value,
+                JobAttemptRecord.execution_started_at.is_not(None),
+                JobAttemptRecord.worker_id == candidate["claimed_by"],
+                JobAttemptRecord.claim_token == candidate["claim_token"],
+                JobAttemptRecord.lease_expires_at <= now,
+            )
+            .values(
+                status=AttemptStatus.EXPIRED.value,
+                finished_at=now,
+                retry_disposition=RetryDisposition.AMBIGUOUS.value,
+                error_code=EXECUTION_OUTCOME_AMBIGUOUS,
+                error_message=safe_error_message(EXECUTION_OUTCOME_AMBIGUOUS),
+            )
+        )
+        if _rowcount(result) != 1:
+            raise _Fenced
+        started_at = connection.scalar(
+            select(RunRecord.started_at).where(RunRecord.id == candidate["run_id"])
+        )
+        message = safe_error_message(EXECUTION_OUTCOME_AMBIGUOUS)
+        values = self._clear_claim_values(now)
+        values.update(
+            status=JobStatus.FAILED.value,
+            finished_at=now,
+            error_code=EXECUTION_OUTCOME_AMBIGUOUS,
+            error_message=message,
+        )
+        job_update = connection.execute(
+            update(JobRecord)
+            .where(
+                JobRecord.id == candidate["id"],
+                JobRecord.status == JobStatus.RUNNING.value,
+                JobRecord.claimed_by == candidate["claimed_by"],
+                JobRecord.claim_token == candidate["claim_token"],
+                JobRecord.lease_expires_at <= now,
+            )
+            .values(**values)
+        )
+        if _rowcount(job_update) != 1:
+            raise _Fenced
+        run_update = connection.execute(
+            update(RunRecord)
+            .where(
+                RunRecord.id == candidate["run_id"],
+                RunRecord.status == RunStatus.RUNNING.value,
+                RunRecord.started_at.is_not(None),
+            )
+            .values(
+                status=RunStatus.FAILED.value,
+                finished_at=now,
+                elapsed_ms=_elapsed_ms(started_at, now),
+                error_code=EXECUTION_OUTCOME_AMBIGUOUS,
+                error_message=message,
+            )
+        )
+        if _rowcount(run_update) != 1:
+            raise _Fenced
+        base = _sequence_base(connection, int(candidate["run_id"]))
+        self._append_recovery_events(
+            connection, candidate, now, base, RunEventType.RECOVERY_AMBIGUOUS
+        )
+        _append_event_on_connection(
+            connection,
+            run_id=int(candidate["run_id"]),
+            job_id=int(candidate["id"]),
+            attempt_id=int(candidate["attempt_id"]),
+            sequence=base + 3,
+            event_type=RunEventType.RUN_FAILED,
+            code=EXECUTION_OUTCOME_AMBIGUOUS,
+            message=message,
+            attempt_number=int(candidate["attempt_number"]),
+            created_at=now,
+        )
+        return self._reclaimed(ReclamationKind.POST_START_AMBIGUOUS, candidate)
+
+    def _append_recovery_events(
+        self,
+        connection: Connection,
+        candidate: RowMapping,
+        now: datetime,
+        base: int,
+        event_type: RunEventType,
+    ) -> None:
+        """Append `attempt.expired` and the classification event from ONE high-water read.
+
+        The high-water mark is read exactly once by the caller: two independent `MAX(sequence)+1`
+        reads would allocate the same value and fail on the per-Run sequence unique constraint.
+        """
+        number = int(candidate["attempt_number"])
+        _append_event_on_connection(
+            connection,
+            run_id=int(candidate["run_id"]),
+            job_id=int(candidate["id"]),
+            attempt_id=int(candidate["attempt_id"]),
+            sequence=base + 1,
+            event_type=RunEventType.ATTEMPT_EXPIRED,
+            attempt_number=number,
+            created_at=now,
+        )
+        _append_event_on_connection(
+            connection,
+            run_id=int(candidate["run_id"]),
+            job_id=int(candidate["id"]),
+            attempt_id=int(candidate["attempt_id"]),
+            sequence=base + 2,
+            event_type=event_type,
+            attempt_number=number,
+            created_at=now,
+        )
+
+    def _reclaimed(self, kind: ReclamationKind, candidate: RowMapping) -> ReclaimedClaim:
+        return ReclaimedClaim(
+            kind=kind,
+            run_id=int(candidate["run_id"]),
+            job_id=int(candidate["id"]),
+            attempt_id=int(candidate["attempt_id"]),
+            attempt_number=int(candidate["attempt_number"]),
+        )
 
 
 __all__ = [

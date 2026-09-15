@@ -34,6 +34,7 @@ APPLICATION_TABLES = {
     "jobs",
     "job_attempts",
     "run_events",
+    "workers",
 }
 DEFAULT_DATABASE = (Path.home() / ".nervos" / "nervos.db").resolve(strict=False)
 
@@ -95,7 +96,7 @@ def test_upgrade_drift_downgrade_and_reupgrade(
         assert application_tables(engine) == APPLICATION_TABLES
         with engine.connect() as connection:
             current_revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
-            assert current_revision == "0003_stage_c1_durable_execution"
+            assert current_revision == "0004_stage_c3_worker_registry"
             assert connection.scalar(text("PRAGMA foreign_keys")) == 1
             assert connection.scalar(text("PRAGMA busy_timeout")) == 5000
         command.check(config)

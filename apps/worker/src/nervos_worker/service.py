@@ -1,9 +1,11 @@
-"""Stage C2 Worker: bounded execution slots over the durable queue.
+"""Stage C3 Worker: bounded execution slots, durable registry liveness, and reclamation.
 
 The Worker owns no HTTP surface and never migrates the database. Each slot claims at most one
-Job at a time, executes it through `JobExecutionService`, and returns to polling. Every
-blocking persistence call is dispatched off the event loop, because the synchronous SQLite
-driver would otherwise freeze an unrelated Job's heartbeat.
+Job at a time, executes it through `JobExecutionService`, and returns to polling. Two auxiliary
+tasks run beside the slots: a registry heartbeat that keeps this process incarnation observable,
+and a periodic sweep that reconciles expired claims. Every blocking persistence call is
+dispatched off the event loop, because the synchronous SQLite driver would otherwise freeze an
+unrelated Job's heartbeat.
 """
 
 from __future__ import annotations
@@ -22,7 +24,15 @@ from nervos_core.application.job_execution import (
     JobExecutionPersistence,
     JobExecutionService,
 )
+from nervos_core.application.lease_reclamation import WorkerLiveness
 from nervos_core.application.model_completion import ModelCompletion
+
+from nervos_worker.registry import (
+    RECLAIM_INTERVAL,
+    WORKER_HEARTBEAT_INTERVAL,
+    ReclaimLoop,
+    WorkerRegistry,
+)
 
 logger = logging.getLogger("nervos_worker")
 
@@ -44,9 +54,13 @@ class Worker:
         worker_id: str,
         concurrency: int,
         max_active: int,
+        registry: WorkerRegistry,
+        reclaimer: ReclaimLoop,
         poll_interval: float = DEFAULT_POLL_INTERVAL_SECONDS,
         idle_max: float = DEFAULT_IDLE_MAX_SECONDS,
         shutdown_grace: float = DEFAULT_SHUTDOWN_GRACE_SECONDS,
+        heartbeat_interval: float = WORKER_HEARTBEAT_INTERVAL.total_seconds(),
+        reclaim_interval: float = RECLAIM_INTERVAL.total_seconds(),
     ) -> None:
         if not 1 <= concurrency <= 16:
             raise ValueError("worker concurrency must be between 1 and 16")
@@ -59,9 +73,13 @@ class Worker:
         self._worker_id = worker_id
         self._concurrency = concurrency
         self._max_active = max_active
+        self._registry = registry
+        self._reclaimer = reclaimer
         self._poll_interval = poll_interval
         self._idle_max = idle_max
         self._shutdown_grace = shutdown_grace
+        self._heartbeat_interval = heartbeat_interval
+        self._reclaim_interval = reclaim_interval
 
     @property
     def provider_ids(self) -> tuple[str, ...]:
@@ -74,14 +92,71 @@ class Worker:
 
     async def run(self, stop: asyncio.Event) -> None:
         """Run until `stop` is set, then drain within the shutdown grace."""
+        # Confirm durable registration *before* any slot may claim. Doing this in the heartbeat
+        # task instead would be a race: a slot could claim and execute during the first heartbeat
+        # interval, which would let an unregistered incarnation do work.
+        liveness = await asyncio.to_thread(self._registry.heartbeat)
+        if liveness in (WorkerLiveness.UNREGISTERED, WorkerLiveness.STOPPED):
+            logger.warning("registry_identity_missing worker_id=%s", self._worker_id)
+            stop.set()
+            return
         slots = [
             asyncio.create_task(self._slot(index, stop), name=f"nervos-worker-slot-{index}")
             for index in range(self._concurrency)
         ]
+        auxiliary = [
+            asyncio.create_task(
+                self._registry_heartbeat(stop), name="nervos-worker-registry-heartbeat"
+            ),
+            asyncio.create_task(self._reclaim_periodically(stop), name="nervos-worker-reclaimer"),
+        ]
         try:
-            await self._wait_for_stop(stop, slots)
+            await self._wait_for_stop(stop, [*slots, *auxiliary])
         finally:
             await self._drain(slots)
+            for task in auxiliary:
+                task.cancel()
+            for task in auxiliary:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            await asyncio.to_thread(self._registry.stop)
+
+    async def _registry_heartbeat(self, stop: asyncio.Event) -> None:
+        """Renew registry liveness independently of every Job heartbeat.
+
+        A transient persistence failure here is observability-only and must never revoke an
+        active Job's authority: Job heartbeats continue on their own path and the lease remains
+        the sole execution authority. A *successful* write that finds no live row for this
+        incarnation is different: it contradicts the invariant that every executing Worker is
+        durably registered, so this Worker stops accepting new claims and begins an orderly
+        shutdown. In-flight work keeps its lease and follows the normal grace semantics.
+        """
+        while not stop.is_set():
+            try:
+                liveness = await asyncio.to_thread(self._registry.heartbeat)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("registry_heartbeat_deferred code=persistence_unavailable")
+            else:
+                if liveness in (WorkerLiveness.UNREGISTERED, WorkerLiveness.STOPPED):
+                    logger.warning("registry_identity_lost worker_id=%s", self._worker_id)
+                    stop.set()
+                    return
+            await self._idle(stop, self._heartbeat_interval)
+
+    async def _reclaim_periodically(self, stop: asyncio.Event) -> None:
+        """Sweep for expired claims on a bounded interval, one short transaction at a time."""
+        while not stop.is_set():
+            await self._idle(stop, self._reclaim_interval)
+            if stop.is_set():
+                return
+            try:
+                await asyncio.to_thread(self._reclaimer.sweep_once)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("reclamation_deferred code=internal_execution_error")
 
     async def _wait_for_stop(
         self, stop: asyncio.Event, slots: Sequence[asyncio.Task[None]]

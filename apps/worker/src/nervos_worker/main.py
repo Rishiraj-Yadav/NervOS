@@ -119,6 +119,13 @@ async def run_worker(settings: WorkerSettings) -> int:
             # A Worker with no configured provider starts successfully and claims nothing.
             # Missing local capability is a deployment absence, never a Job failure.
             logger.warning("no_providers_configured configured=0")
+        # Registration is mandatory: every executing incarnation must be durably observable, and
+        # a Worker that cannot register must not claim. Registration creates no Job state.
+        await asyncio.to_thread(composition.registry.register)
+        # One bounded reclamation pass before readiness. It needs no provider, so a Worker with
+        # no credential at all still reconciles work stranded by an earlier process.
+        await asyncio.to_thread(composition.reclaimer.startup_pass)
+        await asyncio.to_thread(composition.registry.log_summary)
         marker = settings.require_worker_ready_file()
         if marker is not None:
             write_ready_marker(marker, revision=revision, provider_ids=providers)

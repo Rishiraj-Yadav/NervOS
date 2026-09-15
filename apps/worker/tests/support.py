@@ -1,14 +1,16 @@
-"""Shared fixtures for the C2 Worker tests."""
+"""Shared fixtures for the C3 Worker tests."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from alembic import command
 from alembic.config import Config
 from nervos_core.application.job_execution import JobExecutionService
+from nervos_core.application.lease_reclamation import LeaseReclaimer, ReclaimedClaim
 from nervos_core.application.model_completion import (
     ModelCompletion,
     ModelRequest,
@@ -24,6 +26,7 @@ from nervos_core.infrastructure.database.jobs import (
     SqlAlchemyJobExecutionPersistence,
     SqlAlchemyJobPersistence,
 )
+from nervos_worker.registry import ReclaimLoop, WorkerRegistry
 from nervos_worker.service import Worker
 from sqlalchemy import Engine, text
 
@@ -134,6 +137,28 @@ def event_types(engine: Engine, run_id: int) -> list[str]:
         )
 
 
+def worker_rows(engine: Engine) -> list[dict[str, object]]:
+    """Every registry row, ordered by insertion, as the C3 tests need to inspect them."""
+    with engine.connect() as connection:
+        return [
+            dict(row)
+            for row in connection.execute(
+                text(
+                    "SELECT worker_id, started_at, last_heartbeat_at, stopped_at"
+                    " FROM workers ORDER BY id"
+                )
+            )
+            .mappings()
+            .all()
+        ]
+
+
+def reclaim_expired_claim(engine: Engine, *, now: datetime) -> ReclaimedClaim | None:
+    """Force one reclamation pass at an explicit instant, bypassing the Worker loop."""
+    persistence = SqlAlchemyJobExecutionPersistence(engine, sleep=lambda _: None)
+    return persistence.reclaim_next_expired_claim(now=now, backoff=timedelta(seconds=5))
+
+
 class RecordingCompletion:
     """Deterministic offline completion double recording every provider call."""
 
@@ -182,21 +207,41 @@ def build_worker(
     poll_interval: float = 0.01,
     idle_max: float = 0.02,
     shutdown_grace: float = 2.0,
+    heartbeat_interval: float = 3600.0,
+    reclaim_interval: float = 3600.0,
+    register: bool = True,
+    clock: Callable[[], datetime] | None = None,
 ) -> Worker:
-    """Compose the shipped Worker loop over disposable persistence."""
+    """Compose the shipped Worker loop over disposable persistence.
+
+    The registry and reclaimer are real, not doubles, so every Worker test exercises the shipped
+    registration path. Both auxiliary loops default to a very long interval so they stay out of
+    the way of tests that are not about them.
+    """
+    now = clock or (lambda: NOW)
     _persistence, execution = build_execution_service(engine, completions)
-    return Worker(
+    registry = WorkerRegistry(_persistence, worker_id, clock=now)
+    worker = Worker(
         _persistence,
         execution,
         completions,
-        clock=lambda: NOW,
+        clock=now,
         worker_id=worker_id,
         concurrency=concurrency,
         max_active=max_active,
+        registry=registry,
+        reclaimer=ReclaimLoop(LeaseReclaimer(_persistence), clock=now),
         poll_interval=poll_interval,
         idle_max=idle_max,
         shutdown_grace=shutdown_grace,
+        heartbeat_interval=heartbeat_interval,
+        reclaim_interval=reclaim_interval,
     )
+    # Register only once the Worker itself has accepted its configuration, so an invalid
+    # concurrency/max_active fails on validation rather than on a database call.
+    if register:
+        registry.register()
+    return worker
 
 
 async def run_until_stopped(worker: Worker, engine: Engine) -> None:

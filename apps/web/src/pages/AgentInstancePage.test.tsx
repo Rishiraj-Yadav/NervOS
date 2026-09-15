@@ -303,13 +303,42 @@ describe("agent detail page", () => {
     expect(screen.getByText(/a worker must be running to execute this run/i)).toBeVisible();
   });
 
-  it("renders a running run with the truthful crash recovery limitation copy", async () => {
+  it("renders a running run with the truthful crash recovery copy", async () => {
     server.use(...detailHandlers({ runs: [apiRun({ status: "running", output_text: null })] }));
 
     await renderRoute("/agents/1");
 
     expect(await screen.findByText("Running")).toBeVisible();
-    expect(screen.getByText(/does not yet recover or retry it/i)).toBeVisible();
+    expect(screen.getByText(/closes this run as failed without replaying it/i)).toBeVisible();
+  });
+
+  it("renders a run closed before execution started without a duration or start", async () => {
+    // C3's exhausted pre-start recovery produces a failed Run with no `started_at` and no
+    // `elapsed_ms`. There is no `durationMs`/`startedAt` fallback to a raw value, so the row
+    // must render the safe message and code and nothing else.
+    server.use(
+      ...detailHandlers({
+        runs: [
+          apiRun({
+            status: "failed",
+            output_text: null,
+            elapsed_ms: null,
+            started_at: null,
+            usage: null,
+            error_code: "worker_recovery_exhausted",
+            error_message:
+              "NervOS could not start this run after repeated worker losses, so it was closed"
+              + " without invoking the model.",
+          }),
+        ],
+      }),
+    );
+
+    await renderRoute("/agents/1");
+
+    expect(await screen.findByText("Failed")).toBeVisible();
+    expect(screen.getByText(/closed without invoking the model/i)).toBeVisible();
+    expect(screen.getByText(/worker_recovery_exhausted/)).toBeVisible();
   });
 
   it("says so when the run history may be truncated rather than looking complete", async () => {
