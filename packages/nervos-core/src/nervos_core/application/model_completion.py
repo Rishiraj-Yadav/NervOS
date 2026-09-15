@@ -6,7 +6,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Protocol
 
-from nervos_core.domain.runs import ModelUsage
+from nervos_core.domain.runs import WORKER_RECOVERY_EXHAUSTED, ModelUsage
 
 # Static NervOS-owned messages. Provider text, bodies, and credentials never appear here.
 MODEL_AUTHENTICATION_FAILED = "model_authentication_failed"
@@ -25,6 +25,11 @@ INTERNAL_EXECUTION_ERROR = "internal_execution_error"
 # response, and it lives in the same allowlist as every provider code precisely so that there
 # is exactly one place that decides which codes may ever be persisted and what they say.
 EXECUTION_OUTCOME_AMBIGUOUS = "execution_outcome_ambiguous"
+# Infrastructural closeout code for a Run that never reached the execution-start boundary and
+# whose Job exhausted its claim budget to repeated Worker losses. It is not a provider error, a
+# timeout, a cancellation, or a retry disposition: execution provably never began, so this code
+# is what licenses the one `failed` Run shape that carries no `started_at`. The code itself is
+# owned by the domain, because `Run` validation is what enforces the shape it licenses.
 
 # The single authority for every persistable code and its static NervOS-owned message.
 # The database bounds `error_code` only by length, so nothing in SQLite stops a raw exception
@@ -46,6 +51,10 @@ SAFE_ERROR_MESSAGES: Mapping[str, str] = MappingProxyType(
         EXECUTION_OUTCOME_AMBIGUOUS: (
             "NervOS could not determine whether this run's model request completed, so it was "
             "closed as failed rather than replayed."
+        ),
+        WORKER_RECOVERY_EXHAUSTED: (
+            "NervOS could not start this run after repeated worker losses, so it was closed "
+            "without invoking the model."
         ),
     }
 )

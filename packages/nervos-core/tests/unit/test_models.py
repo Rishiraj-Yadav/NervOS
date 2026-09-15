@@ -20,6 +20,7 @@ def test_metadata_contains_exact_application_tables() -> None:
         "jobs",
         "job_attempts",
         "run_events",
+        "workers",
     }
 
 

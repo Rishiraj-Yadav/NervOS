@@ -82,7 +82,7 @@ Beyond health, setup, and authentication, the API currently serves exactly two o
 
 Routes depend on **application services** (`AgentService`, the durable submission service, and `ModelProviderCatalog`) resolved from `app.state`. No route module imports SQLAlchemy, `nervos_core.infrastructure`, `anthropic`, or `nervos_models`, and exactly one route calls the durable submission service. The control plane cannot claim, start, heartbeat, or terminalize Jobs.
 
-C2 activates only the minimal Worker execution plane. Registry, installation, schedules, tools, memory, permissions, Marketplace, SDK, cancellation, retries, recovery, worker health, and event streaming remain target architecture.
+C2 activated the minimal Worker execution plane, and C3 added durable Worker liveness plus expired-lease reconciliation. Installation, schedules, tools, memory, permissions, Marketplace, SDK, cancellation, execution retries, and event streaming remain target architecture.
 
 ## Execution plane
 
@@ -112,7 +112,7 @@ React dashboard. It never accesses the database directly.
 
 ### `apps/worker`
 
-C2 execution Worker entrypoint. It claims eligible queued Jobs, renews leases while executing, delegates trusted Run execution to core services, and writes terminal Job/Attempt/Run state. It has no HTTP surface and never runs Alembic.
+C2/C3 execution Worker entrypoint. It registers its process incarnation in the durable `workers` registry, heartbeats that registration, and reconciles expired Job claims (once at startup and periodically) in addition to claiming eligible queued Jobs, renewing leases while executing, delegating trusted Run execution to core services, and writing terminal Job/Attempt/Run state. It has no HTTP surface and never runs Alembic. Registry health is observability only; the Job lease remains execution authority, as frozen by ADR 0010.
 
 ### `packages/nervos-core`
 

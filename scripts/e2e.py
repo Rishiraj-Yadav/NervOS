@@ -9,9 +9,11 @@ import os
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -26,6 +28,11 @@ API_READY_TIMEOUT = 15.0
 WORKER_READY_TIMEOUT = 20.0
 WEB_READY_TIMEOUT = 20.0
 PLAYWRIGHT_TIMEOUT = 120.0
+# Test-only lease granted to the pre-start crash claim, and the margin the supervisor waits
+# past it before starting the recovery Worker. Bounded by construction: the claim lease is
+# this short on purpose, so expiry is deterministic rather than a 60-second wait.
+CRASH_LEASE_SECONDS = 1
+RECOVERY_GRACE_SECONDS = 2
 
 
 @dataclass(frozen=True)
@@ -241,6 +248,13 @@ def run_e2e() -> int:
         # browser journey creates it after it has observed the queued Run, which makes the
         # queued state a deterministic precondition of execution instead of a race.
         worker_claim_gate = temporary / "worker-claim-gate.txt"
+        # C3 pre-start recovery seam. Worker A claims one Job and exits before the
+        # execution-start boundary; the supervisor waits for that marker and then starts
+        # Worker B, whose startup reclamation pass must reconcile the expired claim.
+        worker_crash_marker = temporary / "worker-crash.txt"
+        worker_b_marker = temporary / "worker-b-ready.txt"
+        provider_ledger = temporary / "provider-calls.txt"
+        worker_b_log_path = temporary / "worker-b.log"
         api_reservation = PortReservation()
         web_reservation = PortReservation()
         api_port = api_reservation.port
@@ -252,6 +266,15 @@ def run_e2e() -> int:
             **environment,
             "NERVOS_WORKER_READY_FILE": str(worker_marker),
             "NERVOS_E2E_CLAIM_GATE": str(worker_claim_gate),
+            "NERVOS_E2E_PRE_START_CRASH": str(worker_crash_marker),
+            "NERVOS_E2E_CLAIM_LEASE_SECONDS": str(CRASH_LEASE_SECONDS),
+            "NERVOS_E2E_PROVIDER_CALL_LOG": str(provider_ledger),
+        }
+        # Worker B is the recovery Worker: it must claim freely, so it gets no claim gate.
+        worker_b_environment = {
+            **environment,
+            "NERVOS_WORKER_READY_FILE": str(worker_b_marker),
+            "NERVOS_E2E_PROVIDER_CALL_LOG": str(provider_ledger),
         }
         web_environment = {**environment, "NERVOS_E2E_API_ORIGIN": api_origin}
         playwright_environment = {
@@ -273,6 +296,7 @@ def run_e2e() -> int:
             with (
                 api_log_path.open("wb") as api_log,
                 worker_log_path.open("wb") as worker_log,
+                worker_b_log_path.open("wb") as worker_b_log,
                 vite_log_path.open("wb") as vite_log,
                 playwright_log_path.open("wb") as playwright_log,
             ):
@@ -359,10 +383,40 @@ def run_e2e() -> int:
                     playwright_log,
                 )
                 processes.append(playwright)
+                # Watch for Worker A's pre-start loss on a side thread and bring up the recovery
+                # Worker while the browser journey is still running. The delay between the two is
+                # bounded by the test-only lease, never by luck: the crash claim uses
+                # CRASH_LEASE_SECONDS. Playwright keeps its blocking wait, so the supervisor's
+                # existing timeout contract is unchanged.
+                recovery: dict[str, object] = {"started": False, "calls_before": -1}
+                watcher = threading.Thread(
+                    target=start_recovery_worker_when_crashed,
+                    args=(
+                        worker_crash_marker,
+                        worker_b_marker,
+                        worker_b_environment,
+                        worker_b_log,
+                        provider_ledger,
+                        processes,
+                        recovery,
+                    ),
+                    name="nervos-e2e-recovery",
+                    daemon=True,
+                )
+                watcher.start()
                 try:
                     returncode = playwright.wait(timeout=PLAYWRIGHT_TIMEOUT)
                 except subprocess.TimeoutExpired as error:
                     raise RuntimeError("Playwright exceeded its 120 second timeout") from error
+                watcher.join(timeout=WORKER_READY_TIMEOUT)
+                assert_recovery_journey(
+                    database=database,
+                    worker_crash_marker=worker_crash_marker,
+                    provider_ledger=provider_ledger,
+                    calls_before_recovery=int(recovery["calls_before"]),  # type: ignore[arg-type]
+                    worker_b_started=bool(recovery["started"]),
+                    crash_log=log_tail(worker_log_path),
+                )
                 if returncode != 0:
                     print(log_tail(playwright_log_path), file=sys.stderr)
                 return returncode
@@ -375,6 +429,126 @@ def run_e2e() -> int:
                 raise RuntimeError(f"E2E modified the default database at {DEFAULT_DATABASE}")
             if cleanup_failed:
                 raise RuntimeError("An owned E2E process tree survived cleanup")
+
+
+def start_recovery_worker_when_crashed(
+    crash_marker: Path,
+    ready_marker: Path,
+    environment: dict[str, str],
+    log: IO[bytes],
+    ledger: Path,
+    processes: list[subprocess.Popen[bytes]],
+    record: dict[str, object],
+) -> None:
+    """Wait for Worker A's pre-start loss, then start the Worker that must reclaim it.
+
+    Runs on a side thread so Playwright keeps its blocking wait. The delay between the crash and
+    the recovery Worker is bounded by the test-only lease plus a fixed margin, so expiry is
+    deterministic rather than a race against the production 60-second lease.
+    """
+    deadline = time.monotonic() + PLAYWRIGHT_TIMEOUT
+    while time.monotonic() < deadline:
+        if crash_marker.exists():
+            time.sleep(CRASH_LEASE_SECONDS + RECOVERY_GRACE_SECONDS)
+            record["calls_before"] = count_provider_calls(ledger)
+            worker = start_process(
+                [sys.executable, "tests/e2e_support/e2e_worker.py"],
+                environment,
+                log,
+            )
+            processes.append(worker)
+            wait_for_worker_ready(ready_marker, worker, WORKER_READY_TIMEOUT)
+            record["started"] = True
+            return
+        time.sleep(0.05)
+
+
+def count_provider_calls(ledger: Path) -> int:
+    """Count provider invocations the deterministic doubles actually performed."""
+    if not ledger.exists():
+        return 0
+    return len([line for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip()])
+
+
+def assert_recovery_journey(
+    *,
+    database: Path,
+    worker_crash_marker: Path,
+    provider_ledger: Path,
+    calls_before_recovery: int,
+    worker_b_started: bool,
+    crash_log: str,
+) -> None:
+    """Prove the C3 pre-start recovery path actually happened, not just that the Run finished.
+
+    The browser alone cannot distinguish "recovered then executed" from "never crashed", so the
+    supervisor checks the durable timeline and the provider ledger directly.
+    """
+    if not worker_crash_marker.exists():
+        raise RuntimeError(f"Worker A never claimed a Job before starting\n{crash_log}")
+    if not worker_b_started:
+        raise RuntimeError("Worker A crashed but the recovery Worker was never started")
+    if calls_before_recovery != 0:
+        raise RuntimeError(
+            f"a provider was invoked {calls_before_recovery} time(s) before recovery; a Worker"
+            " that died before the execution-start boundary must invoke none"
+        )
+    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    try:
+        first_run = connection.execute("SELECT min(id) FROM runs").fetchone()[0]
+        timeline = [
+            row[0]
+            for row in connection.execute(
+                "SELECT event_type FROM run_events WHERE run_id=? ORDER BY sequence",
+                (first_run,),
+            )
+        ]
+        claims = [
+            row[0]
+            for row in connection.execute(
+                "SELECT attempt_number FROM job_attempts WHERE job_id="
+                "(SELECT id FROM jobs WHERE run_id=?) ORDER BY attempt_number",
+                (first_run,),
+            )
+        ]
+        started = connection.execute(
+            "SELECT count(*) FROM run_events WHERE run_id=? AND event_type='attempt.started'",
+            (first_run,),
+        ).fetchone()[0]
+        abandoned = connection.execute(
+            "SELECT execution_started_at FROM job_attempts WHERE job_id="
+            "(SELECT id FROM jobs WHERE run_id=?) AND attempt_number=1",
+            (first_run,),
+        ).fetchone()
+        status = connection.execute("SELECT status FROM runs WHERE id=?", (first_run,)).fetchone()[
+            0
+        ]
+    finally:
+        connection.close()
+
+    expected = [
+        "run.created",
+        "run.queued",
+        "attempt.claimed",
+        "attempt.expired",
+        "recovery.pre_start",
+        "attempt.claimed",
+        "attempt.started",
+        "run.succeeded",
+    ]
+    if timeline != expected:
+        raise RuntimeError(f"recovery timeline was {timeline}, expected {expected}")
+    if claims != [1, 2]:
+        raise RuntimeError(f"expected a second numbered Attempt after recovery, saw {claims}")
+    if abandoned is None or abandoned[0] is not None:
+        raise RuntimeError("the abandoned first Attempt crossed the execution-start boundary")
+    if started != 1:
+        raise RuntimeError(f"the recovered Run started execution {started} time(s), expected 1")
+    if status != "succeeded" or count_provider_calls(provider_ledger) != 2:
+        raise RuntimeError(
+            f"recovered Run status was {status!r} with"
+            f" {count_provider_calls(provider_ledger)} provider call(s) overall"
+        )
 
 
 def main() -> int:

@@ -73,7 +73,7 @@ make check
 make clean-check
 ```
 
-Lint, typecheck, backend/database tests, the tracked-file security scan, deterministic Playwright E2E, and the development launchers are implemented. `dev-api` migrates the configured SQLite database before starting Uvicorn; migration failure prevents server startup. `dev-worker` starts the C2 Worker against the already-migrated database and never runs Alembic. `dev-web` starts the Vite application. The production frontend build is verified separately with `pnpm build`.
+Lint, typecheck, backend/database tests, the tracked-file security scan, deterministic Playwright E2E, and the development launchers are implemented. `dev-api` migrates the configured SQLite database before starting Uvicorn; migration failure prevents server startup. `dev-worker` starts the Stage C Worker against the already-migrated database and never runs Alembic. `dev-web` starts the Vite application. The production frontend build is verified separately with `pnpm build`.
 
 `check` is the routine gate: lint, typecheck, tests, and the security scan. It deliberately excludes E2E, because routine work must never require Chromium or spawn services. **Full verification is `check` then `e2e`**, exactly as CI runs it. See [continuous integration](ci.md).
 
@@ -135,7 +135,7 @@ Or, where GNU Make is available:
 make test-e2e
 ```
 
-The Python supervisor creates a unique temporary run directory and SQLite database on every invocation, runs Alembic before starting any server, starts the API, Worker, Vite, and Playwright processes, selects distinct dynamic IPv4 loopback ports, and derives one consistent `127.0.0.1` browser Origin for FastAPI, Vite, and Playwright. Worker readiness is a test-only marker file written after settings load, schema validation, and deterministic provider resolution. Vite keeps `/api` relative and unrewritten with `changeOrigin: false`; the E2E-only environment override changes only its proxy target.
+The Python supervisor creates a unique temporary run directory and SQLite database on every invocation, runs Alembic before starting any server, starts the API, Worker, Vite, and Playwright processes, selects distinct dynamic IPv4 loopback ports, and derives one consistent `127.0.0.1` browser Origin for FastAPI, Vite, and Playwright. Worker readiness is a test-only marker file written after settings load, schema validation, provider resolution, durable registration, and the startup reclamation pass. The supervisor also runs a second Worker for the C3 pre-start recovery journey: the first claims one Job and is lost before the execution-start boundary, and the second reconciles that expired claim and executes it exactly once. Vite keeps `/api` relative and unrewritten with `changeOrigin: false`; the E2E-only environment override changes only its proxy target.
 
 Readiness uses bounded semantic HTTP polling and child-liveness checks rather than startup sleeps. The supervisor owns and cleans the exact Uvicorn, Vite, Playwright, and Chromium process trees on success, failure, timeout, or interruption. It fingerprints the default NervOS database before and after each run. Playwright traces and screenshots are retained only on failure under ignored output paths; temporary databases and logs are removed after process handles close.
 

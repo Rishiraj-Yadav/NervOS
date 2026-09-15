@@ -2,7 +2,7 @@
 
 ## Current phase
 
-Stage C — Persistent execution engine is IN PROGRESS. The C0 architecture freeze, the C1 durable execution foundation, and C2 — asynchronous submission and minimal durable Worker execution — are implemented, merged to `main`, and post-merge verified. C3 has not started.
+Stage C — Persistent execution engine is IN PROGRESS. The C0 architecture freeze, the C1 durable execution foundation, C2 — asynchronous submission and minimal durable Worker execution — and C3 — Worker registry/health, expired-lease reconciliation, and fencing hardening — are implemented, externally reviewed, and accepted. C4 has not started.
 
 Stage B — Trusted-agent runtime proof is complete and accepted. B1 domain/persistence, B2 internal one-call execution, B3 trusted Agent/Run HTTP API with the minimal Chat dashboard interaction, and B4 second-provider portability are implemented, merged to `main`, and post-merge verified.
 
@@ -11,8 +11,8 @@ Stage B — Trusted-agent runtime proof is complete and accepted. B1 domain/pers
 - [x] C0 — Durable execution architecture freeze (documentation/governance only; no schema, no implementation)
 - [x] C1 — Durable execution foundation (dormant Job/Attempt/RunEvent domain, `0003` migration, schema-parity protection)
 - [x] C2 — Asynchronous submission and minimal durable Worker execution
-- [ ] C3 — Not started
-- [ ] C4 — Not started
+- [x] C3 — Worker registry/health, expired-lease reconciliation, and fencing hardening
+- [ ] C4 — Not started (safe execution retry engine)
 - [ ] C5 — Not started
 - [ ] C6 — Not started
 - [ ] C7 — Not started
@@ -21,8 +21,13 @@ Stage B — Trusted-agent runtime proof is complete and accepted. B1 domain/pers
 C2 passed external source review after a bounded remediation pass, passed every hosted check on pull
 request [#11](https://github.com/Rishiraj-Yadav/NervOS/pull/11), and was merged to `main` in merge
 commit `21a588452b5a01f5bd099d21ccaacd7f7584b483`. The long-lived `stage-c` branch was
-fast-forwarded to that merged state. C3 through C8 have no implementation and require separate
-planning, external plan review, and explicit implementation authorization.
+fast-forwarded to that merged state.
+
+C3 passed external source review of its plan, then external implementation review, then a dedicated
+E2E acceptance remediation that added the deterministic pre-start recovery journey. It is authored
+and verified together with this status update in a single C3 milestone change. C4 through C8 have no
+implementation and require separate planning, external plan review, and explicit implementation
+authorization.
 
 ## Stage B milestones
 
@@ -277,13 +282,37 @@ C2 enforces a hard global pending cap (`NERVOS_MAX_PENDING_JOBS`) in the submiss
 
 Still absent after C2: expired-lease recovery and reconciliation, automatic execution retries, retry scheduling, cancellation, per-Agent concurrency, per-provider concurrency, fairness, queue partitions, a public Run Events API, an event-timeline UI, SSE and WebSockets, a Workers table/registry, worker-health tracking, scheduling, tools/MCP, memory, package installation, marketplace, and persistent secret management.
 
-Migration head remains `0003_stage_c1_durable_execution`; no `0004` exists. C2 changed no migration, no ORM model module, and no provider adapter.
+At C2 completion the migration head was `0003_stage_c1_durable_execution`; no `0004` existed. C2 changed no migration, no ORM model module, and no provider adapter. (C3 later added `0004_stage_c3_worker_registry`; see the C3 section.)
 
-Lease renewal is liveness, not crash recovery. A Job that is already `claimed` or `running` when its Worker dies remains stranded — neither retried nor requeued — until C3 reconciliation. After its lease expires it stops consuming active capacity, but C2 does not reclaim it, and no test asserts otherwise. Legacy `running` Runs with no Job can be closed only by the explicit operator command `python -m nervos_worker --reconcile-legacy-runs`; legacy `created` Runs with no Job are left untouched.
+At C2 completion, lease renewal was liveness, not crash recovery. A Job that was already `claimed` or `running` when its Worker died remained stranded — neither retried nor requeued — because C2 shipped no reconciler. C3 supersedes this: expired claims are now reconciled automatically. Legacy `running` Runs with no Job can be closed only by the explicit operator command `python -m nervos_worker --reconcile-legacy-runs`; legacy `created` Runs with no Job are left untouched.
 
 C2 verification added durable submission, capacity, claim-concurrency, terminalization, lease/heartbeat, contention/replay, Worker-loop, Worker-config/credential, multi-Agent, API, frontend polling, E2E-supervisor, and architecture-guard coverage. The accepted candidate passed 642 Python tests, 46 Worker tests, and 91 frontend tests; Ruff lint and format; Pyright with zero errors and zero warnings; frontend lint, typecheck, and production build; the repository security scan (258 files, no findings); the migration upgrade/current/check/downgrade/re-upgrade lifecycle on a disposable database; the deterministic API + Worker + Web browser journey twice; and the isolated `clean-check` gate. The protected migrations, ORM model module, and both provider adapters were byte-identical throughout, and the default `~/.nervos/nervos.db` was unchanged. Every check passed on GitHub-hosted runners for pull request [#11](https://github.com/Rishiraj-Yadav/NervOS/pull/11).
 
+## C3 implementation verification
+
+C3 activates durable Worker liveness and recovery. It passed external source review of its plan, external implementation review, and a dedicated E2E acceptance remediation.
+
+**Migration.** `0004_stage_c3_worker_registry` creates the `workers` table and performs one narrow, externally approved `runs` lifecycle evolution. `0001`, `0002`, and `0003` are byte-identical to their C2 state. SQLite cannot alter a CHECK in place, so `runs` is rebuilt value-for-value inside Alembic's `autocommit_block()` — necessary because the migration harness installs `PRAGMA foreign_keys=ON` and wraps migrations in a transaction, which makes an in-transaction foreign-key disable a silent no-op and would fail the drop against `runs`' two RESTRICT children. A `PRAGMA foreign_key_check` afterwards raises if integrity was not preserved. The downgrade refuses rather than rewriting history if any Run was closed before execution started.
+
+**Worker registry.** Each process incarnation registers a durable row and never recycles another incarnation's identity; a restart draws a new id and therefore a new row. `worker_id` is unique, and the row carries only identity and liveness timestamps. The registry heartbeat is **monotonic**: the write refuses to move `last_heartbeat_at` backwards, so a wall-clock adjustment cannot make a healthy process look older. Health is **derived** from timestamps — `stopped` when `stopped_at` is set, otherwise `healthy` or `stale` by heartbeat recency — and is never stored as a mutable state, so it cannot contradict its own evidence. **Stale means "not observed recently", never "definitely dead".**
+
+**Authority.** Worker registry health is observability. The **Job lease is execution authority.** A successful registry heartbeat that finds no live row for this incarnation (or a stopped one) contradicts the invariant that every executing Worker is registered, so the Worker stops accepting new claims and shuts down in an orderly way; in-flight work keeps its own lease. Staleness of a registry row never reclaims a Job.
+
+**Recovery.** Reconciliation selects a Job with `status IN ('claimed','running')` and `lease_expires_at <= now`, re-reads its active Attempt, and CAS-checks the exact claim tuple before mutating. Classification uses only the committed execution-start boundary:
+
+- *Pre-start* (`execution_started_at IS NULL`): the boundary provably never committed. With claim budget remaining, the Attempt becomes `expired` with `SAFE_TO_RETRY` and the Job returns to `queued` with a fixed backoff, so a deterministic crasher cannot be re-claimed in a hot loop; the Run stays `created`. When the claim budget is exhausted, the Job and Run are closed truthfully (below).
+- *Post-start* (`execution_started_at IS NOT NULL`): a provider call may have been issued. The Attempt becomes `expired` with `AMBIGUOUS`, and the Job and Run fail with `execution_outcome_ambiguous` using the Run's **real** `started_at` and a **real** `elapsed_ms`. It is **never replayed**.
+
+No provider call is made on any recovery path. Reconciliation runs once at Worker startup, bounded, and periodically thereafter, and needs no configured provider — a credential-free Worker still reconciles. Concurrent reconcilers are one-winner via `BEGIN IMMEDIATE` plus row-count CAS with no leader election.
+
+**The narrow failed-before-start Run shape.** When repeated pre-start Worker loss exhausts a Job's claim budget, the Run is closed as `status='failed'` with `started_at` NULL, `elapsed_ms` NULL, no output, no finish reason, no usage, and `error_code='worker_recovery_exhausted'`. The Run-lifecycle CHECK was relaxed for exactly this case and no other: the started-`failed` branch excludes that code, and the never-started branch requires it. Execution provably never began and no model request was issued for those Attempts, so NervOS records no `started_at` and no `elapsed_ms` rather than fabricating them. **This is not cancellation** — it is an infrastructure recovery-budget exhaustion, and C5 still owns cancellation.
+
+**Explicitly not provided by C3.** No automatic model/provider execution retries, no `retry_wait` scheduling, no execution backoff policy, no cancellation, no per-Agent or per-provider concurrency, no fairness or queue partitions, no public Run Events API, no event timeline, no Worker dashboard, no SSE/WebSockets. Provider SDK retries remain `max_retries=0` and there is no provider or model fallback. C3 does not claim exactly-once execution.
+
+**Verification.** The accepted C3 candidate passed 661 Python tests (54 of them Worker tests) and 92 frontend tests; Ruff lint and format; Pyright with zero errors and zero warnings; frontend lint, typecheck, and production build; the repository security scan (261 files, no findings); the architecture guards (24, including new C3 boundary guards); the migration upgrade/current/check/downgrade/re-upgrade lifecycle — including a populated `0003` database — on disposable paths; a dedicated deterministic pre-start recovery browser journey that asserts the durable timeline `attempt.claimed → attempt.expired → recovery.pre_start → attempt.claimed → attempt.started → run.succeeded`, that the abandoned Attempt never crossed the execution-start boundary, and that zero provider calls occurred before recovery; the full deterministic API + Worker + Web journey repeatedly; `make check`; and the isolated `clean-check` gate. Protected files were byte-identical throughout, the default `~/.nervos/nervos.db` was unchanged, and no live provider request was made.
+
 ## C0 architecture verification
+
 
 C0 was an architecture freeze and governance milestone only: it changed no repository file, added no schema, and implemented no behavior. It fixed the durable single-host execution engine boundaries that C1 onward must honor — the separation of Agent Definition, Agent Instance, Run, Job, Attempt, Run Event, and Worker; the Run, Job, and Attempt state vocabularies; the internal `SAFE_TO_RETRY`/`DO_NOT_RETRY`/`AMBIGUOUS` retry disposition; the rule that worker loss before external execution starts is safely recoverable while loss after `execution_started_at` is ambiguous and never blindly replayed; `BEGIN IMMEDIATE` claim serialization with commit before dispatch; the partial unique active-Attempt index; and per-Run `MAX(sequence) + 1` Run Event allocation.
 
@@ -301,9 +330,9 @@ Verification: the full Python suite (569 tests), the frontend suite (85 tests), 
 
 ## Next action
 
-C2 is complete and merged. The production Run `POST` durably accepts work with HTTP 202, a separate `apps/worker` process executes claimed Jobs, and the control plane holds no provider credential. C2 passed external source review after a bounded remediation pass, passed every hosted check on pull request [#11](https://github.com/Rishiraj-Yadav/NervOS/pull/11), and was merged to `main` in merge commit `21a588452b5a01f5bd099d21ccaacd7f7584b483`. Local `main`, `origin/main`, `stage-c`, and `origin/stage-c` are all synchronized to that merge commit, and `stage-c` is retained for C3 through C8.
+C3 is complete and externally accepted. NervOS durably registers every Worker process incarnation, derives its health from heartbeats, and automatically reconciles Job claims whose lease has expired: work lost before the execution-start boundary is recovered and re-queued, and work lost after it is closed as ambiguous rather than replayed. The control plane still holds no provider credential and cannot claim, start, or terminalize a Job.
 
-The next milestone is **C3 — Worker registry/health, lease recovery/reconciliation, and fencing hardening**. C3 has **not** started, and it requires separate planning, external plan review, and explicit implementation authorization. No C3 design beyond the existing roadmap and the C0 architecture freeze is settled.
+The next engineering milestone is **C4 — the safe execution retry engine**. C4 has **not** started, and it requires separate planning, external plan review, and explicit implementation authorization. C4 owns provider execution retries, `SAFE_TO_RETRY` re-execution, `retry_wait`, retry scheduling/backoff, and any approved refinement of the claim-loss versus model-retry budget accounting. Nothing beyond the existing roadmap and the C0/C3 architecture freezes is settled.
 
 Stage C — Persistent execution engine is in progress. The C0 architecture freeze is complete. C1 passed external implementation and remediation review, was finalized as implementation commit `8e9c9da`, and was merged to `main` in merge commit `6d54eac`.
 

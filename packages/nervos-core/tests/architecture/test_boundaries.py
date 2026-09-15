@@ -24,6 +24,7 @@ EXPECTED_TABLES = {
     "jobs",
     "job_attempts",
     "run_events",
+    "workers",
 }
 FORBIDDEN_SUBSYSTEMS = (
     "conversation",
@@ -174,6 +175,7 @@ def test_b3_route_surface_and_migration_freeze() -> None:
         "0001_stage_a_schema.py",
         "0002_stage_b1_agent_instances_runs.py",
         "0003_stage_c1_durable_execution.py",
+        "0004_stage_c3_worker_registry.py",
     ]
 
 
@@ -197,10 +199,11 @@ def test_b3_creation_gate_pins_the_shared_trusted_definition() -> None:
     assert "nervos.chat" not in source
 
 
-def test_the_schema_is_frozen_and_no_execution_table_was_added_by_c2() -> None:
-    """C2 activates the execution plane without widening the persisted schema."""
+def test_the_persisted_schema_is_exactly_the_reviewed_table_set() -> None:
+    """C2 activated the execution plane and C3 added the registry, without a pointer column."""
     tables = set(re.findall(r'__tablename__ = "([a-z_]+)"', ORM_MODELS.read_text(encoding="utf-8")))
     assert tables == EXPECTED_TABLES
+    assert "queue_partitions" not in tables
     router_text = (API_SOURCE / "api" / "router.py").read_text(encoding="utf-8").lower()
     for forbidden in ("job", "attempt", "event", "worker", "queue"):
         assert forbidden not in router_text, forbidden
@@ -284,13 +287,22 @@ def test_the_worker_cannot_control_and_exposes_no_http_surface() -> None:
 
 
 def test_no_retry_recovery_or_speculative_surface_was_added() -> None:
-    """C2 records retry evidence and ships neither a retry engine nor a reconciler."""
+    """C3 reclaims expired claims; it still ships no retry engine, no cancellation, no surface.
+
+    C3 legitimately introduces lease reclamation and a Worker registry. The vocabulary it is
+    still forbidden from introducing -- a retry engine, a transient `retry_wait` state, a
+    cancellation path, a recovery/reconciler module, and any new public router surface -- stays
+    absent, so this guard is narrowed rather than deleted.
+    """
     application_names = " ".join(path.name for path in python_files(CORE_APPLICATION))
     for forbidden in ("retry", "reconcil", "recover"):
         assert forbidden not in application_names, forbidden
     worker_names = " ".join(path.name for path in python_files(ROOT / "apps" / "worker" / "src"))
     for forbidden in ("retry", "reconcil", "recover", "worker_table"):
         assert forbidden not in worker_names, forbidden
+    # C3's own modules exist and are named to stay inside the vocabulary above.
+    assert (CORE_APPLICATION / "lease_reclamation.py").is_file()
+    assert (ROOT / "apps" / "worker" / "src" / "nervos_worker" / "registry.py").is_file()
     for path in python_files(CORE_APPLICATION) + python_files(WORKER_SOURCE):
         text = path.read_text(encoding="utf-8")
         assert "retry_wait" not in text, path
@@ -315,3 +327,99 @@ def test_base_metadata_create_all_is_not_used() -> None:
     ]
 
     assert offenders == []
+
+
+def test_recovery_authority_is_the_job_lease_and_never_registry_health() -> None:
+    """C3 reclaims on lease expiry plus the exact claim tuple -- never on registry appearance.
+
+    This is the C3 boundary that matters most: a Worker registry row is observability, and letting
+    it authorize reclamation would mean a merely-unobserved process could have its work replayed.
+    """
+    jobs_persistence = (CORE_SOURCE / "infrastructure" / "database" / "jobs.py").read_text(
+        encoding="utf-8"
+    )
+    reclamation = jobs_persistence.split("def reclaim_next_expired_claim", 1)[1]
+    reclamation = reclamation.split("def _append_recovery_events", 1)[0]
+
+    assert "JobRecord.lease_expires_at" in reclamation
+    assert "JobRecord.lease_expires_at <= now" in reclamation
+    # The classification is driven only by the committed execution-start boundary.
+    assert "execution_started_at" in reclamation
+    # No registry read reaches a reclamation decision.
+    assert "WorkerRecord" not in reclamation
+    assert "list_workers" not in reclamation
+    assert "classify_worker" not in reclamation
+
+
+def test_the_worker_registry_holds_no_credential_and_no_pointer_column() -> None:
+    """The registry row is five columns of identity and liveness, and nothing else."""
+    orm = ORM_MODELS.read_text(encoding="utf-8")
+    worker_record = orm.split('__tablename__ = "workers"', 1)[1].split("\nclass ", 1)[0]
+    for forbidden in (
+        "token",
+        "secret",
+        "api_key",
+        "password",
+        "credential",
+        "provider",
+        "hostname",
+        "pid",
+    ):
+        assert forbidden not in worker_record.lower(), forbidden
+    # C1/C2 deliberately omitted this pointer, and C3 does not add it.
+    assert "active_attempt_id" not in orm
+
+
+def test_c3_added_no_run_status_and_kept_the_frozen_vocabulary() -> None:
+    """`worker_recovery_exhausted` reuses `failed`; it does not introduce a Run status."""
+    runs_domain = (CORE_SOURCE / "domain" / "runs.py").read_text(encoding="utf-8")
+    status_block = runs_domain.split("class RunStatus", 1)[1].split("class ", 1)[0]
+    for member in ("CREATED", "RUNNING", "SUCCEEDED", "FAILED"):
+        assert member in status_block, member
+    for forbidden in (
+        "CANCELLED",
+        "CANCELED",
+        "ABANDONED",
+        "EXPIRED",
+        "ABORTED",
+        "FAILED_BEFORE_START",
+    ):
+        assert forbidden not in status_block, forbidden
+    assert "status IN ('created','running','succeeded','failed')" in ORM_MODELS.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_the_never_started_shape_is_licensed_only_by_the_exhausted_code() -> None:
+    """The relaxed Run shape is gated on its code in both directions at every layer."""
+    migration = next((ROOT / "apps" / "api" / "alembic" / "versions").glob("0004_*.py")).read_text(
+        encoding="utf-8"
+    )
+    orm = ORM_MODELS.read_text(encoding="utf-8")
+    domain = (CORE_SOURCE / "domain" / "runs.py").read_text(encoding="utf-8")
+
+    # The started-`failed` branch must exclude the code, so the relaxation cannot leak ...
+    assert "error_code <> 'worker_recovery_exhausted'" in orm
+    assert "error_code <> {EXHAUSTED}" in migration
+    # ... and the never-started branch must require it.
+    assert "error_code = 'worker_recovery_exhausted'" in orm
+    assert "error_code = {EXHAUSTED}" in migration
+    # The migration's single literal is the one the domain defines and the allowlist carries.
+    assert "'worker_recovery_exhausted'" in migration
+    assert "WORKER_RECOVERY_EXHAUSTED" in domain
+    assert 'WORKER_RECOVERY_EXHAUSTED = "worker_recovery_exhausted"' in domain
+
+
+def test_c3_creates_no_c4_c5_c6_c7_surface() -> None:
+    """No retry engine, no cancellation, no queue partitions, no public observability surface."""
+    for path in python_files(CORE_APPLICATION) + python_files(WORKER_SOURCE):
+        text = path.read_text(encoding="utf-8")
+        assert "retry_wait" not in text, path
+    orm = ORM_MODELS.read_text(encoding="utf-8")
+    for forbidden_table in ("queue_partitions", "run_events_api", "worker_health"):
+        assert forbidden_table not in orm, forbidden_table
+    api_sources = {path: path.read_text(encoding="utf-8") for path in python_files(API_SOURCE)}
+    for name, text in api_sources.items():
+        assert "lease_reclamation" not in text, name
+        assert "reclaim" not in text.lower(), name
+        assert "WorkerRegistry" not in text, name

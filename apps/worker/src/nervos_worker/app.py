@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from nervos_core.application.job_execution import JobExecutionService
+from nervos_core.application.lease_reclamation import LeaseReclaimer
 from nervos_core.application.model_completion import ModelCompletion
 from nervos_core.application.run_execution import RunExecutor
 from nervos_core.application.trusted_chat import create_builtin_handler_registry
@@ -29,10 +30,11 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from nervos_worker.config import WorkerSettings, get_worker_settings
 from nervos_worker.identity import generate_worker_id
+from nervos_worker.registry import ReclaimLoop, WorkerRegistry
 from nervos_worker.service import Worker
 
-# Bumped only by the milestone that adds a migration. C2 ships no migration.
-EXPECTED_SCHEMA_REVISION = "0003_stage_c1_durable_execution"
+# Bumped only by the milestone that adds a migration. C3 ships migration 0004.
+EXPECTED_SCHEMA_REVISION = "0004_stage_c3_worker_registry"
 
 SCHEMA_MIGRATION_HINT = (
     "Run `uv run alembic -c apps/api/alembic.ini upgrade head` first. "
@@ -91,6 +93,8 @@ class WorkerComposition:
     providers: ModelProviderComposition
     completions: Mapping[str, ModelCompletion]
     execution: JobExecutionService
+    registry: WorkerRegistry
+    reclaimer: ReclaimLoop
     worker: Worker
 
 
@@ -116,14 +120,19 @@ def create_worker(settings: WorkerSettings | None = None) -> WorkerComposition:
         completions,
         utc_now,
     )
+    worker_id = generate_worker_id()
+    registry = WorkerRegistry(persistence, worker_id, clock=utc_now)
+    reclaimer = ReclaimLoop(LeaseReclaimer(persistence), clock=utc_now)
     worker = Worker(
         persistence,
         execution,
         completions,
         clock=utc_now,
-        worker_id=generate_worker_id(),
+        worker_id=worker_id,
         concurrency=resolved.worker_concurrency,
         max_active=resolved.max_active_jobs,
+        registry=registry,
+        reclaimer=reclaimer,
     )
     return WorkerComposition(
         settings=resolved,
@@ -133,6 +142,8 @@ def create_worker(settings: WorkerSettings | None = None) -> WorkerComposition:
         providers=providers,
         completions=completions,
         execution=execution,
+        registry=registry,
+        reclaimer=reclaimer,
         worker=worker,
     )
 

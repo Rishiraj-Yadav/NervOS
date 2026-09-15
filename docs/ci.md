@@ -157,7 +157,7 @@ updating the table above in the same change. Automated update tooling
 
 - Browser binaries come from the **project-local, locked** `@playwright/test`, via `scripts/bootstrap.py` → `pnpm --dir apps/web exec playwright install chromium`. There is no reliance on a system Chrome, a global Playwright, or `--with-deps` locally.
 - `ci.yml` additionally runs `pnpm --dir apps/web exec playwright install-deps chromium` to install Linux runner system libraries. This touches OS packages on an ephemeral runner and never on a developer machine.
-- The browser journey contract is preserved: one Chromium project, one Playwright worker, zero retries, a freshly migrated temporary SQLite database per invocation, dynamic loopback ports, bounded readiness checks for API/Worker/Web, and no arbitrary sleeps.
+- The browser journey contract is preserved: one Chromium project, one Playwright worker, zero retries, a freshly migrated temporary SQLite database per invocation, dynamic loopback ports, bounded readiness checks for API/Worker/Web, a supervised two-Worker pre-start recovery journey, and no arbitrary sleeps.
 - **Flakiness is never hidden with retries.** If the journey proves flaky, make it deterministic instead of raising `retries`.
 
 ## Security scanning

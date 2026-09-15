@@ -8,6 +8,10 @@ from datetime import UTC, datetime
 from enum import StrEnum
 
 OUTCOME_CODE_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
+# The one terminal outcome code that licenses a `failed` Run with no start boundary: the Job
+# exhausted its claim budget to repeated pre-start Worker losses, so execution provably never
+# began. Every other failed Run must carry a real `started_at` and a real `elapsed_ms`.
+WORKER_RECOVERY_EXHAUSTED = "worker_recovery_exhausted"
 # Frozen to keep blank-text semantics stable across Python and SQLite.
 NERVOS_BLANK_TEXT_CODE_POINTS = frozenset(
     {
@@ -166,7 +170,11 @@ class Run:
         started = _utc(self.started_at) if self.started_at else None
         finished = _utc(self.finished_at) if self.finished_at else None
         invalid_start = started is not None and started < created
-        invalid_finish = finished is not None and (started is None or finished < started)
+        # A Run closed by exhausted pre-start recovery has no start boundary, so its finish only
+        # has to follow its creation. Every other Run still has to finish after it started.
+        invalid_finish = finished is not None and (
+            (started is not None and finished < started) or (started is None and finished < created)
+        )
         if invalid_start or invalid_finish:
             raise InvalidRun("invalid timestamp order")
         object.__setattr__(self, "created_at", created)
@@ -194,17 +202,20 @@ class Run:
             if self.error_code is not None or self.error_message is not None:
                 raise InvalidRun
         else:
-            if (
-                started is None
-                or finished is None
-                or self.elapsed_ms is None
-                or self.error_code is None
-                or self.error_message is None
-            ):
+            if finished is None or self.error_code is None or self.error_message is None:
                 raise InvalidRun
             validate_outcome_code(self.error_code)
             validate_error_message(self.error_message)
             if self.output_text is not None or self.finish_reason is not None:
+                raise InvalidRun
+            if self.error_code == WORKER_RECOVERY_EXHAUSTED:
+                # The one failed shape that never started. Requiring the empty usage here keeps
+                # the domain at least as strict as the lifecycle CHECK.
+                if started is not None or self.elapsed_ms is not None:
+                    raise InvalidRun("exhausted recovery cannot carry a start boundary")
+                if any(value is not None for value in self.usage.values()):
+                    raise InvalidRun("exhausted recovery cannot carry usage")
+            elif started is None or self.elapsed_ms is None:
                 raise InvalidRun
 
     def _require_empty(self, started: datetime | None, finished: datetime | None) -> None:

@@ -67,8 +67,8 @@ export function RunItem({ run }: { run: Run }) {
 
       {run.status === "running" ? (
         <p className="run-pending" role="note">
-          Running. If the worker stops before it finishes, this run will not complete; NervOS
-          does not yet recover or retry it.
+          Running. If the worker stops before it finishes, NervOS closes this run as failed
+          without replaying it, because the model request may already have been sent.
         </p>
       ) : null}
     </article>
