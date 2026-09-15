@@ -47,6 +47,14 @@ The second Playwright command installs **Linux runner system libraries only**.
 It is a CI-runner concern and is deliberately absent from local bootstrap; see
 [Playwright provisioning](#playwright-provisioning).
 
+The journey covers Stage A setup and authentication, the C2 queued-acceptance
+cutover, C3 pre-start Worker loss and recovery, and C4 durable retry. It makes
+**no** live provider request: the supervised Worker is composed with offline
+deterministic provider doubles, and the C4 retry path is scripted by the
+supervisor — one prompt has its first provider call refused with a normalized
+rate limit, and the supervisor then asserts the resulting durable timeline from
+committed state.
+
 ## The `check` versus `e2e` split
 
 `scripts/check.py` exposes six command groups:

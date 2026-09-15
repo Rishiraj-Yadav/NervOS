@@ -286,29 +286,73 @@ def test_the_worker_cannot_control_and_exposes_no_http_surface() -> None:
     assert not any(module.startswith("alembic") for module in imports)
 
 
-def test_no_retry_recovery_or_speculative_surface_was_added() -> None:
-    """C3 reclaims expired claims; it still ships no retry engine, no cancellation, no surface.
+def test_only_the_reviewed_c4_retry_surface_exists() -> None:
+    """C4 activates safe execution retry — and nothing wider than retry.
 
-    C3 legitimately introduces lease reclamation and a Worker registry. The vocabulary it is
-    still forbidden from introducing -- a retry engine, a transient `retry_wait` state, a
-    cancellation path, a recovery/reconciler module, and any new public router surface -- stays
-    absent, so this guard is narrowed rather than deleted.
+    C3 shipped reclamation and a registry; C4 legitimately introduces the one retry engine
+    those earlier stages deferred. The vocabulary that is *still* absent stays absent: no
+    cancellation path, no recovery/reconciler module, no `retry_wait` written anywhere other
+    than the reviewed execution and persistence modules, and no new public router surface.
     """
     application_names = " ".join(path.name for path in python_files(CORE_APPLICATION))
-    for forbidden in ("retry", "reconcil", "recover"):
+    for forbidden in ("reconcil", "recover", "cancel"):
         assert forbidden not in application_names, forbidden
     worker_names = " ".join(path.name for path in python_files(ROOT / "apps" / "worker" / "src"))
-    for forbidden in ("retry", "reconcil", "recover", "worker_table"):
+    for forbidden in ("reconcil", "recover", "cancel", "worker_table"):
         assert forbidden not in worker_names, forbidden
-    # C3's own modules exist and are named to stay inside the vocabulary above.
     assert (CORE_APPLICATION / "lease_reclamation.py").is_file()
     assert (ROOT / "apps" / "worker" / "src" / "nervos_worker" / "registry.py").is_file()
+    # C4's retry policy is the one retry-named module, and it is pure: no persistence, no
+    # provider SDK, no clock.
+    assert (CORE_APPLICATION / "retry_policy.py").is_file()
+    policy_source = (CORE_APPLICATION / "retry_policy.py").read_text(encoding="utf-8")
+    for forbidden in ("sqlalchemy", "nervos_core.infrastructure", "anthropic", "openai", "sleep("):
+        assert forbidden not in policy_source, forbidden
+    # The durable retry state is written by exactly the modules C4 reviewed.
     for path in python_files(CORE_APPLICATION) + python_files(WORKER_SOURCE):
         text = path.read_text(encoding="utf-8")
-        assert "retry_wait" not in text, path
+        if "retry_wait" not in text:
+            continue
+        assert path.name in {"job_execution.py", "retry_policy.py"}, path
     router_text = (API_SOURCE / "api" / "router.py").read_text(encoding="utf-8").lower()
-    for forbidden in ("recovery", "events", "cancel", "health/worker"):
+    for forbidden in ("recovery", "events", "cancel", "health/worker", "retry"):
         assert forbidden not in router_text, forbidden
+
+
+def test_the_retry_engine_cannot_schedule_an_ambiguous_or_forbidden_failure() -> None:
+    """Exactly one normalized code is positively safe to replay, and it is checked twice."""
+    execution = (CORE_APPLICATION / "job_execution.py").read_text(encoding="utf-8")
+    persistence = (CORE_SOURCE / "infrastructure" / "database" / "jobs.py").read_text(
+        encoding="utf-8"
+    )
+    transcription = ROOT / "apps" / "worker" / "tests" / "unit" / "test_retry_disposition_policy.py"
+    assert transcription.is_file()
+
+    safe_codes = re.findall(
+        r"^\s+(\w+): RetryDisposition\.SAFE_TO_RETRY,$",
+        execution,
+        flags=re.MULTILINE,
+    )
+    assert safe_codes == ["MODEL_RATE_LIMITED"]
+    taxonomy = (CORE_APPLICATION / "model_completion.py").read_text(encoding="utf-8")
+    assert 'MODEL_RATE_LIMITED = "model_rate_limited"' in taxonomy
+    # The write transaction re-derives the same restriction from the exact code, so widening
+    # the disposition map alone can never widen the replay surface.
+    assert "retry_disposition is RetryDisposition.SAFE_TO_RETRY" in persistence
+    assert "error_code == MODEL_RATE_LIMITED" in persistence
+
+
+def test_c3_reclamation_did_not_become_a_generic_retry_processor() -> None:
+    """C3 recovers lost claims; it must never read a disposition as an instruction to replay."""
+    reclamation = (CORE_SOURCE / "infrastructure" / "database" / "jobs.py").read_text(
+        encoding="utf-8"
+    )
+    reclaim_body = reclamation.split("def reclaim_next_expired_claim", 1)[1]
+    reclaim_body = reclaim_body.split("def _expire_pre_start_attempt", 1)[0]
+
+    assert "retry_disposition" not in reclaim_body
+    assert "retry.scheduled" not in reclaim_body
+    assert "JobStatus.RETRY_WAIT" not in reclaim_body
 
 
 def test_both_provider_adapters_keep_sdk_retries_disabled() -> None:
@@ -410,11 +454,12 @@ def test_the_never_started_shape_is_licensed_only_by_the_exhausted_code() -> Non
     assert 'WORKER_RECOVERY_EXHAUSTED = "worker_recovery_exhausted"' in domain
 
 
-def test_c3_creates_no_c4_c5_c6_c7_surface() -> None:
-    """No retry engine, no cancellation, no queue partitions, no public observability surface."""
+def test_c4_creates_no_c5_c6_c7_surface() -> None:
+    """C4 retries an execution; it adds no cancellation, fairness, partition, or public surface."""
     for path in python_files(CORE_APPLICATION) + python_files(WORKER_SOURCE):
         text = path.read_text(encoding="utf-8")
-        assert "retry_wait" not in text, path
+        assert "cancellation.requested" not in text, path
+        assert "run.cancelled" not in text, path
     orm = ORM_MODELS.read_text(encoding="utf-8")
     for forbidden_table in ("queue_partitions", "run_events_api", "worker_health"):
         assert forbidden_table not in orm, forbidden_table

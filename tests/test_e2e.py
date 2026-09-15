@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -404,3 +405,97 @@ def test_the_supervisor_launches_the_deterministic_worker_script() -> None:
     assert "build_deterministic_completions" in text
     assert "nervos_worker.service" in text
     assert "ANTHROPIC_API_KEY" not in text
+
+
+def test_the_retry_journey_is_scripted_outside_production_composition() -> None:
+    """C4's scripted refusal and stretched wait live only in the supervised test plumbing."""
+    supervisor = (ROOT / "scripts" / "e2e.py").read_text(encoding="utf-8")
+    for variable in (
+        "NERVOS_E2E_SCRIPTED_FAILURES",
+        "NERVOS_E2E_SCRIPTED_CALL_LOG",
+        "NERVOS_E2E_RETRY_DELAY_SECONDS",
+        "NERVOS_E2E_RETRY_INPUT",
+    ):
+        assert variable in supervisor, variable
+    assert "assert_retry_journey" in supervisor
+
+    doubles = (ROOT / "tests" / "e2e_support" / "deterministic.py").read_text(encoding="utf-8")
+    assert "MODEL_RATE_LIMITED" in doubles
+    worker = (ROOT / "tests" / "e2e_support" / "e2e_worker.py").read_text(encoding="utf-8")
+    assert "PRODUCTION_RETRY_POLICY" in worker
+
+    # No shipped module may reach the scripting seam.
+    for root in (ROOT / "apps", ROOT / "packages"):
+        for path in root.rglob("*.py"):
+            text = path.read_text(encoding="utf-8")
+            assert "SCRIPTED_FAILURES" not in text, path
+            assert "NERVOS_E2E_RETRY_DELAY_SECONDS" not in text, path
+
+
+def test_the_scripted_double_refuses_only_the_scripted_prompt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The scripted refusal must hit exactly the prompt the supervisor named, and no other.
+
+    The browser journey runs several prompts through one Worker, so a script that misfires would
+    either retry an unscripted Run or quietly never refuse the scripted one — the second is
+    exactly the failure mode that would let the C4 proof pass without a retry happening.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "nervos_deterministic", ROOT / "tests" / "e2e_support" / "deterministic.py"
+    )
+    assert spec is not None and spec.loader is not None
+    doubles = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(doubles)
+
+    script = tmp_path / "failures.txt"
+    script.write_text("anthropic\tretry me\t1\n", encoding="utf-8")
+    calls = tmp_path / "calls.txt"
+    monkeypatch.setenv(doubles.SCRIPTED_FAILURES_VARIABLE, str(script))
+    monkeypatch.setenv(doubles.SCRIPTED_CALL_LOG_VARIABLE, str(calls))
+
+    assert doubles._scripted_failure_count("anthropic", "retry me") == 1
+    assert doubles._scripted_failure_count("anthropic", "another prompt") == 0
+    assert doubles._scripted_failure_count("openai", "retry me") == 0
+
+    assert doubles._record_scripted_call("anthropic", "retry me") == 0
+    assert doubles._record_scripted_call("anthropic", "retry me") == 1
+    assert doubles._record_scripted_call("anthropic", "another prompt") == 0
+    assert calls.read_text(encoding="utf-8").splitlines() == [
+        "anthropic\tretry me",
+        "anthropic\tretry me",
+        "anthropic\tanother prompt",
+    ]
+
+
+def test_the_retry_journey_assertion_rejects_an_unretried_run(tmp_path: Path) -> None:
+    """A Run that succeeded on its first Attempt must fail the C4 proof, not pass quietly."""
+    module = load_module()
+    database = tmp_path / "journey.db"
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "CREATE TABLE runs (id INTEGER PRIMARY KEY, status TEXT, started_at TEXT,"
+            " error_code TEXT, input_text TEXT)"
+        )
+        connection.execute("CREATE TABLE jobs (id INTEGER, run_id INTEGER, available_at TEXT)")
+        connection.execute(
+            "CREATE TABLE job_attempts (job_id INTEGER, attempt_number INTEGER, status TEXT,"
+            " retry_disposition TEXT, error_code TEXT, claimed_at TEXT,"
+            " execution_started_at TEXT)"
+        )
+        connection.execute(
+            "CREATE TABLE run_events (run_id INTEGER, sequence INTEGER, event_type TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO runs VALUES (1,'succeeded','t0',NULL,?)", (module.RETRY_INPUT,)
+        )
+        connection.execute("INSERT INTO jobs VALUES (1,1,'t0')")
+        connection.execute("INSERT INTO job_attempts VALUES (1,1,'succeeded',NULL,NULL,'t0','t0')")
+        connection.execute("INSERT INTO run_events VALUES (1,1,'run.succeeded')")
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(RuntimeError):
+        module.assert_retry_journey(database=database, scripted_log=tmp_path / "calls.txt")

@@ -33,6 +33,18 @@ PLAYWRIGHT_TIMEOUT = 120.0
 # this short on purpose, so expiry is deterministic rather than a 60-second wait.
 CRASH_LEASE_SECONDS = 1
 RECOVERY_GRACE_SECONDS = 2
+# C4 scripted-retry seam: the provider identifier and the exact prompt whose first call the
+# deterministic double must refuse, plus how long the durable retry wait is stretched to. The
+# wait must comfortably outlast a couple of two-second UI polls so the browser can observe the
+# waiting Run, and stay far inside the bounded polling budget.
+RETRY_PROVIDER = "anthropic"
+RETRY_INPUT = "retry once before answering"
+RETRY_DELAY_SECONDS = 6
+# Every provider invocation in the whole journey: one for the recovered Run, one for the
+# OpenAI Run, and two for the retried Run (its refused first Attempt and its succeeding second
+# Attempt). The number is asserted globally on top of the per-prompt count in
+# `assert_retry_journey`, so an unexpected extra invocation anywhere still fails the journey.
+TOTAL_PROVIDER_CALLS = 4
 
 
 @dataclass(frozen=True)
@@ -255,6 +267,12 @@ def run_e2e() -> int:
         worker_b_marker = temporary / "worker-b-ready.txt"
         provider_ledger = temporary / "provider-calls.txt"
         worker_b_log_path = temporary / "worker-b.log"
+        # C4 durable-retry seam. The supervisor scripts exactly one refusal for one prompt, and
+        # records every scripted call outside the repository so the assertion can prove how many
+        # provider invocations that prompt actually produced.
+        scripted_failures = temporary / "scripted-failures.txt"
+        scripted_call_log = temporary / "scripted-calls.txt"
+        scripted_failures.write_text(f"{RETRY_PROVIDER}\t{RETRY_INPUT}\t1\n", encoding="utf-8")
         api_reservation = PortReservation()
         web_reservation = PortReservation()
         api_port = api_reservation.port
@@ -276,11 +294,19 @@ def run_e2e() -> int:
             "NERVOS_WORKER_READY_FILE": str(worker_b_marker),
             "NERVOS_E2E_PROVIDER_CALL_LOG": str(provider_ledger),
         }
+        retry_environment = {
+            "NERVOS_E2E_SCRIPTED_FAILURES": str(scripted_failures),
+            "NERVOS_E2E_SCRIPTED_CALL_LOG": str(scripted_call_log),
+            "NERVOS_E2E_RETRY_DELAY_SECONDS": str(RETRY_DELAY_SECONDS),
+        }
+        worker_environment = {**worker_environment, **retry_environment}
+        worker_b_environment = {**worker_b_environment, **retry_environment}
         web_environment = {**environment, "NERVOS_E2E_API_ORIGIN": api_origin}
         playwright_environment = {
             **environment,
             "NERVOS_E2E_WEB_ORIGIN": web_origin,
             "NERVOS_E2E_CLAIM_GATE": str(worker_claim_gate),
+            "NERVOS_E2E_RETRY_INPUT": RETRY_INPUT,
         }
         pnpm = resolve_required_command("pnpm")
 
@@ -409,6 +435,7 @@ def run_e2e() -> int:
                 except subprocess.TimeoutExpired as error:
                     raise RuntimeError("Playwright exceeded its 120 second timeout") from error
                 watcher.join(timeout=WORKER_READY_TIMEOUT)
+                assert_retry_journey(database=database, scripted_log=scripted_call_log)
                 assert_recovery_journey(
                     database=database,
                     worker_crash_marker=worker_crash_marker,
@@ -544,11 +571,105 @@ def assert_recovery_journey(
         raise RuntimeError("the abandoned first Attempt crossed the execution-start boundary")
     if started != 1:
         raise RuntimeError(f"the recovered Run started execution {started} time(s), expected 1")
-    if status != "succeeded" or count_provider_calls(provider_ledger) != 2:
+    if status != "succeeded" or count_provider_calls(provider_ledger) != TOTAL_PROVIDER_CALLS:
         raise RuntimeError(
             f"recovered Run status was {status!r} with"
-            f" {count_provider_calls(provider_ledger)} provider call(s) overall"
+            f" {count_provider_calls(provider_ledger)} provider call(s) overall,"
+            f" expected {TOTAL_PROVIDER_CALLS}"
         )
+
+
+def count_scripted_calls(log: Path, marker: str) -> int:
+    """Count recorded scripted provider calls for one prompt marker."""
+    if not log.exists():
+        return 0
+    return sum(1 for line in log.read_text(encoding="utf-8").splitlines() if line == marker)
+
+
+def assert_retry_journey(
+    *,
+    database: Path,
+    scripted_log: Path,
+) -> None:
+    """Prove the C4 durable retry actually happened, from committed state alone.
+
+    A browser that merely shows a final answer cannot distinguish "retried safely" from "the
+    provider answered the first time", so every claim here is checked against the durable
+    timeline. The early-claim check is the load-bearing one: it compares the second Attempt's
+    own `claimed_at` with the committed `available_at`, so it proves the retry waited for its
+    due instant without depending on when a process happened to run.
+    """
+    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    try:
+        run = connection.execute(
+            "SELECT id, status, started_at, error_code FROM runs WHERE input_text=?",
+            (RETRY_INPUT,),
+        ).fetchone()
+        if run is None:
+            raise RuntimeError("the C4 retry Run was never accepted")
+        run_id, status, started_at, error_code = run
+        timeline = [
+            row[0]
+            for row in connection.execute(
+                "SELECT event_type FROM run_events WHERE run_id=? ORDER BY sequence", (run_id,)
+            )
+        ]
+        attempts = [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT attempt_number, status, retry_disposition, error_code,"
+                " claimed_at, execution_started_at FROM job_attempts WHERE job_id="
+                "(SELECT id FROM jobs WHERE run_id=?) ORDER BY attempt_number",
+                (run_id,),
+            )
+        ]
+        due = connection.execute(
+            "SELECT available_at FROM jobs WHERE run_id=?", (run_id,)
+        ).fetchone()
+    finally:
+        connection.close()
+
+    expected = [
+        "run.created",
+        "run.queued",
+        "attempt.claimed",
+        "attempt.started",
+        "attempt.failed",
+        "retry.scheduled",
+        "attempt.claimed",
+        "attempt.started",
+        "run.succeeded",
+    ]
+    if timeline != expected:
+        raise RuntimeError(f"retry timeline was {timeline}, expected {expected}")
+    if status != "succeeded" or error_code is not None:
+        raise RuntimeError(f"the retried Run ended as {status!r} ({error_code!r})")
+    if len(attempts) != 2:
+        raise RuntimeError(f"expected two Attempts for the retried Run, saw {len(attempts)}")
+    first, second = attempts
+    if first[0] != 1 or first[1] != "failed" or first[2] != "SAFE_TO_RETRY":
+        raise RuntimeError(f"the first Attempt was not safe failure evidence: {first}")
+    if first[3] != "model_rate_limited":
+        raise RuntimeError(f"the first Attempt recorded {first[3]!r}")
+    if second[0] != 2 or second[1] != "succeeded" or second[2] is not None:
+        raise RuntimeError(f"the second Attempt was not a clean success: {second}")
+    if second[5] is None or first[5] is None:
+        raise RuntimeError("an Attempt never crossed the execution-start boundary")
+    # The Run's start is the *first* execution's start; a retry must not rewrite it.
+    if started_at != first[5] or second[5] <= first[5]:
+        raise RuntimeError(
+            f"the Run start {started_at!r} does not match the first Attempt ({first[5]!r})"
+            f" with a later retry ({second[5]!r})"
+        )
+    if due is None or due[0] is None:
+        raise RuntimeError("the retried Job has no durable due time")
+    if second[4] < due[0]:
+        raise RuntimeError(
+            f"the retry was claimed at {second[4]!r}, before its due instant {due[0]!r}"
+        )
+    calls = count_scripted_calls(scripted_log, f"{RETRY_PROVIDER}\t{RETRY_INPUT}")
+    if calls != 2:
+        raise RuntimeError(f"the retried prompt made {calls} provider call(s), expected 2")
 
 
 def main() -> int:

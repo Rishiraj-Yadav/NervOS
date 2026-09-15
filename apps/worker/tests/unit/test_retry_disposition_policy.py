@@ -61,6 +61,23 @@ def test_the_policy_covers_every_persistable_provider_code() -> None:
     assert provider_codes <= set(DISPOSITION_BY_CODE)
 
 
+def test_exactly_one_code_is_positively_safe_to_replay() -> None:
+    """C4 replays only what a provider positively declined.
+
+    `SAFE_TO_RETRY` is the sole disposition that authorizes a durable retry, so the set of codes
+    carrying it *is* the replay surface. Adding a code to this set is a safety decision, not a
+    bookkeeping change, and it must be impossible to make by accident.
+    """
+    safe = {
+        code
+        for code, disposition in DISPOSITION_BY_CODE.items()
+        if disposition is RetryDisposition.SAFE_TO_RETRY
+    }
+    assert safe == {MODEL_RATE_LIMITED}
+    for uncertain in (MODEL_TIMED_OUT, MODEL_UNAVAILABLE, INTERNAL_EXECUTION_ERROR):
+        assert DISPOSITION_BY_CODE[uncertain] is RetryDisposition.AMBIGUOUS
+
+
 def test_an_unrecognized_code_fails_closed() -> None:
     assert disposition_for("something_unrecognized") is RetryDisposition.AMBIGUOUS
 

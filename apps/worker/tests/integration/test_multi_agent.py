@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 from nervos_core.application.model_completion import (
-    MODEL_RATE_LIMITED,
+    MODEL_UNAVAILABLE,
     ModelProviderError,
     ModelRequest,
     ModelResponse,
@@ -82,7 +82,9 @@ async def test_six_instances_progress_through_one_shared_engine_without_contamin
         # Instance 3's provider is forced to fail, to prove it leaves other Instances untouched.
         openai = RecordingCompletion(provider_id="openai", reply="OpenAI reply")
 
-        # Let the first Anthropic call fail, the rest succeed.
+        # Let the first Anthropic call fail terminally, the rest succeed. The failure is
+        # deliberately nonretryable: this test proves cross-Instance isolation, so the one forced
+        # failure must reach a terminal state rather than acquire C4's durable retry.
         class FlakyAnthropic(RecordingCompletion):
             def __init__(self) -> None:
                 super().__init__(provider_id="anthropic", reply="Anthropic reply")
@@ -91,7 +93,7 @@ async def test_six_instances_progress_through_one_shared_engine_without_contamin
             async def complete(self, request: ModelRequest) -> ModelResponse:
                 if self._failures > 0:
                     self._failures -= 1
-                    raise ModelProviderError(MODEL_RATE_LIMITED)
+                    raise ModelProviderError(MODEL_UNAVAILABLE)
                 return await super().complete(request)
 
         completions = {"anthropic": FlakyAnthropic(), "openai": openai}
@@ -113,7 +115,7 @@ async def test_six_instances_progress_through_one_shared_engine_without_contamin
                 for row in connection.execute(text("SELECT id, status FROM runs")).all()
             }
         assert len(statuses) == 6
-        # The first Anthropic run failed as forced; all other 5 succeeded.
+        # The first Anthropic run failed terminally as forced; all other 5 succeeded.
         failed_count = sum(1 for status in statuses.values() if status == "failed")
         succeeded_count = sum(1 for status in statuses.values() if status == "succeeded")
         assert failed_count == 1

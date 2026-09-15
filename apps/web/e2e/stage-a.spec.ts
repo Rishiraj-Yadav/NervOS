@@ -27,6 +27,19 @@ function storageContainsAuthenticationState(entries: [string, string][]): boolea
   return entries.some(([key]) => /auth|session|user|token|login/i.test(key));
 }
 
+// C4: the exact prompt whose first provider call the supervisor scripts as a normalized rate
+// limit. Sending it through the real form proves the retry path end to end, and using one
+// distinctive prompt keeps the script from affecting any other Run in the journey.
+function retryPrompt(): string {
+  const prompt = process.env.NERVOS_E2E_RETRY_INPUT;
+  if (prompt === undefined || prompt === "") {
+    throw new Error(
+      "NERVOS_E2E_RETRY_INPUT is required; run the journey through scripts/check.py e2e",
+    );
+  }
+  return prompt;
+}
+
 test("completes the Stage A setup and authentication journey", async ({ page }) => {
   await page.route("**/*", async (route) => {
     const url = new URL(route.request().url());
@@ -137,6 +150,24 @@ test("completes the Stage A setup and authentication journey", async ({ page }) 
   });
   await expect(page.getByText("anthropic · opaque/e2e-model")).toBeVisible();
   await expect(page.getByText("openai · opaque/openai-e2e-model")).toBeVisible();
+  // C4 proof: a positively safe provider failure is retried durably instead of terminalized.
+  // The supervisor scripts this one prompt's first Anthropic call to be refused with a
+  // normalized rate limit, so this Run can only reach a final answer if the Worker committed a
+  // retry, waited for its due instant, and a later Attempt executed it. The Run stays `running`
+  // across that wait, and the copy must therefore stop promising that no retry ever happens.
+  await page.getByLabel("Model provider").selectOption("anthropic");
+  await page.getByLabel("Model", { exact: true }).fill("opaque/e2e-model");
+  await page.getByRole("button", { name: /save configuration/i }).click();
+  await page.getByLabel("Message").fill(retryPrompt());
+  await page.getByRole("button", { name: /run agent/i }).click();
+  await expect(page.getByText(/may be retried/i)).toBeVisible({ timeout: ASYNC_TIMEOUT });
+  await expect(page.getByText(/Deterministic Anthropic reply from NervOS\./)).toHaveCount(2, {
+    timeout: ASYNC_TIMEOUT,
+  });
+  await page.reload();
+  await expect(page.getByText(/Deterministic Anthropic reply from NervOS\./)).toHaveCount(2, {
+    timeout: ASYNC_TIMEOUT,
+  });
 
   // Disabling the agent blocks new Runs while leaving the existing history readable.
   await page.getByRole("button", { name: /disable agent/i }).click();
