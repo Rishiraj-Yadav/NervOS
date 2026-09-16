@@ -8,12 +8,14 @@ from typing import Any
 import pytest
 from nervos_core.application.agent_definitions import create_builtin_definition_registry
 from nervos_core.application.agents import (
+    EVENT_PAGE_LIMIT_MAX,
     AgentInstanceNotFound,
     AgentService,
     InstanceConfiguration,
     RunNotFound,
 )
 from nervos_core.domain.agents import AgentDefinitionId, AgentInstance
+from nervos_core.domain.jobs import RunEvent, RunEventType
 from nervos_core.domain.runs import STAGE_B_LIMITS, ModelUsage, Run, RunStatus
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
@@ -59,9 +61,16 @@ class RecordingPersistence:
     through the fenced execution persistence, so there is nothing here to refuse.
     """
 
-    def __init__(self, *, instances: tuple[AgentInstance, ...] = (), runs: tuple[Run, ...] = ()):
+    def __init__(
+        self,
+        *,
+        instances: tuple[AgentInstance, ...] = (),
+        runs: tuple[Run, ...] = (),
+        events: tuple[RunEvent, ...] = (),
+    ):
         self.instances = instances
         self.runs = runs
+        self.events = events
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
         self.get_instance_error: type[Exception] | None = None
         self.get_run_error: type[Exception] | None = None
@@ -89,6 +98,10 @@ class RecordingPersistence:
     ) -> tuple[Run, ...]:
         self.calls.append(("list_runs", (owner_user_id, instance_id, limit, before_id)))
         return self.runs
+
+    def list_run_events(self, run_id: int, after_sequence: int, limit: int) -> tuple[RunEvent, ...]:
+        self.calls.append(("list_run_events", (run_id, after_sequence, limit)))
+        return self.events
 
     def create_instance(
         self,
@@ -222,3 +235,65 @@ def test_run_usage_defaults_are_not_derived_by_reads() -> None:
 
     assert result.usage == ModelUsage(None, None, None)
     assert result.usage.total_tokens is None
+
+
+# ---------------------------------------------------------------------------------------
+# C7 Event reads: ownership is settled first, and the bound is refused before any query
+# ---------------------------------------------------------------------------------------
+
+
+def event(sequence: int = 1) -> RunEvent:
+    return RunEvent(
+        1,
+        1,
+        1,
+        None,
+        sequence,
+        RunEventType.RUN_CREATED,
+        None,
+        None,
+        None,
+        None,
+        NOW,
+    )
+
+
+def test_the_event_read_resolves_ownership_before_it_reads_anything() -> None:
+    """The Run's own ownership rule settles this, so a foreign Run fails identically to a missing
+    one and no Event row is read at all."""
+    persistence = RecordingPersistence(runs=(run(),), events=(event(),))
+    persistence.get_run_error = RunNotFound
+
+    with pytest.raises(RunNotFound):
+        service(persistence).list_run_events(2, 7, 0, 50)
+
+    assert persistence.calls == [("get_run", (2, 7))]
+
+
+def test_the_event_read_passes_the_cursor_and_bound_through_unchanged() -> None:
+    """No default limit and no reordering is invented here: persistence owns both."""
+    persistence = RecordingPersistence(runs=(run(),), events=(event(4), event(5)))
+
+    result = service(persistence).list_run_events(1, 1, 3, 200)
+
+    assert [item.sequence for item in result] == [4, 5]
+    assert persistence.calls == [("get_run", (1, 1)), ("list_run_events", (1, 3, 200))]
+
+
+@pytest.mark.parametrize("limit", [0, -1, EVENT_PAGE_LIMIT_MAX + 1])
+def test_an_unusable_event_page_size_is_refused_before_any_query(limit: int) -> None:
+    persistence = RecordingPersistence(runs=(run(),))
+
+    with pytest.raises(ValueError, match="limit"):
+        service(persistence).list_run_events(1, 1, 0, limit)
+
+    assert persistence.calls == []
+
+
+def test_a_negative_cursor_is_refused_before_any_query() -> None:
+    persistence = RecordingPersistence(runs=(run(),))
+
+    with pytest.raises(ValueError, match="after_sequence"):
+        service(persistence).list_run_events(1, 1, -1, 50)
+
+    assert persistence.calls == []

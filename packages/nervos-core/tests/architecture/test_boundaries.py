@@ -322,7 +322,9 @@ def test_only_the_reviewed_retry_and_cancellation_surfaces_exist() -> None:
     stages deferred; C5 introduces the one owner-cancellation module. What is *still* absent
     stays absent: no recovery/reconciler module in the application layer, no `retry_wait`
     written anywhere other than the reviewed execution and persistence modules, and no new
-    public router surface.
+    public router surface. C7 later added one reviewed *route* inside the existing Runs module
+    without touching `router.py`, so the assertion below is unchanged: no second router, and no
+    new router surface of any kind.
     """
     application_names = " ".join(path.name for path in python_files(CORE_APPLICATION))
     for forbidden in ("reconcil", "recover"):
@@ -528,10 +530,11 @@ def test_c6_adds_only_the_reviewed_fairness_surface() -> None:
     """C6 adds queue control in exactly the reviewed shape, and nothing wider.
 
     The reviewed surface is the durable `queue_partitions` scheduling metadata, the shared policy
-    constants, and the claim/admission predicates that read them. C7 therefore stays unbuilt: the
-    API still cannot execute, no partition/cursor/queue-position concept reaches the API or the
-    browser, and the fairness table stays incapable of becoming a second queue because it stores
-    no count, no status, and no authority.
+    constants, and the claim/admission predicates that read them. C7's arrival changes none of
+    this: the API still cannot execute, no partition/cursor/queue-position concept reaches the API
+    or the browser, and the fairness table stays incapable of becoming a second queue because it
+    stores no count, no status, and no authority. C7 publishes durable facts about one Run, which
+    is why the scheduling topology below is asserted to be exactly as private as it was here.
     """
     orm = ORM_MODELS.read_text(encoding="utf-8")
     assert orm.count('__tablename__ = "queue_partitions"') == 1
@@ -550,7 +553,7 @@ def test_c6_adds_only_the_reviewed_fairness_surface() -> None:
         + python_files(WORKER_SOURCE)
     ):
         assert "last_served_attempt_id" not in path.read_text(encoding="utf-8"), path
-    # C7 remains unbuilt, and C6 publishes no scheduling surface.
+    # C7 adds no router surface of its own, and C6 publishes no scheduling surface.
     for path in python_files(CORE_APPLICATION) + python_files(API_SOURCE):
         text = path.read_text(encoding="utf-8").lower()
         for forbidden in ("queue_position", "fair_share", "leader_election", "worker_dashboard"):
@@ -564,3 +567,90 @@ def test_c6_adds_only_the_reviewed_fairness_surface() -> None:
         frontend_text = path.read_text(encoding="utf-8").lower()
         for forbidden in ("queue_partition", "queue_position", "fairness"):
             assert forbidden not in frontend_text, (path, forbidden)
+
+
+def test_c7_adds_only_the_reviewed_observability_surface() -> None:
+    """C7 publishes durable execution facts for one owned Run, and nothing wider.
+
+    The Event route is the Run's own sub-resource, which is why it lives in the already-reviewed
+    Runs module: adding a separate router module would have required relaxing the guards that keep
+    execution-plane vocabulary out of the control-plane router, and no observability endpoint is
+    worth weakening a boundary for. What C7 adds is one GET, one allow-list projection, and two
+    derived fields on the Run. Every assertion below is about what it still cannot do.
+    """
+    assert sorted(path.name for path in python_files(API_ROUTES) if path.name != "__init__.py") == [
+        "agent_instances.py",
+        "auth.py",
+        "health.py",
+        "runs.py",
+        "setup.py",
+    ]
+    runs_route = (API_ROUTES / "runs.py").read_text(encoding="utf-8")
+    # Exactly one new route, and it is a read.
+    assert runs_route.count('@router.get("/runs/{run_id}/events"') == 1
+    assert runs_route.count("/runs/{run_id}/events") == 1
+    for forbidden in (
+        '@router.post("/runs/{run_id}/events"',
+        '@router.patch("/runs/{run_id}/events"',
+        '@router.put("/runs/{run_id}/events"',
+        '@router.delete("/runs/{run_id}/events"',
+    ):
+        assert forbidden not in runs_route, forbidden
+    # The observability read reaches no write primitive at all.
+    for forbidden in ("insert(", "update(", "delete(", "commit(", "flush(", "add("):
+        assert forbidden not in runs_route, forbidden
+    # The public projection is an explicit allow-list, not a serialization of the stored row.
+    schema_source = (API_SOURCE / "api" / "schemas.py").read_text(encoding="utf-8")
+    projection = schema_source.split("class RunEventResponse", 1)[1].split(
+        "class RunEventPageResponse", 1
+    )[0]
+    assert set(re.findall(r"^    (\w+): [\w\[\] |]+$", projection, flags=re.MULTILINE)) == {
+        "sequence",
+        "event_type",
+        "created_at",
+        "attempt_number",
+        "code",
+        "message",
+        "available_at",
+    }
+    # The docstring deliberately *names* what the projection withholds, so only the code is
+    # scanned: a field, an annotation, or a mapping entry is what could actually leak.
+    code_only = re.sub(r'""".*?"""', "", projection, flags=re.DOTALL)
+    for forbidden in (
+        "claim_token",
+        "worker_id",
+        "lease",
+        "heartbeat",
+        "job_id",
+        "attempt_id",
+        "run_id",
+        "partition",
+        "queue_position",
+        "fair_share",
+    ):
+        assert forbidden not in code_only, forbidden
+    # C6's scheduling topology stays persistence-internal: nothing above it may read the table.
+    for path in python_files(CORE_APPLICATION) + python_files(API_SOURCE):
+        assert "queue_partitions" not in path.read_text(encoding="utf-8"), path
+    # The derived phase is convenience, never authority: no module that mutates execution may
+    # read it, so no write can branch on a projection that is stale the moment it is serialised.
+    for name in (
+        "job_execution.py",
+        "run_cancellation.py",
+        "lease_reclamation.py",
+        "retry_policy.py",
+        "run_execution.py",
+    ):
+        text = (CORE_APPLICATION / name).read_text(encoding="utf-8")
+        assert "execution_phase" not in text, name
+        assert "retry_available_at" not in text, name
+    assert "execution_phase" not in runs_route
+    # Still no Attempt, Worker, or streaming surface anywhere in the control plane.
+    for path in python_files(API_SOURCE):
+        text = path.read_text(encoding="utf-8").lower()
+        for forbidden in ("sse", "websocket", "text/event-stream", "streaming"):
+            assert forbidden not in text, (path, forbidden)
+    for path in python_files(API_ROUTES):
+        text = path.read_text(encoding="utf-8")
+        for forbidden in ("/attempts", "worker_health", "/workers"):
+            assert forbidden not in text, (path, forbidden)

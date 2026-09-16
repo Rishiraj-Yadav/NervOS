@@ -12,6 +12,8 @@ import {
 import { ErrorState, InlineError, LoadingState } from "../components/AsyncState";
 import { Brand } from "../components/Brand";
 import { RunItem } from "../components/RunItem";
+import { RunTimeline } from "../components/RunTimeline";
+import { isTerminalStatus } from "../api/agentInstances";
 import { NotFoundPage } from "./NotFoundPage";
 
 export function AgentInstancePage() {
@@ -221,6 +223,9 @@ function AgentInstanceView({ agentInstanceId }: { agentInstanceId: number }) {
                         onCancel={(runId) => void cancelRun.mutate(runId)}
                         isCancelling={
                           cancelRun.isPending && cancelRun.variables === run.id
+                        }
+                        timeline={
+                          <RunTimeline runId={run.id} isTerminal={isTerminalStatus(run.status)} />
                         }
                       />
                     ))}

@@ -16,11 +16,18 @@ from nervos_core.domain.agents import (
     validate_model_name,
     validate_model_provider,
 )
+from nervos_core.domain.jobs import RunEvent
 from nervos_core.domain.runs import (
     Run,
     RunLimits,
     validate_input_text,
 )
+
+# One page of a Run's Event timeline. Wider than a Run *page* because a single Run legitimately
+# accumulates a history -- a three-attempt Run with recovery produces roughly twenty events -- and
+# the client must be able to drain one Run's timeline in a round trip or two. Bounded because an
+# unbounded page is an unbounded response.
+EVENT_PAGE_LIMIT_MAX = 200
 
 
 class AgentInstanceNotFound(LookupError):
@@ -101,6 +108,9 @@ class AgentPersistence(Protocol):
     def list_runs(
         self, owner_user_id: int, instance_id: int, limit: int, before_id: int | None
     ) -> tuple[Run, ...]: ...
+    def list_run_events(
+        self, run_id: int, after_sequence: int, limit: int
+    ) -> tuple[RunEvent, ...]: ...
 
 
 class AgentService:
@@ -195,6 +205,26 @@ class AgentService:
         """
         self._persistence.get_instance(owner_user_id, instance_id)
         return self._persistence.list_runs(owner_user_id, instance_id, limit, before_id)
+
+    def list_run_events(
+        self, owner_user_id: int, run_id: int, after_sequence: int, limit: int
+    ) -> tuple[RunEvent, ...]:
+        """Return one ascending-sequence page of an owned Run's durable Event timeline.
+
+        Ownership is settled first by the same `get_run` the Run resource already uses, so a
+        foreign Run and a missing one fail identically and the timeline can never be used to probe
+        whether another user's Run exists. Ownership is immutable once a Run is submitted, so the
+        second read cannot race it into another owner's hands.
+
+        `after_sequence` is the only cursor. Offset pagination would shift under the concurrent
+        appends this stream is built from and silently skip events.
+        """
+        if not 1 <= limit <= EVENT_PAGE_LIMIT_MAX:
+            raise ValueError("limit must be between 1 and 200")
+        if after_sequence < 0:
+            raise ValueError("after_sequence must not be negative")
+        self._persistence.get_run(owner_user_id, run_id)
+        return self._persistence.list_run_events(run_id, after_sequence, limit)
 
     def submit_run(self, owner_user_id: int, instance_id: int, input_text: str) -> Run:
         """Durably accept one Run without executing anything.

@@ -75,3 +75,96 @@ describe("RunItem cancellation control", () => {
     expect(screen.getByText("Cancelled")).toBeInTheDocument();
   });
 });
+
+/**
+ * The derived execution phase. A Run waiting to retry and a Run executing now are both `running`,
+ * so before C7 the card had to hedge across both cases in one paragraph.
+ */
+describe("RunItem execution phase copy", () => {
+  it("distinguishes waiting to retry from executing, and names the instant", () => {
+    render(
+      <RunItem
+        run={apiRun({
+          status: "running",
+          output_text: null,
+          execution_phase: "retry_wait",
+          retry_available_at: "2026-01-01T00:00:04Z",
+        })}
+      />,
+    );
+
+    expect(screen.getByRole("note")).toHaveTextContent(/waiting to retry/i);
+    expect(screen.getByRole("note")).toHaveTextContent(/2026-01-01 00:00:04 UTC/);
+    // It must not promise the retry will succeed.
+    expect(screen.getByRole("note")).toHaveTextContent(/nothing promises/i);
+  });
+
+  it("describes a claimed run as claimed but not yet started", () => {
+    render(
+      <RunItem run={apiRun({ status: "running", output_text: null, execution_phase: "claimed" })} />,
+    );
+
+    expect(screen.getByRole("note")).toHaveTextContent(/has claimed this run/i);
+    expect(screen.getByRole("note")).toHaveTextContent(/has not yet begun/i);
+  });
+
+  it("keeps the ordinary running copy while the run is actually executing", () => {
+    render(
+      <RunItem run={apiRun({ status: "running", output_text: null, execution_phase: "running" })} />,
+    );
+
+    expect(screen.getByRole("note")).toHaveTextContent(/replaying it/i);
+    expect(screen.queryByText(/waiting to retry/i)).toBeNull();
+  });
+
+  it("renders one note at a time, so the card never contradicts itself", () => {
+    for (const phase of ["queued", "claimed", "running", "retry_wait"] as const) {
+      const { unmount } = render(
+        <RunItem
+          run={apiRun({
+            status: "running",
+            output_text: null,
+            execution_phase: phase,
+            retry_available_at: phase === "retry_wait" ? "2026-01-01T00:00:04Z" : null,
+          })}
+        />,
+      );
+      expect(screen.getAllByRole("note")).toHaveLength(1);
+      unmount();
+    }
+  });
+});
+
+describe("RunItem timeline disclosure", () => {
+  it("offers no disclosure when the page supplies no timeline", () => {
+    render(<RunItem run={apiRun()} />);
+    expect(screen.queryByRole("button", { name: /timeline/i })).toBeNull();
+  });
+
+  it("reveals the timeline on demand and reports its state", () => {
+    const { container } = render(<RunItem run={apiRun({ id: 9 })} timeline={<p>steps</p>} />);
+    const toggle = screen.getByRole("button", { name: /show timeline/i });
+
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(container.querySelector("#run-timeline-9")).toBeNull();
+
+    return userEvent.click(toggle).then(() => {
+      expect(screen.getByRole("button", { name: /hide timeline/i })).toHaveAttribute(
+        "aria-expanded",
+        "true",
+      );
+      expect(container.querySelector("#run-timeline-9")).toHaveTextContent("steps");
+    });
+  });
+
+  it("hides the timeline again without discarding the card", async () => {
+    const user = userEvent.setup();
+    const { container } = render(<RunItem run={apiRun({ id: 9 })} timeline={<p>steps</p>} />);
+
+    await user.click(screen.getByRole("button", { name: /show timeline/i }));
+    await user.click(screen.getByRole("button", { name: /hide timeline/i }));
+
+    expect(container.querySelector("#run-timeline-9")).toBeNull();
+    expect(screen.getByRole("button", { name: /show timeline/i })).toBeInTheDocument();
+  });
+});

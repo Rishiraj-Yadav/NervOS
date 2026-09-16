@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Annotated, Literal
 
 from nervos_core.domain.agents import AgentInstance, InvalidAgentInstance
+from nervos_core.domain.jobs import JobStatus, RunEvent, RunEventType
 from nervos_core.domain.runs import ModelUsage, Run, RunStatus
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
@@ -168,6 +169,52 @@ class RunUsageResponse(BaseModel):
     total_tokens: int | None
 
 
+class RunEventResponse(BaseModel):
+    """One durable Run Event, as an explicit allow-list of safe facts.
+
+    This is an allow-list rather than a serialization of the stored row. The durable Event carries
+    only fields that are safe to publish: it has no column for a claim token, lease, worker
+    identity, heartbeat, provider payload, prompt, output, or environment value, so nothing here
+    could leak even by accident. The four identifiers it *does* store -- the global event `id`, and
+    the `run_id`/`job_id`/`attempt_id` of the execution-obligation graph -- are deliberately not
+    projected: they are internal identity, and `sequence` plus `attempt_number` already carry every
+    fact the timeline needs.
+    """
+
+    sequence: int
+    event_type: RunEventType
+    created_at: datetime
+    attempt_number: int | None
+    code: str | None
+    message: str | None
+    available_at: datetime | None
+
+    @classmethod
+    def from_domain(cls, event: RunEvent) -> "RunEventResponse":
+        return cls(
+            sequence=event.sequence,
+            event_type=event.event_type,
+            created_at=event.created_at,
+            attempt_number=event.attempt_number,
+            code=event.code,
+            message=event.message,
+            available_at=event.available_at,
+        )
+
+
+class RunEventPageResponse(BaseModel):
+    """One ascending-sequence page of a Run's Event timeline.
+
+    `next_after_sequence` is a keyset cursor, not an offset: it is the last sequence returned when
+    the page came back full, and `None` once the history is drained. A client loop is therefore
+    `after_sequence = next ?? last_seen`, ending when this is null. A full final page costs one
+    further empty request to prove it is finished, which is why no count query exists to avoid it.
+    """
+
+    items: list[RunEventResponse]
+    next_after_sequence: int | None
+
+
 class RunResponse(BaseModel):
     """Immutable persisted Run representation with no limits or provider internals."""
 
@@ -188,6 +235,11 @@ class RunResponse(BaseModel):
     error_message: str | None
     usage: RunUsageResponse | None
     elapsed_ms: int | None
+    # Derived per read from the Run's one durable Job and never persisted, so these cannot drift
+    # from what they describe. They are convenience, not authority: nothing mutates on them, and
+    # a `running` Run waiting on a retry is otherwise indistinguishable from one executing now.
+    execution_phase: JobStatus | None
+    retry_available_at: datetime | None
 
     @classmethod
     def from_domain(cls, run: Run) -> "RunResponse":
@@ -209,6 +261,8 @@ class RunResponse(BaseModel):
             error_message=run.error_message,
             usage=usage_response(run.usage),
             elapsed_ms=run.elapsed_ms,
+            execution_phase=run.execution_phase,
+            retry_available_at=run.retry_available_at,
         )
 
 

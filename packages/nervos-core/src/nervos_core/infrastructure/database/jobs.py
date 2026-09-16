@@ -64,7 +64,13 @@ from nervos_core.application.model_completion import (
 from nervos_core.application.queue_policy import PRODUCTION_QUEUE_POLICY, QueuePolicy
 from nervos_core.application.retry_policy import RetryPolicy, retry_due_at
 from nervos_core.domain.agents import AgentDefinitionId
-from nervos_core.domain.jobs import AttemptStatus, JobStatus, RetryDisposition, RunEventType
+from nervos_core.domain.jobs import (
+    AttemptStatus,
+    JobStatus,
+    RetryDisposition,
+    RunEvent,
+    RunEventType,
+)
 from nervos_core.domain.runs import (
     WORKER_RECOVERY_EXHAUSTED,
     ModelUsage,
@@ -135,8 +141,19 @@ class _Fenced(RuntimeError):
     """A fenced update affected zero rows, so the whole transaction must roll back."""
 
 
-def run_from_record(record: RunRecord) -> Run:
-    """Map one persisted Run row onto the immutable domain value."""
+def run_from_record(
+    record: RunRecord,
+    *,
+    execution_phase: JobStatus | None = None,
+    retry_available_at: datetime | None = None,
+) -> Run:
+    """Map one persisted Run row onto the immutable domain value.
+
+    `execution_phase` and `retry_available_at` are supplied only by the owner-scoped read paths,
+    which join the one Job behind the Run. They are passed in rather than looked up here so this
+    mapper stays a pure row translation with no second query, and so every existing caller that
+    has no Job in hand keeps working unchanged.
+    """
     limits = RunLimits(
         record.input_max_bytes,
         record.input_max_code_points,
@@ -165,6 +182,29 @@ def run_from_record(record: RunRecord) -> Run:
         record.error_message,
         ModelUsage(record.input_tokens, record.output_tokens, record.total_tokens),
         record.elapsed_ms,
+        execution_phase,
+        retry_available_at,
+    )
+
+
+def run_event_from_record(record: RunEventRecord) -> RunEvent:
+    """Map one persisted Run Event row onto the immutable domain value.
+
+    The row is the whole fact: C1 stores no payload, token, lease, worker identity, or provider
+    detail, so reading it back is a field-for-field translation with nothing to decide.
+    """
+    return RunEvent(
+        record.id,
+        record.run_id,
+        record.job_id,
+        record.attempt_id,
+        record.sequence,
+        RunEventType(record.event_type),
+        record.code,
+        record.message,
+        record.attempt_number,
+        record.available_at,
+        record.created_at,
     )
 
 
@@ -530,6 +570,7 @@ class SqlAlchemyJobPersistence:
             limits,
             RunStatus.CREATED,
             now,
+            execution_phase=JobStatus.QUEUED,
         )
 
     def _reconcile_submission(self, run_id: int) -> Run | None:
@@ -541,8 +582,15 @@ class SqlAlchemyJobPersistence:
         failure and is never replayed; an absent Run means nothing committed.
         """
         with self._engine.connect() as connection:
-            job_id = connection.scalar(
-                select(func.min(JobRecord.id)).where(JobRecord.run_id == run_id)
+            job = (
+                connection.execute(
+                    select(JobRecord.id, JobRecord.status, JobRecord.available_at)
+                    .where(JobRecord.run_id == run_id)
+                    .order_by(JobRecord.id)
+                    .limit(1)
+                )
+                .mappings()
+                .one_or_none()
             )
             sequences = [
                 (int(sequence), event_type)
@@ -555,12 +603,19 @@ class SqlAlchemyJobPersistence:
         record = read_run_record(self._engine, run_id)
         if record is None:
             return None
-        if job_id is None or sequences != [
+        if job is None or sequences != [
             (1, RunEventType.RUN_CREATED.value),
             (2, RunEventType.RUN_QUEUED.value),
         ]:
             raise PersistenceUnavailable
-        return run_from_record(record)
+        # The committed Job is read rather than assumed: a lost response can be reconciled after a
+        # Worker has already claimed the Run, and reporting `queued` then would be a stale claim.
+        phase = JobStatus(job["status"])
+        return run_from_record(
+            record,
+            execution_phase=phase,
+            retry_available_at=job["available_at"] if phase is JobStatus.RETRY_WAIT else None,
+        )
 
     def append_event(
         self,
@@ -2277,6 +2332,7 @@ __all__ = [
     "DurableSubmissionRejected",
     "SqlAlchemyJobExecutionPersistence",
     "SqlAlchemyJobPersistence",
+    "run_event_from_record",
     "run_from_record",
 ]
 

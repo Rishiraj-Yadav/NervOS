@@ -6,6 +6,7 @@ import {
   apiAgentInstance,
   apiError,
   apiRun,
+  apiRunEvent,
   authenticatedHandler,
   renderRoute,
   setupStatusHandler,
@@ -521,5 +522,92 @@ describe("agent detail page cancellation", () => {
     // The run keeps the status the server actually reports; no optimistic rewrite.
     await waitFor(() => expect(screen.queryByText("Cancelled")).toBeNull());
     expect(screen.getByText("Running")).toBeVisible();
+  });
+});
+
+/**
+ * The execution timeline reaches the page through the Run card, and only when the reader asks for
+ * it. These assertions are the reason the harness's `onUnhandledRequest: "error"` setting matters:
+ * the events endpoint is deliberately *not* stubbed in most of this file, so any request the card
+ * made on its own would fail the suite rather than quietly log.
+ */
+describe("agent detail page timeline", () => {
+  it("costs no request until the reader expands a run", async () => {
+    const requests: number[] = [];
+    const run = apiRun({ id: 9, status: "succeeded" });
+    server.use(
+      ...detailHandlers({ runs: [run] }),
+      http.get("/api/v1/runs/9/events", ({ request }) => {
+        requests.push(Number(new URL(request.url).searchParams.get("after_sequence") ?? "0"));
+        return HttpResponse.json({
+          items: [
+            apiRunEvent({ sequence: 1, event_type: "run.created" }),
+            apiRunEvent({ sequence: 2, event_type: "run.queued" }),
+            apiRunEvent({ sequence: 3, event_type: "run.succeeded" }),
+          ],
+          next_after_sequence: null,
+        });
+      }),
+    );
+
+    const { user } = await renderRoute("/agents/1");
+    await screen.findByText("Succeeded");
+    expect(requests).toEqual([]);
+
+    await user.click(screen.getByRole("button", { name: /show timeline/i }));
+
+    expect(await screen.findByText("Run accepted")).toBeVisible();
+    expect(requests).toEqual([0]);
+  });
+
+  it("reconstructs the timeline from the server on a reload", async () => {
+    const run = apiRun({ id: 9, status: "failed", output_text: null, error_code: "model_timed_out", error_message: "The model request exceeded its time limit." });
+    server.use(
+      ...detailHandlers({ runs: [run] }),
+      http.get("/api/v1/runs/9/events", () =>
+        HttpResponse.json({
+          items: [
+            apiRunEvent({ sequence: 1, event_type: "run.created" }),
+            apiRunEvent({
+              sequence: 2,
+              event_type: "run.failed",
+              code: "model_timed_out",
+              message: "The model request exceeded its time limit.",
+            }),
+          ],
+          next_after_sequence: null,
+        }),
+      ),
+    );
+
+    const first = await renderRoute("/agents/1");
+    await first.user.click(await screen.findByRole("button", { name: /show timeline/i }));
+    const rows = (await screen.findAllByRole("listitem")).map((row) => row.textContent);
+    first.unmount();
+
+    const second = await renderRoute("/agents/1");
+    await second.user.click(await screen.findByRole("button", { name: /show timeline/i }));
+
+    expect((await screen.findAllByRole("listitem")).map((row) => row.textContent)).toEqual(rows);
+    expect(screen.getByText(/was not retried/)).toBeVisible();
+  });
+
+  it("explains a timeout without calling it a cancellation", async () => {
+    const run = apiRun({ id: 9, status: "failed", output_text: null, error_code: "model_timed_out", error_message: "The model request exceeded its time limit." });
+    server.use(
+      ...detailHandlers({ runs: [run] }),
+      http.get("/api/v1/runs/9/events", () =>
+        HttpResponse.json({
+          items: [apiRunEvent({ sequence: 1, event_type: "run.created" })],
+          next_after_sequence: null,
+        }),
+      ),
+    );
+
+    const { user, container } = await renderRoute("/agents/1");
+    await user.click(await screen.findByRole("button", { name: /show timeline/i }));
+    await screen.findByRole("list");
+
+    expect(container.textContent).not.toMatch(/cancel/i);
   });
 });

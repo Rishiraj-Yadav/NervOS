@@ -2,7 +2,7 @@
 
 ## Status
 
-Stage C3 Worker registry, expired-lease reconciliation, and fencing hardening are implemented, and C4 adds the durable execution retry engine. Stage B's trusted `nervos.chat@1` behavior and the two reviewed production provider adapters remain the only executable agent/model surface, but execution is no longer awaited inside the API process, a Worker's work is recovered or closed truthfully instead of staying stranded, and a failure the provider positively declined is retried durably rather than lost.
+Stage C — the persistent execution engine — is complete. C1 through C6 built the durable kernel: submission, lease-fenced Worker execution, recovery, safe retry, owner cancellation, execution timeouts, authoritative global/per-Agent/per-provider concurrency, durable Agent fairness, and admission backpressure. C7 adds public read-only execution observability — the Run Events endpoint, the derived execution phase, the execution timeline, and the polling model — without adding any execution authority. C8 provides integrated deterministic acceptance for the whole engine. Stage B's trusted `nervos.chat@1` behavior and the two reviewed production provider adapters remain the only executable agent/model surface, but execution is no longer awaited inside the API process, a Worker's work is recovered or closed truthfully instead of staying stranded, a failure the provider positively declined is retried durably rather than lost, and the whole history is now legible to the Run's owner.
 
 ## Durable execution path
 
@@ -42,10 +42,58 @@ PATCH  /api/v1/agent-instances/{agent_instance_id}
 POST   /api/v1/agent-instances/{agent_instance_id}/runs
 GET    /api/v1/agent-instances/{agent_instance_id}/runs
 GET    /api/v1/runs/{run_id}
+GET    /api/v1/runs/{run_id}/events
 POST   /api/v1/runs/{run_id}/cancel
 ```
 
-There is still no global `POST /runs`, no `POST /chat`, no Run Events endpoint, no worker-health endpoint, no streaming, and no re-execute endpoint.
+There is still no global `POST /runs`, no `POST /chat`, no worker-health endpoint, no Attempt endpoint, no streaming, and no re-execute endpoint.
+
+### Reading a Run's execution timeline
+
+`GET /api/v1/runs/{run_id}/events` returns one page of a Run's durable Event history. It is
+**owner-scoped by the same rule as the Run itself**: a foreign Run and a nonexistent one produce the
+same `404 run_not_found`, so a timeline can never be used to probe whether another user's Run exists.
+It is read-only and carries no mutation authority — it cannot claim, start, retry, cancel, or execute
+anything.
+
+Each Event carries exactly `sequence`, `event_type`, `created_at`, `attempt_number`, `code`,
+`message`, and `available_at`. No Job, Attempt, claim token, worker identity, lease, heartbeat, queue
+or fairness state, credential, prompt, or output is exposed. `code` and `message` are the same
+sanitized error pair already visible on the Run.
+
+`sequence` is the Run-local order the writers allocated, and it is contiguous from `1`: it is
+allocated from a per-Run high-water mark read once inside the writing transaction, so a batch is
+committed atomically. `created_at` is display metadata only, and several Events legitimately share
+one instant.
+
+Pagination is a **keyset cursor**, never an offset: `after_sequence` starts at `0`, `limit` defaults
+to 50 and is bounded to 200, and the response carries `next_after_sequence` — the last sequence
+returned when the page came back full, and `null` once the history is drained. A client loop is
+therefore `after_sequence = next ?? last_seen`. Because each page is one committed statement
+snapshot, a client that has applied everything up to sequence `S` cannot have skipped an Event, so a
+later poll always closes the gap. A history ending exactly on a page boundary costs one further empty
+request to confirm it is drained.
+
+**Security boundary.** The Event endpoint returns the safe durable value it found; it performs no
+response-time redaction and none is claimed. Events are safe because the *writers* are: a provider
+failure is normalized to a frozen NervOS code before anything is persisted, and the stored message is
+that code's static allow-list sentence, so no raw provider text ever reaches the row. A database an
+operator has manually written arbitrary text into is outside this guarantee.
+
+### Derived execution phase
+
+Run responses carry two additional read-only fields that describe the durable Job behind the Run.
+They are computed per read and never stored, and they carry no authority.
+
+- `execution_phase` is the Job's own durable status, verbatim: `queued`, `claimed`, `running`,
+  `retry_wait`, `succeeded`, `failed`, or `cancelled`. It is **not** a new Run status — the Run
+  lifecycle is unchanged, and a Run waiting to retry is still a `running` Run.
+- `retry_available_at` is present only while the phase is `retry_wait`, and is the instant the next
+  Attempt becomes due.
+
+This is what makes "executing now" and "waiting to retry" distinguishable on screen. Nothing that
+mutates execution reads either field: the phase is a projection, and the Job lease remains the only
+authority.
 
 ## Boundaries preserved and changed
 
@@ -55,6 +103,8 @@ There is still no global `POST /runs`, no `POST /chat`, no Run Events endpoint, 
 - **Known provider vs. configured capability.** The API validates that a provider identifier is known. A known provider with no configured Worker credential is accepted into the durable queue and remains queued until a capable Worker exists. Unknown provider identifiers are still rejected.
 - **Worker capability filter.** A Worker claims only Jobs whose `jobs.model_provider` is in its configured provider set. A Worker with zero configured providers starts, claims nothing, and fails nothing.
 - **No fallback.** There is no provider fallback and no model fallback. The immutable Run snapshot decides the provider/model for execution.
+- **Observability cannot execute.** The Run Events endpoint is read-only and carries no mutation authority. It reaches no write primitive, composes no execution capability, and cannot claim, start, retry, cancel, reconcile, heartbeat, or terminalize anything. The derived `execution_phase` it accompanies is a projection of the Job's own status and is read by no module that mutates execution.
+- **Scheduling topology stays private.** Queue position, partition, fairness rank, active and pending counts, and Worker identity are never published, and the frontend is forbidden from naming them.
 
 ## Queue, fairness, and lease limits
 
@@ -171,6 +221,10 @@ Registry health is **observability, not authority**. `stale` means "not observed
 - A Run that ends `failed` with `worker_recovery_exhausted` never started at all: its Job's claim budget was exhausted by repeated Worker loss before execution began. Redeploy the Worker and submit a new Run.
 - A **pre-C2** legacy Run that was `created` with no Job can remain permanently `created`; NervOS does not fabricate a start time to close it.
 
+Expand the Run's timeline to see which of these it is. Its `execution_phase` distinguishes a Run that
+is executing now from one waiting out a retry backoff — both are simply `running` at the Run level,
+and the timeline shows the failure that scheduled the retry together with the instant it is due.
+
 ## Legacy closeout
 
 An explicit operator command handles old Stage B data only:
@@ -181,8 +235,40 @@ uv run python -m nervos_worker --reconcile-legacy-runs
 
 It closes legacy `running` Runs that have no Job as `failed` with `execution_outcome_ambiguous`, using the Run's real `started_at`. It does not run the model, does not create Job/Attempt/Event rows, and leaves legacy `created` Runs untouched. Normal Worker startup does not run this closeout.
 
+> **The polling bound in the second limitation was retired by C7.** The current model is described in the next section.
+
+## Polling an execution timeline
+
+
+Stage C observability is HTTP polling. There is no SSE, no WebSocket, and no long-poll transport: the
+Event stream is append-only and ordered by a Run-local `sequence`, so a keyset cursor is lossless and
+needs no connection lifecycle.
+
+The dashboard reveals a Run's timeline on demand, and a collapsed Run issues no request. While a
+displayed Run is nonterminal the Run list polls every **2 seconds** for the first 30 updates and
+every **10 seconds** afterwards, with **no hard stop** — a live Run stays observed for as long as the
+page is open. Once every displayed Run is terminal, polling stops entirely.
+
+The Event timeline fetches **only what it has not seen**: the first request uses `after_sequence = 0`
+and every later request uses the highest sequence already applied. Pages are merged by a union keyed
+on `sequence` alone — never a timestamp and never array position — so a duplicate delivery renders one
+row and an out-of-order response cannot move the cursor backwards. The browser is never the authority
+for the timeline: it holds no Event it did not receive from the API, and a reload rebuilds the whole
+history from durable state.
+
+When a Run becomes terminal the timeline performs **one final catch-up drain cycle**: the interval has
+already stopped, so a single further fetch is issued deliberately, and because a fetch drains every
+remaining page that one cycle may span several requests. Without it, the terminal Event — committed in
+the same transaction that made the Run terminal — could be missed by a timer that stopped first.
+
+**What the timeline never claims.** A timeout is shown as a failure, never as a cancellation. A stale
+Worker is never described as having died or crashed, because a stale registry row and a paused process
+are indistinguishable by design and only the durable lease event was ever observed. Cancellation copy
+repeats its own limit: NervOS stopped waiting locally, and a request already sent may still have been
+processed.
+
 ## Still not implemented
 
-Conversation sessions, memory, tools/MCP, scheduling, event triggers, package installation, marketplace, and persistent secret management remain unimplemented. A public Run Events API, an event timeline, richer execution observability, and a Worker dashboard remain C7. Provider-side remote cancellation is not implemented and is not claimed. Active-concurrency limits are not runtime-tunable: changing them means changing policy code, and per-Agent-Instance custom limits are not implemented (see ADR 0013).
+Conversation sessions, memory, tools/MCP, scheduling, event triggers, package installation, marketplace, and persistent secret management remain unimplemented. Provider-side remote cancellation is not implemented and is not claimed. Active-concurrency limits are not runtime-tunable: changing them means changing policy code, and per-Agent-Instance custom limits are not implemented (see ADR 0013). A Worker dashboard, a public Attempt API, a queue-position or fairness-rank API, and SSE/WebSocket streaming are **not** implemented; Run history is read through the Run Events endpoint and the dashboard timeline described above.
 
-Two C4 limitations are worth knowing when reading a retried Run. First, `elapsed_ms` and the usage counters describe the **terminal Attempt** only: they exclude earlier Attempts, the retry wait, and total Run wall-clock duration, and there is no cumulative cross-Attempt token accounting. Second, the read-only UI polls for a bounded period and then stops; that bound is not a completion guarantee, because a Run can outlast it through Worker downtime, provider duration, pre-start loss, lease recovery, or host downtime. The Run's durable state is still correct, and reloading the page shows the current state.
+Two C4 limitations remain worth knowing when reading a retried Run. First, `elapsed_ms` and the usage counters describe the **terminal Attempt** only: they exclude earlier Attempts, the retry wait, and total Run wall-clock duration, and there is no cumulative cross-Attempt token accounting. Second, the read-only UI polls for a bounded period and then stops. **That polling bound was retired by C7** — the current model is in [Polling an execution timeline](#polling-an-execution-timeline) above. The underlying point still holds for a stale page: a Run can outlast any observation window through Worker downtime, provider duration, pre-start loss, lease recovery, or host downtime, and the Run's durable state is correct regardless, because reloading the page always shows the current state.

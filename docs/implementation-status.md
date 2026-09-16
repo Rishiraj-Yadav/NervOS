@@ -2,9 +2,11 @@
 
 ## Current phase
 
-Stage C — Persistent execution engine is IN PROGRESS. The C0 architecture freeze, the C1 durable execution foundation, C2 — asynchronous submission and minimal durable Worker execution — C3 — Worker registry/health, expired-lease reconciliation, and fencing hardening — C4 — the safe execution retry engine — C5 — owner cancellation and Attempt execution-timeout orchestration — and C6 — authoritative global/per-Agent/per-provider execution concurrency, durable Agent fairness, and full admission backpressure — are implemented, externally reviewed, and accepted. C7 has not started.
+Stage C — Persistent execution engine is COMPLETE. The C0 architecture freeze, the C1 durable execution foundation, C2 — asynchronous submission and minimal durable Worker execution — C3 — Worker registry/health, expired-lease reconciliation, and fencing hardening — C4 — the safe execution retry engine — C5 — owner cancellation and Attempt execution-timeout orchestration — C6 — authoritative global/per-Agent/per-provider execution concurrency, durable Agent fairness, and full admission backpressure — C7 — public read-only execution observability, the Run Events API, the execution timeline, and the polling model — and C8 — integrated deterministic Stage C acceptance and closeout — are implemented, externally reviewed, and accepted.
 
 Stage B — Trusted-agent runtime proof is complete and accepted. B1 domain/persistence, B2 internal one-call execution, B3 trusted Agent/Run HTTP API with the minimal Chat dashboard interaction, and B4 second-provider portability are implemented, merged to `main`, and post-merge verified.
+
+The next engineering milestone is **Stage D — tool and MCP layer**: the tool registry, the MCP gateway and client, capability schemas, the permission engine, tool audit events, and the first default tools. **Stage D has not started.**
 
 ## Stage C milestones
 
@@ -15,8 +17,8 @@ Stage B — Trusted-agent runtime proof is complete and accepted. B1 domain/pers
 - [x] C4 — Safe execution retry engine (durable `SAFE_TO_RETRY` re-execution and backoff)
 - [x] C5 — Owner cancellation and Attempt execution-timeout orchestration
 - [x] C6 — Authoritative execution concurrency, durable Agent fairness, and admission backpressure
-- [ ] C7 — Not started
-- [ ] C8 — Not started
+- [x] C7 — Public read-only execution observability, Run Events API, execution timeline, and polling model
+- [x] C8 — Integrated deterministic Stage C acceptance and closeout
 
 C2 passed external source review after a bounded remediation pass, passed every hosted check on pull
 request [#11](https://github.com/Rishiraj-Yadav/NervOS/pull/11), and was merged to `main` in merge
@@ -34,8 +36,12 @@ update in a single C5 milestone change, so it records no pull request number and
 its own. C6 passed external review of its plan — which rejected the planned global-Attempt-cursor
 fairness algorithm on evidence — then external implementation review. C6 is likewise authored and
 verified together with this status update in a single C6 milestone change, so it records no pull
-request number and no merge commit of its own. C7 and C8 have no implementation and require separate
-planning, external plan review, and explicit implementation authorization.
+request number and no merge commit of its own. C7 and C8 were planned together as one final Stage C
+delivery, passed external review of that combined plan — which corrected the terminal-catch-up
+contract and restated the security boundary as a writer-side guarantee — then external review of the
+combined implementation, which accepted both. C7 and C8 are likewise authored and verified together
+with this status update in a single Stage C closeout change, so they record no pull request number
+and no merge commit of their own.
 
 ## Stage B milestones
 
@@ -370,6 +376,143 @@ every step including the E2E. The protected migrations, ORM model module, provid
 policy, and C3 reclamation module were byte-identical throughout, and the default `~/.nervos/nervos.db`
 was unchanged.
 
+## C7 implementation verification
+
+C7 makes the execution kernel observable to its owner without giving the observability surface any
+authority. It is recorded in ADR 0014. It is deliberately an observability milestone, not an
+execution one: it changes no lease, no fence, no retry, no cancellation, no fairness, no cap, and no
+provider invocation.
+
+**Migration: none.** C7 consumes no migration number and adds no index, and the head remains
+`0006_stage_c6_queue_partitions`. The decision rests on measurement rather than preference:
+`UNIQUE(run_id, sequence)` already materialises in SQLite as an implicit index, and the pagination
+predicate plans as `SEARCH run_events USING INDEX sqlite_autoindex_run_events_1 (run_id=? AND
+sequence>?)` — a range seek on both columns with no temporary B-tree, no scan of other Runs, and the
+`LIMIT` satisfied by index order. An explicit index would have been a named duplicate of one SQLite
+already maintains. A second consequence is recorded because it shapes the tests: SQLAlchemy's
+inspector does not report SQLite's implicit autoindexes, so C7 asserts the query **plan** rather than
+the inspector's index list, and the migration suite's assertion about the `run_events` index set is
+unchanged.
+
+**One new public route.** `GET /api/v1/runs/{run_id}/events` is added to the existing Runs route
+module, which is why `router.py` is not modified at all and **no architecture guard required
+relaxation**. It is read-only by construction: the module carries no mutation verb for this
+subresource, reaches no write primitive, and the application method it calls performs two `SELECT`s.
+It cannot claim, start, retry, cancel, reconcile, heartbeat, execute provider work, or change Worker
+state.
+
+**Owner scoping reuses the Run's proven rule.** The service resolves `get_run(owner_user_id, run_id)`
+first, which raises `RunNotFound` for a foreign Run and a missing one alike, so both produce the same
+`404 run_not_found` through the one error envelope and event history can never be used to probe
+whether another user's Run exists. Ownership is immutable after submission, so the two-read sequence
+has no window in which a Run could change hands.
+
+**The public projection is an allow-list**, asserted as an exact key set: `sequence`, `event_type`,
+`created_at`, `attempt_number`, `code`, `message`, `available_at`. Four stored identifiers are
+deliberately withheld — the global Event `id` (an AUTOINCREMENT value encoding system-wide volume,
+where `sequence` is the Run-local order), `run_id` (implicit in the path), and `job_id`/`attempt_id`
+(internal execution-obligation identity, where `attempt_number` already carries the label a reader
+needs). No worker identity, claim token, lease, heartbeat, queue or fairness state, credential,
+provider payload, prompt, or output is published, and none of those has a column in `run_events` in
+the first place. `code` and `message` are *retained*: they are the sanitized error pair, bounded by
+CHECK constraints, already public on the Run response, and exactly what makes a failed attempt
+legible.
+
+**The security boundary is the writer, not the reader.** `run_events` has no column for a token,
+lease, worker identity, heartbeat, credential, provider payload, prompt, output, or environment
+value; nowhere in the schema is there a JSON or free-form detail column; exactly one insert primitive
+appends Events; and its free text is length-bounded by CHECK constraints rather than by convention.
+Production writers normalize before persisting: a provider failure resolves to a frozen NervOS code
+whose allow-list entry is a static sentence, and no production call site supplies free text. **There
+is deliberately no response-time secret-redaction layer, and none is claimed** — the endpoint returns
+the safe durable value it found and does not inspect, filter, or rewrite it. A database an operator
+has manually poisoned with arbitrary text is outside this API's security guarantee. The supported
+guarantee is narrower and stronger: text that reached the row through a production mutation path is
+normalized, so the reader has nothing to strip.
+
+**Ordering and pagination.** `sequence` is the authoritative order and `created_at` is display
+metadata only: the sequence is allocated contiguously from a per-Run high-water mark read once inside
+the writing transaction, so the stream is `1..N` with no gaps, and a batch is committed atomically.
+Pagination is a keyset cursor — `sequence > after_sequence`, ascending, `limit` default 50 and
+bounded to 1..200, out-of-range rejected with `422` — never an offset, which would shift under the
+concurrent appends this stream is built from. The envelope carries `next_after_sequence`, so a client
+loop terminates on `null` and a full final page costs one empty probe rather than a count query.
+Because a writer allocates from `MAX(sequence) + k` in its own transaction, a reader sees a whole
+batch or none of it, and a client that has applied up to sequence `S` can never have skipped an
+Event. No snapshot token is required.
+
+**Derived Run observability.** Run responses gain two additive read-only fields:
+`execution_phase`, the Job's own durable status verbatim
+(`queued | claimed | running | retry_wait | succeeded | failed | cancelled`, renaming nothing and
+introducing no new Run status), and `retry_available_at`, present only while the phase is
+`retry_wait`. Both are derived per read by joining the one Job behind the Run and are never
+persisted, so neither can drift, and neither is authority: no module that mutates execution reads
+them, cancellation eligibility remains gated on the Run's own status, and a phase that is stale the
+instant it is serialised can hide no action from an owner entitled to take it.
+
+**Timeline and polling.** The dashboard gains an expandable disclosure inside the existing Run card
+that mounts its timeline only when opened, so a collapsed Run costs no request. All thirteen Event
+types have a total compile-time copy mapping, so a new server-side type cannot render as a raw enum.
+The hard ~300-second polling stop is **retired**: 2-second polling for the first 30 updates,
+10-second polling afterwards, no hard stop while a displayed Run remains nonterminal, and a full
+stop once every displayed Run is terminal. Event polling is incremental by sequence, merging pages by
+a union keyed on `sequence` alone — never a timestamp, never array position — so duplicate delivery
+renders one row and out-of-order responses cannot move the applied cursor backwards. When a Run
+becomes terminal the timeline performs **one final catch-up drain cycle**, which may span several
+requests, and then stops permanently. Copy keeps a timeout distinct from a cancellation, never
+asserts that a Worker died, and preserves the limit that cancellation claims no remote stop.
+
+**No Attempt API, no Worker API or dashboard, no SSE/WebSocket, and no queue-position or fairness
+surface.** An Attempt API was declined on safety as well as scope: `job_attempts` does hold
+`claim_token`, `worker_id`, `lease_expires_at`, and `last_heartbeat_at`, so an endpoint over it would
+carry a permanent obligation to project those columns away correctly on every response, whereas the
+Event timeline represents the whole user-facing attempt history from a table with nothing to redact.
+
+## C8 implementation verification
+
+C8 is integrated deterministic acceptance for Stage C, not a feature milestone. It adds **no**
+product architecture: no API, no status, no table, no migration, no execution policy, no queue
+policy, no transport, no configuration, and no authority mechanism. No production defect was found
+after the C7 source freeze, so no source re-freeze and no evidence rerun was required.
+
+**Integrated matrix A–L.** Every scenario composes the real modules C2–C7 shipped rather than
+re-implementing a transition, and every scenario ends by checking that the public Event timeline
+agrees with the durable final state: normal success; pre-start Worker loss recovered and executed
+exactly once; post-start loss closed as ambiguous with no replay at any later instant; a positively
+safe rate limit retried while still honouring all three caps; a committed retry surviving a restart
+and resuming when due; pre-start cancellation making zero provider calls; running cancellation
+fencing every late write; an execution timeout failing as ambiguous with no retry and an event set
+disjoint from cancellation; the three concurrency dimensions observed never exceeded; fairness
+rotating while recovery and retries interleave; three-dimensional backpressure rejecting atomically
+and releasing without leak; and the timeline agreeing in every terminal shape.
+
+**Restart acceptance.** Durable state survives engine teardown, runtime recomposition and reopen: a
+queued Job, a `retry_wait` Job with its exact due instant, the `queue_partitions` fairness history,
+Worker incarnation and staleness, and every Run and Event. The suite disposes and reopens the
+database engine and rebuilds the composition inside one test process; it does **not** spawn a second
+interpreter, and it does not claim to. What it establishes is the property that matters: no
+correctness depends on runtime in-memory state, only on the database file.
+
+**Multi-Worker composition and bounded stress.** Two and three Workers over one database with
+separate engines assert that unrelated capacity is unaffected when one loses authority, and that
+recovery, retries, cancellation and Event ordering still compose. The bounded soak covers the frozen
+scale of 4 Agent Instances × 2 providers × 3 heterogeneous Workers × 120 Jobs with outcomes assigned
+deterministically by index — never at random — and time advanced by parameter rather than by waiting
+on real backoff. Across it: no global, per-Agent or per-provider cap was ever exceeded; no Job ever
+held two live Attempts; every continuously eligible Agent partition was served; no pending-capacity
+leak remained after the workload drained; every Run settled truthfully; and no Event sequence
+collided or gapped.
+
+**Integrity, migration lifecycle and security.** `PRAGMA integrity_check` returns `ok` and
+`PRAGMA foreign_key_check` is empty on the acceptance database, with active-Attempt uniqueness,
+`jobs.attempt_count` agreement with the durable Attempt count, and no dangling fairness marker
+asserted alongside. The migration lifecycle is exercised fresh-to-head, stepwise, and through the
+supported downgrades, with the head confirmed still `0006` and no `0007` or `0008`. A composed
+security acceptance drives a raw provider exception carrying a key, a private-key marker and an
+authorization value through the production execution path and asserts the secret reaches no durable
+text and no public surface, and that every durable message is exactly the allow-list entry for its own
+durable code.
+
 ## C6 implementation verification
 
 C6 completes the queue-control layer: it makes execution concurrency authoritative, replaces global
@@ -504,7 +647,9 @@ C4 activates durable execution retry for the one failure class that is positivel
 
 **Accepted limitations, recorded rather than hidden.** Run `elapsed_ms` and Run usage remain the **terminal** Attempt's values; they do not include earlier Attempts, retry-wait time, or total Run wall-clock duration, and C4 provides no cumulative cross-Attempt token accounting (per-Attempt accounting would need a schema revision, which C4 does not add). The bounded read-only UI poll (roughly 300 seconds at 2-second intervals) is unchanged and is **not** a completion guarantee: a Run's durable state stays correct across Worker downtime, provider duration, pre-start loss, lease recovery, or host downtime, and a later reload or refetch shows the current state. Richer execution observability remains C7.
 
-**Explicitly not provided by C4.** No cancellation (C5), no fairness, queue partitions, or per-Agent/per-provider concurrency (C6), and no public Run Events API, timeline, Worker dashboard, SSE, or WebSockets (C7). C4 does not read, write, or prioritize `cancel_requested_at`, and C4 ships no cancellation endpoint, no `cancelled` Run status, and no cancel-versus-retry rule. C4 does not claim exactly-once execution and claims no provider-side rollback or cancellation. (C5 later implemented owner cancellation and execution-timeout orchestration, and C6 later implemented authoritative concurrency, durable Agent fairness, and admission backpressure; the C4 sections remain the historical record of the state C4 shipped.)
+> **Superseded by C7.** The ~300-second polling bound above was retired, not raised. It existed so that an abandoned Run could not be presented as actively progressing; with a durable execution timeline and a truthful derived execution phase, a Run that is not progressing now renders as exactly that, so the UI no longer needs a request budget to stay honest. Current behaviour is 2-second polling for the first 30 updates, 10-second polling afterwards, no hard stop while a displayed Run remains nonterminal, and a stop once every displayed Run is terminal. The cumulative cross-Attempt token-accounting limitation above still stands.
+
+**Explicitly not provided by C4.** No cancellation (C5), no fairness, queue partitions, or per-Agent/per-provider concurrency (C6), and no public Run Events API, timeline, Worker dashboard, SSE, or WebSockets (C7). C4 does not read, write, or prioritize `cancel_requested_at`, and C4 ships no cancellation endpoint, no `cancelled` Run status, and no cancel-versus-retry rule. C4 does not claim exactly-once execution and claims no provider-side rollback or cancellation. (C5 later implemented owner cancellation and execution-timeout orchestration, C6 later implemented authoritative concurrency, durable Agent fairness, and admission backpressure, and C7 later implemented the read-only Run Events API, the execution timeline, and the polling model. A Worker dashboard, an Attempt API, and SSE/WebSockets remain unimplemented. The C4 sections remain the historical record of the state C4 shipped.)
 
 **Verification.** The accepted C4 candidate passed 71 focused C4 tests; the full Python suite of 704 tests (55 Worker, 158 API); 26 architecture guards; 92 frontend tests; 21 E2E-supervisor tests; Ruff lint and format; Pyright with zero errors and zero warnings; frontend lint, typecheck, and production build; the tracked-file security scan (265 files, no findings); and an `EXPLAIN QUERY PLAN` check proving the widened due-work query still resolves through the existing `jobs` status index rather than scanning. Migration head was confirmed still `0004` with exactly four migrations. A deterministic supervised browser journey proves the retry end to end — a scripted rate limit, a durable `retry_wait`, a still-running Run, a second Attempt after the due instant, and exactly two provider calls for that Run — and asserts from committed state that the retry's own `claimed_at` is not before its `available_at`, that the Run's `started_at` equals the first Attempt's start, and that no `run.failed` occurred. It passed twice consecutively, and `check` and the isolated `clean-check` gate both passed. Protected files were byte-identical throughout and the default `~/.nervos/nervos.db` was unchanged (size 65536, sha256 `f60ed2b32637d314d31a4305c704b5f80ff0db14adbefdff156368cc5f05800f`). No live provider request was made.
 
@@ -548,13 +693,68 @@ Schema-parity protection: `alembic check` does not compare SQLite CHECK constrai
 
 Verification: the full Python suite (569 tests), the frontend suite (85 tests), Ruff lint and format, Pyright, the security scan, the migration upgrade/downgrade/re-upgrade lifecycle, the deterministic offline E2E journey, `check`, and `clean-check` all passed. No live provider request was made, and the default database `~/.nervos/nervos.db` was unchanged. C1 passed external implementation and remediation review, was finalized as implementation commit `8e9c9da`, and was merged to `main`.
 
+## Accepted Stage C limitations
+
+These are recorded rather than hidden, and they are not softened elsewhere in the documentation.
+
+**Exactly-once is not guaranteed.** NervOS does **not** guarantee exactly-once remote provider
+execution. What it does guarantee is narrower and verifiable: **fenced durable authority**, so only a
+live lease holder may write; **no blind replay of ambiguous execution**, so an unknown outcome is
+closed as failed rather than repeated; **safe retry only for a positively safe outcome**, checked
+twice; and **late stale writes cannot overwrite truth**. Remote provider processing, billing, and side
+effects may still occur after an ambiguous post-start crash, a running cancellation, or an execution
+timeout — they remain outside the local transaction boundary, and no local mechanism can undo them.
+
+**No provider fallback.** A provider failure fails the Run; it is never re-routed to another
+provider or another model. SDK-level retries remain disabled in both adapters (`max_retries=0`).
+
+**Remote cancellation is not guaranteed.** Cancelling stops *NervOS* from waiting for and persisting
+a result. It does not and cannot prove that a provider stopped processing a request it already
+received, so cancellation claims no remote stop, no billing stop, and no remote rollback.
+
+**A non-cooperative coroutine cannot be forcibly killed.** The outer watchdog observes and records;
+it does not terminate Python work that refuses to yield.
+
+**Concurrency policy is not runtime-tunable**, and there is no per-Agent-Instance custom limit. The
+policy constants are shared and deliberately rigid — a claim compares a database-wide count against
+its limit, so a Worker holding a different limit would let the fleet run above the intended bound
+(ADR 0013).
+
+**Observability is polling, not streaming.** There is no SSE, no WebSocket, and no long-poll
+transport. The Event timeline is sequence-incremental and lossless, and a page left open polls slowly
+for as long as a displayed Run is nonterminal.
+
+**No public scheduling topology.** Queue position, partition, fairness rank, active and pending
+counts, and Worker identity are not public anywhere.
+
+**No Worker API or dashboard, and no separate Attempt API.** Worker registry `stale` means "not
+observed recently", never "dead", and no Worker surface is public in Stage C. Attempt history is
+reached through Run Events rather than a dedicated endpoint.
+
+**Token accounting is terminal-Attempt-centric.** Run `elapsed_ms` and Run usage remain the terminal
+Attempt's values; they exclude earlier Attempts, retry-wait time, and total Run wall-clock duration,
+and cumulative cross-Attempt token accounting is not implemented.
+
+**`execution_phase` is convenience, not authority.** It is derived per read, never persisted, and
+stale by nature; nothing that mutates execution reads it.
+
+**And the durable execution database is SQLite, single-node.** Stage C is one SQLite database on one
+host; there is no distributed coordination, and no claim about behaviour under a multi-writer
+deployment is made.
+
 ## Next action
 
-C6 is complete and externally accepted. Execution concurrency is authoritative across the global, per-Agent-Instance, and per-provider dimensions; selection is durable least-recently-served per Agent Instance rather than global FIFO, so a continuously eligible Agent cannot be bypassed indefinitely by a backlog that merely happens to be older; a partition that is saturated, or whose provider this Worker cannot run, is skipped rather than blocking the queue head; and admission is bounded by global, per-Agent, and per-provider pending limits. None of this introduced a scheduler, a leader, a second queue, or a persisted counter. The control plane still holds no provider credential and cannot claim, start, retry, or terminalize a Job, and its only execution-plane transition remains the C5 cancellation.
+C7 and C8 are complete and externally accepted, and Stage C — the persistent execution engine — is **complete**.
 
-The next engineering milestone is **C7 — Run Events API, execution observability, and polling/UI observability**. C7 has **not** started, and it requires separate planning, external plan review, and explicit implementation authorization. It owns the public Run Events API, Attempt and Worker observability if approved, the execution timeline, richer runtime status and polling surfaces, and streaming/SSE only if approved during C7 planning. Nothing beyond the existing roadmap and the accepted C0–C6 architecture freezes is settled.
+C7 makes the kernel legible without giving it any new authority. An owner can read their Run's durable execution timeline through one owner-scoped, read-only endpoint, ordered by the Run-local `sequence` the writers allocated, paginated by a keyset cursor rather than an offset so a concurrent append can never be skipped. Run responses additionally carry a derived execution phase — the Job's own durable status, verbatim, with a retry instant only while one is pending — which is what finally distinguishes "executing now" from "waiting to retry". Both are computed per read and never persisted, and no module that mutates execution reads them: observability is a projection, never a control. The dashboard gains an expandable timeline, incremental polling, and a polling lifetime that no longer abandons a live Run after roughly 300 seconds. C7 added **no migration**: the existing `UNIQUE(run_id, sequence)` index already serves the pagination predicate as a bounded range seek, so the migration head remains `0006_stage_c6_queue_partitions`.
 
-Stage C — Persistent execution engine is in progress. The C0 architecture freeze is complete. C1 passed external implementation and remediation review, was finalized as implementation commit `8e9c9da`, and was merged to `main` in merge commit `6d54eac`.
+C8 proves that the finished kernel composes. Each of C2–C7 proved its own slice in isolation; nothing had proved the slices hold together, so C8 adds an integrated acceptance matrix spanning normal execution, pre-start recovery, post-start ambiguity, safe retry, retry across restart, pre-start and running cancellation, execution timeout, all three concurrency dimensions, durable fairness, and backpressure — and checks in every case that the public timeline agrees with the durable final state. It adds restart acceptance (durable state survives engine teardown, recomposition and reopen), multi-Worker composition, a bounded deterministic 120-Job stress soak over 4 Agent Instances, 2 providers and 3 heterogeneous Workers, SQLite integrity checks, the migration lifecycle, and security/leak acceptance. **C8 changed no product architecture**: it added acceptance evidence and nothing else.
+
+Taken together, the guarantees NervOS now offers are: **fenced durable authority**, so only a live lease holder may write; **no blind replay of ambiguous execution**, so an unknown outcome is closed as failed rather than repeated; **safe retry only for a positively safe outcome**; and **late stale writes cannot overwrite truth**. NervOS does **not** guarantee exactly-once remote provider execution. Remote provider processing, billing, and side effects may still occur after an ambiguous post-start crash, a running cancellation, or an execution timeout, and these remain outside the local transaction boundary.
+
+The next engineering milestone is **Stage D — tool and MCP layer**. Stage D **has not started**, and it requires separate planning, external plan review, and explicit implementation authorization. It owns the tool registry, the MCP gateway and client, capability schemas, the permission engine, tool audit events, and the first default tools. Nothing beyond the existing roadmap and the accepted Stage C architecture freezes is settled.
+
+Stage C — Persistent execution engine is complete. C0–C8 are all implemented, externally reviewed, and accepted. The C0 architecture freeze is complete. C1 passed external implementation and remediation review, was finalized as implementation commit `8e9c9da`, and was merged to `main` in merge commit `6d54eac`. C7 and C8 were planned and implemented as one combined Stage C delivery and are recorded in ADR 0014 and the C7/C8 sections above.
 
 Stage B implementation is complete. B4 passed external implementation review and hosted checks, was finalized as implementation commit `faa52a2`, and was merged to `main` by pull request #8 in merge commit `acb55b3`.
 

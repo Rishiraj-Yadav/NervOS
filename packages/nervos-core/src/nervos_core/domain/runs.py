@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 
+from nervos_core.domain.jobs import JobStatus
+
 OUTCOME_CODE_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 # The one terminal outcome code that licenses a `failed` Run with no start boundary: the Job
 # exhausted its claim budget to repeated pre-start Worker losses, so execution provably never
@@ -164,6 +166,13 @@ class Run:
     error_message: str | None = None
     usage: ModelUsage = ModelUsage()
     elapsed_ms: int | None = None
+    # Derived, read-only projections of the durable Job behind this Run, supplied only by the
+    # owner-scoped read paths that join `jobs`. They are never persisted on the Run and carry no
+    # authority: the Job lease decides what may execute, and nothing may branch on these. A
+    # `running` Run waiting on a retry and a `running` Run executing now are otherwise the same
+    # value, which is the whole reason the phase is exposed at all.
+    execution_phase: JobStatus | None = None
+    retry_available_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.id <= 0 or self.agent_instance_id <= 0:
@@ -185,6 +194,12 @@ class Run:
         object.__setattr__(self, "finished_at", finished)
         if self.elapsed_ms is not None and self.elapsed_ms < 0:
             raise InvalidRun("invalid elapsed time")
+        if self.retry_available_at is not None:
+            # The instant is only meaningful while the Job is actually waiting to retry; anywhere
+            # else it would be a scheduling claim the durable Job does not make.
+            if self.execution_phase is not JobStatus.RETRY_WAIT:
+                raise InvalidRun("a retry instant requires a waiting phase")
+            object.__setattr__(self, "retry_available_at", _utc(self.retry_available_at))
         if self.finish_reason is not None:
             validate_outcome_code(self.finish_reason)
         if self.status is RunStatus.CREATED:

@@ -16,6 +16,8 @@ from nervos_api.api.dependencies import (
 from nervos_api.api.routes.agent_instances import next_before_id
 from nervos_api.api.schemas import (
     RunCreateRequest,
+    RunEventPageResponse,
+    RunEventResponse,
     RunPageResponse,
     RunResponse,
 )
@@ -24,6 +26,23 @@ router = APIRouter()
 
 PageLimit = Annotated[int, Query(ge=1, le=50)]
 BeforeId = Annotated[int | None, Query(gt=0)]
+# A Run accumulates a legitimate history where a Run *page* does not, so one Event page is wider
+# than one Run page: a Run that retried twice produces roughly twenty Events and should drain in a
+# round trip or two. The upper bound is what keeps any one response small.
+EventPageLimit = Annotated[int, Query(ge=1, le=200)]
+AfterSequence = Annotated[int, Query(ge=0)]
+
+
+def next_after_sequence(sequences: list[int], limit: int) -> int | None:
+    """Return the cursor for the next Event page when a further page may exist.
+
+    The same rule as `next_before_id`: a full page may or may not be the last one, so it yields a
+    cursor, and the loop ends on the first short page. A history that ends exactly on a page
+    boundary therefore costs one further empty request to prove it is drained. That is preferred to
+    a count query, which would answer a question nobody asked and could not be made atomic with the
+    page it was asked about anyway.
+    """
+    return sequences[-1] if len(sequences) == limit else None
 
 
 @router.post(
@@ -83,6 +102,35 @@ def get_run(
 ) -> RunResponse:
     """Return one owned Run; foreign and nonexistent ids are indistinguishable."""
     return RunResponse.from_domain(service.get_run(user.id, run_id))
+
+
+@router.get("/runs/{run_id}/events", response_model=RunEventPageResponse)
+def list_run_events(
+    run_id: int,
+    user: CurrentUserDependency,
+    service: AgentServiceDependency,
+    limit: EventPageLimit = 50,
+    after_sequence: AfterSequence = 0,
+) -> RunEventPageResponse:
+    """Return one ascending-sequence page of an owned Run's durable execution timeline.
+
+    This is the Run's own sub-resource, so it reuses the Run's ownership rule exactly: a foreign id
+    and a nonexistent one produce the same 404 with the same body, and the timeline can therefore
+    never be used to probe whether another user's Run exists.
+
+    `sequence` is the order and the cursor. It is allocated contiguously from a per-Run
+    high-water mark inside the writing transaction, so a batch is committed atomically and a reader
+    always sees a whole batch or none of it -- which is why a client that has applied everything up
+    to sequence N can never skip an Event, and why `created_at` is display metadata only.
+
+    Observability only: this reads. It cannot claim, start, retry, cancel, or execute anything, and
+    it exposes no Job, Attempt, claim token, worker identity, or scheduling state.
+    """
+    events = service.list_run_events(user.id, run_id, after_sequence, limit)
+    return RunEventPageResponse(
+        items=[RunEventResponse.from_domain(event) for event in events],
+        next_after_sequence=next_after_sequence([event.sequence for event in events], limit),
+    )
 
 
 @router.post("/runs/{run_id}/cancel", response_model=RunResponse)

@@ -12,15 +12,35 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from nervos_core.application.agents import (
+    EVENT_PAGE_LIMIT_MAX,
     AgentInstanceNotFound,
     InstanceConfiguration,
     RunNotFound,
 )
 from nervos_core.application.errors import PersistenceUnavailable
 from nervos_core.domain.agents import AgentDefinitionId, AgentInstance
+from nervos_core.domain.jobs import JobStatus, RunEvent
 from nervos_core.domain.runs import Run
-from nervos_core.infrastructure.database.jobs import run_from_record
-from nervos_core.infrastructure.database.models import AgentInstanceRecord, RunRecord
+from nervos_core.infrastructure.database.jobs import run_event_from_record, run_from_record
+from nervos_core.infrastructure.database.models import (
+    AgentInstanceRecord,
+    JobRecord,
+    RunEventRecord,
+    RunRecord,
+)
+
+
+def _phase_of(job: JobRecord | None) -> tuple[JobStatus | None, datetime | None]:
+    """Derive the read-only execution phase, and a retry instant only while one is pending.
+
+    The phase is the Job's own durable status verbatim: no second vocabulary is invented, and
+    nothing here is stored, so it cannot drift from the state it describes. A retry instant is
+    surfaced only in the one phase where it means something.
+    """
+    if job is None:
+        return None, None
+    phase = JobStatus(job.status)
+    return phase, job.available_at if phase is JobStatus.RETRY_WAIT else None
 
 
 class SqlAlchemyAgentPersistence:
@@ -138,18 +158,20 @@ class SqlAlchemyAgentPersistence:
     def get_run(self, owner_user_id: int, run_id: int) -> Run:
         try:
             with self._sessions() as session:
-                record = session.scalar(
-                    select(RunRecord)
+                row = session.execute(
+                    select(RunRecord, JobRecord)
+                    .select_from(RunRecord)
                     .join(
                         AgentInstanceRecord, AgentInstanceRecord.id == RunRecord.agent_instance_id
                     )
+                    .outerjoin(JobRecord, JobRecord.run_id == RunRecord.id)
                     .where(
                         RunRecord.id == run_id, AgentInstanceRecord.owner_user_id == owner_user_id
                     )
-                )
-                if record is None:
+                ).one_or_none()
+                if row is None:
                     raise RunNotFound
-                return self._run(record)
+                return self._run(row[0], row[1])
         except SQLAlchemyError as error:
             raise PersistenceUnavailable from error
 
@@ -159,8 +181,13 @@ class SqlAlchemyAgentPersistence:
         if not 1 <= limit <= 50:
             raise ValueError("limit must be between 1 and 50")
         query = (
-            select(RunRecord)
-            .join(AgentInstanceRecord)
+            select(RunRecord, JobRecord)
+            .select_from(RunRecord)
+            .join(
+                AgentInstanceRecord,
+                AgentInstanceRecord.id == RunRecord.agent_instance_id,
+            )
+            .outerjoin(JobRecord, JobRecord.run_id == RunRecord.id)
             .where(
                 RunRecord.agent_instance_id == instance_id,
                 AgentInstanceRecord.owner_user_id == owner_user_id,
@@ -171,9 +198,37 @@ class SqlAlchemyAgentPersistence:
         try:
             with self._sessions() as session:
                 return tuple(
-                    self._run(record)
-                    for record in session.scalars(query.order_by(RunRecord.id.desc()).limit(limit))
+                    self._run(record, job)
+                    for record, job in session.execute(
+                        query.order_by(RunRecord.id.desc()).limit(limit)
+                    )
                 )
+        except SQLAlchemyError as error:
+            raise PersistenceUnavailable from error
+
+    def list_run_events(self, run_id: int, after_sequence: int, limit: int) -> tuple[RunEvent, ...]:
+        """Return one ascending-sequence page of one Run's Events, strictly after a cursor.
+
+        The predicate is the `UNIQUE(run_id, sequence)` index SQLite already maintains, so this is
+        a bounded index range seek scoped to this one Run and this one sequence: the cost of a
+        timeline grows with that Run's own history and never with the table.
+        """
+        if not 1 <= limit <= EVENT_PAGE_LIMIT_MAX:
+            raise ValueError("limit must be between 1 and 200")
+        if after_sequence < 0:
+            raise ValueError("after_sequence must not be negative")
+        query = (
+            select(RunEventRecord)
+            .where(
+                RunEventRecord.run_id == run_id,
+                RunEventRecord.sequence > after_sequence,
+            )
+            .order_by(RunEventRecord.sequence.asc())
+            .limit(limit)
+        )
+        try:
+            with self._sessions() as session:
+                return tuple(run_event_from_record(record) for record in session.scalars(query))
         except SQLAlchemyError as error:
             raise PersistenceUnavailable from error
 
@@ -192,5 +247,6 @@ class SqlAlchemyAgentPersistence:
         )
 
     @staticmethod
-    def _run(record: RunRecord) -> Run:
-        return run_from_record(record)
+    def _run(record: RunRecord, job: JobRecord | None) -> Run:
+        phase, retry_available_at = _phase_of(job)
+        return run_from_record(record, execution_phase=phase, retry_available_at=retry_available_at)
