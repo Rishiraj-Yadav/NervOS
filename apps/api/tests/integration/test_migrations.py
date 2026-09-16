@@ -35,6 +35,7 @@ APPLICATION_TABLES = {
     "job_attempts",
     "run_events",
     "workers",
+    "queue_partitions",
 }
 DEFAULT_DATABASE = (Path.home() / ".nervos" / "nervos.db").resolve(strict=False)
 
@@ -96,7 +97,7 @@ def test_upgrade_drift_downgrade_and_reupgrade(
         assert application_tables(engine) == APPLICATION_TABLES
         with engine.connect() as connection:
             current_revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
-            assert current_revision == "0005_stage_c5_run_cancellation"
+            assert current_revision == "0006_stage_c6_queue_partitions"
             assert connection.scalar(text("PRAGMA foreign_keys")) == 1
             assert connection.scalar(text("PRAGMA busy_timeout")) == 5000
         command.check(config)
@@ -1221,7 +1222,180 @@ def test_the_c5_downgrade_is_clean_when_nothing_needs_cancellation(
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM runs")) == 1
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                "0005_stage_c5_run_cancellation"
+                "0006_stage_c6_queue_partitions"
             )
+    finally:
+        engine.dispose()
+
+
+# ---------------------------------------------------------------------------------------
+# 0006 -- the C6 queue-partition fairness metadata
+# ---------------------------------------------------------------------------------------
+
+C6_TABLES = ("queue_partitions",)
+EXECUTION_TABLES = ("runs", "jobs", "job_attempts", "run_events", "workers")
+
+
+def execution_snapshot(engine: Engine) -> dict[str, list[tuple[Any, ...]]]:
+    """Return every execution row, ordered stably, so 0006 can be proven not to rewrite any."""
+    snapshot: dict[str, list[tuple[Any, ...]]] = {}
+    with engine.connect() as connection:
+        for table in EXECUTION_TABLES:
+            rows = connection.exec_driver_sql(f"SELECT * FROM {table}").fetchall()
+            snapshot[table] = [tuple(row) for row in rows]
+    return snapshot
+
+
+def partition_markers(engine: Engine) -> dict[int, int | None]:
+    with engine.connect() as connection:
+        return {
+            int(row[0]): None if row[1] is None else int(row[1])
+            for row in connection.exec_driver_sql(
+                "SELECT agent_instance_id, last_served_attempt_id FROM queue_partitions"
+            ).fetchall()
+        }
+
+
+def test_migration_0006_creates_only_the_fairness_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """0006 adds scheduling metadata and touches nothing else."""
+    database_path = tmp_path / "c6-surface.db"
+    config = alembic_config(database_path, monkeypatch)
+    command.upgrade(config, "0005_stage_c5_run_cancellation")
+    engine = create_sqlite_engine(database_path)
+    try:
+        assert "queue_partitions" not in application_tables(engine)
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_sqlite_engine(database_path)
+    try:
+        assert application_tables(engine) == APPLICATION_TABLES
+        assert "queue_partitions" in application_tables(engine)
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+                "0006_stage_c6_queue_partitions"
+            )
+            columns = [
+                str(row[1])
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(queue_partitions)"
+                ).fetchall()
+            ]
+        assert columns == ["agent_instance_id", "last_served_attempt_id"]
+    finally:
+        engine.dispose()
+
+
+def test_migration_0006_backfills_one_marker_per_served_instance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Backfill is deterministic and reads only Attempt ids that already exist."""
+    database_path = tmp_path / "c6-backfill.db"
+    config = alembic_config(database_path, monkeypatch)
+    command.upgrade(config, "0005_stage_c5_run_cancellation")
+    engine = create_sqlite_engine(database_path)
+    try:
+        seed_c1_parents(engine, run_count=2)
+        insert_row(engine, "jobs", queued_job())
+        insert_row(engine, "job_attempts", claimed_attempt())
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_sqlite_engine(database_path)
+    try:
+        # Agent 1 has one Attempt, so its marker is that Attempt's id.
+        assert partition_markers(engine) == {1: 1}
+    finally:
+        engine.dispose()
+
+
+def test_migration_0006_backfills_a_null_marker_for_a_never_claimed_instance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / "c6-never-claimed.db"
+    config = alembic_config(database_path, monkeypatch)
+    command.upgrade(config, "0005_stage_c5_run_cancellation")
+    engine = create_sqlite_engine(database_path)
+    try:
+        seed_c1_parents(engine, run_count=1)
+        insert_row(engine, "jobs", queued_job())
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_sqlite_engine(database_path)
+    try:
+        assert partition_markers(engine) == {1: None}
+    finally:
+        engine.dispose()
+
+
+def test_migration_0006_rewrites_no_execution_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / "c6-no-rewrite.db"
+    config = alembic_config(database_path, monkeypatch)
+    command.upgrade(config, "0005_stage_c5_run_cancellation")
+    engine = create_sqlite_engine(database_path)
+    try:
+        seed_c1_parents(engine, run_count=2)
+        insert_row(engine, "jobs", queued_job())
+        insert_row(engine, "job_attempts", claimed_attempt())
+        before = execution_snapshot(engine)
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_sqlite_engine(database_path)
+    try:
+        assert execution_snapshot(engine) == before
+    finally:
+        engine.dispose()
+
+
+def test_the_c6_downgrade_drops_metadata_and_reconstructs_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The metadata is derived, so 0006 downgrades cleanly instead of refusing.
+
+    Unlike 0004 and 0005, dropping this table rewrites no history: re-upgrading restores the
+    identical markers from the Attempt rows the migration never modifies.
+    """
+    database_path = tmp_path / "c6-downgrade.db"
+    config = alembic_config(database_path, monkeypatch)
+    command.upgrade(config, "head")
+    engine = create_sqlite_engine(database_path)
+    try:
+        seed_c1_parents(engine, run_count=2)
+        insert_row(engine, "jobs", queued_job())
+        insert_row(engine, "job_attempts", claimed_attempt())
+        insert_row(
+            engine, "queue_partitions", {"agent_instance_id": 1, "last_served_attempt_id": 1}
+        )
+        markers = partition_markers(engine)
+        history = execution_snapshot(engine)
+    finally:
+        engine.dispose()
+    assert markers == {1: 1}
+
+    command.downgrade(config, "0005_stage_c5_run_cancellation")
+    engine = create_sqlite_engine(database_path)
+    try:
+        assert "queue_partitions" not in application_tables(engine)
+        # No execution row was touched by the downgrade.
+        assert execution_snapshot(engine) == history
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_sqlite_engine(database_path)
+    try:
+        assert application_tables(engine) == APPLICATION_TABLES
+        assert partition_markers(engine) == markers
+        assert execution_snapshot(engine) == history
     finally:
         engine.dispose()

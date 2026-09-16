@@ -2,7 +2,7 @@
 
 ## Current phase
 
-Stage C — Persistent execution engine is IN PROGRESS. The C0 architecture freeze, the C1 durable execution foundation, C2 — asynchronous submission and minimal durable Worker execution — C3 — Worker registry/health, expired-lease reconciliation, and fencing hardening — C4 — the safe execution retry engine — and C5 — owner cancellation and Attempt execution-timeout orchestration — are implemented, externally reviewed, and accepted. C6 has not started.
+Stage C — Persistent execution engine is IN PROGRESS. The C0 architecture freeze, the C1 durable execution foundation, C2 — asynchronous submission and minimal durable Worker execution — C3 — Worker registry/health, expired-lease reconciliation, and fencing hardening — C4 — the safe execution retry engine — C5 — owner cancellation and Attempt execution-timeout orchestration — and C6 — authoritative global/per-Agent/per-provider execution concurrency, durable Agent fairness, and full admission backpressure — are implemented, externally reviewed, and accepted. C7 has not started.
 
 Stage B — Trusted-agent runtime proof is complete and accepted. B1 domain/persistence, B2 internal one-call execution, B3 trusted Agent/Run HTTP API with the minimal Chat dashboard interaction, and B4 second-provider portability are implemented, merged to `main`, and post-merge verified.
 
@@ -14,7 +14,7 @@ Stage B — Trusted-agent runtime proof is complete and accepted. B1 domain/pers
 - [x] C3 — Worker registry/health, expired-lease reconciliation, and fencing hardening
 - [x] C4 — Safe execution retry engine (durable `SAFE_TO_RETRY` re-execution and backoff)
 - [x] C5 — Owner cancellation and Attempt execution-timeout orchestration
-- [ ] C6 — Not started
+- [x] C6 — Authoritative execution concurrency, durable Agent fairness, and admission backpressure
 - [ ] C7 — Not started
 - [ ] C8 — Not started
 
@@ -31,11 +31,11 @@ request number and no merge commit of its own. C5 passed external review of its 
 implementation review, then a remediation pass that completed the outer execution-timeout watchdog
 and the bounded Worker shutdown drain. C5 is likewise authored and verified together with this status
 update in a single C5 milestone change, so it records no pull request number and no merge commit of
-its own. C6 through C8 have no implementation and require separate planning, external plan review,
-and explicit implementation authorization.
-
-C6 — concurrency, fairness, and backpressure — has **not started**. Because C5 owns migration
-`0005`, the future C6 schema migration begins at **`0006`**.
+its own. C6 passed external review of its plan — which rejected the planned global-Attempt-cursor
+fairness algorithm on evidence — then external implementation review. C6 is likewise authored and
+verified together with this status update in a single C6 milestone change, so it records no pull
+request number and no merge commit of its own. C7 and C8 have no implementation and require separate
+planning, external plan review, and explicit implementation authorization.
 
 ## Stage B milestones
 
@@ -345,8 +345,8 @@ around the foreign-key pragma, and a `PRAGMA foreign_key_check` that raises if i
 preserved. It does not touch `jobs`, `job_attempts`, or `run_events`, creates no queue partition and
 no `active_attempt_id`, and leaves `0001`–`0004` byte-identical. A database holding cancelled Runs
 cannot be represented by C4's constraints, so the downgrade **refuses** rather than converting a
-cancellation into a failure the user never had. Because C5 owns `0005`, the future C6 migration
-begins at `0006`.
+cancellation into a failure the user never had. C5 consumed migration number `0005`; C6 later added
+`0006`.
 
 **API and frontend.** `POST /api/v1/runs/{run_id}/cancel` returns the resulting Run: `200` for a
 cancelled or already-cancelled Run, `409 run_not_cancellable` for a Run that already succeeded or
@@ -370,6 +370,104 @@ every step including the E2E. The protected migrations, ORM model module, provid
 policy, and C3 reclamation module were byte-identical throughout, and the default `~/.nervos/nervos.db`
 was unchanged.
 
+## C6 implementation verification
+
+C6 completes the queue-control layer: it makes execution concurrency authoritative, replaces global
+FIFO selection with durable Agent fairness, and adds per-dimension admission backpressure. It is
+recorded in ADR 0013.
+
+**Execution concurrency is now authoritative.** The active predicate is a Job with
+`status IN ('claimed','running')` **and** `lease_expires_at > now`, so a Job that is claimed but has
+not started still holds its slot while `queued` and `retry_wait` hold none. A Job is claimable only
+if the **global**, its **Agent Instance's**, and its **provider's** limits all have room — an
+intersection decided at claim time from live Jobs inside the one short `BEGIN IMMEDIATE` claim
+transaction. Nothing is persisted, so no counter can drift after a crash, a recovery, a retry, or a
+cancellation; an expired lease simply stops consuming capacity, and that is safe because an expired
+Job is still `claimed`/`running` and therefore unreachable from the claim's source predicate — C3
+reclamation remains the only path that returns it to the queue.
+
+The three limits are one code-level policy in `nervos-core`, defaulting to **4 global / 4 per Agent
+Instance / 4 per provider**. They are deliberately not environment settings: each claim compares a
+database-wide count against its limit, so two Workers holding different values would let the fleet
+run above the intended bound. The defaults equal the global limit, so they preserve existing
+out-of-the-box behavior; the per-Agent and per-provider mechanisms are authoritative and are proven
+by tests that inject lower policy values. `NERVOS_MAX_ACTIVE_JOBS` is retained but is now
+**tightening-only**: it may lower what a Worker claims and can never raise the authoritative limit.
+Runtime-tunable active policy is explicitly deferred.
+
+**Selection is durable least-recently-served per Agent Instance.** The C6 plan proposed deriving a
+round-robin cursor from the most recent *global* Attempt; external review rejected it on evidence.
+That design assumed a common eligible set across Workers, and Workers do not share one — a Worker
+that can run only `anthropic` cannot see an `openai`-only partition. The review's counterexample
+(Worker X eligible to `{55}`, Worker Y eligible to `{50,60}`, where Y always computes "the first
+partition after 55" and therefore never serves 50) showed the proof was wrong, not merely incomplete.
+
+The implemented design stores one durable fact per Agent Instance in `queue_partitions`:
+`last_served_attempt_id`, the `job_attempts.id` of the most recent committed claim for that
+partition, NULL when it has never been served. Selection filters the claimable set by everything
+that makes work runnable now — legal Job/Run shape, due `available_at`, remaining Attempt budget,
+this Worker's provider capability, and all three capacity limits — then chooses the **never-served
+partition first**, then the **smallest marker**, with `agent_instance_id` as a deterministic
+tie-break, and finally the **oldest due Job** inside it (`available_at ASC, id ASC`). The marker is
+written by the same transaction that inserts the Attempt, so fairness advances **only when a claim
+commits**; a poll that finds nothing, loses a filter, hits a cap, loses the compare-and-set, or
+rolls back advances nothing and penalizes no partition, and a skipped partition re-enters at its own
+position. Global FIFO is intentionally no longer the scheduling contract.
+
+**Blocked work no longer blocks the queue head.** A partition whose Agent is at its limit, whose
+provider is at its limit, or whose provider this Worker cannot run is filtered out *before*
+selection, so it cannot head-of-line block work the Worker can actually execute. This is the
+substantive behavioral change from global FIFO. The guarantee is bounded and honest: for a given
+compatible claiming capability set, continuously eligible Agent partitions cannot be repeatedly
+bypassed by more-recently-served competitors — no cross-capability global guarantee is claimed,
+because fairness is not promised for work no present Worker can run.
+
+**Admission backpressure gains two dimensions.** `NERVOS_MAX_PENDING_JOBS_PER_AGENT` and
+`NERVOS_MAX_PENDING_JOBS_PER_PROVIDER` join the existing global cap. All three are counted, and the
+Run and Job written, inside the same admission transaction, so a rejection leaves no partially
+created Run and a concurrent last-slot race produces exactly one winner. Each defaults to the global
+bound, so neither binds until an operator lowers it; lowering one reserves queue headroom so a
+single Agent Instance or provider backlog cannot refuse every other submitter. Public rejection is
+unchanged and generic — `429 queue_capacity_exceeded` — and discloses no dimension, queue position,
+partition state, or count.
+
+**Migration.** `0006_stage_c6_queue_partitions` adds exactly one table,
+`queue_partitions(agent_instance_id, last_served_attempt_id)`, holding durable fairness history and
+nothing else: no status, no lease, no claim token, and no active or pending counter. `Jobs` remain
+the only durable execution obligation, and the Job lease plus Attempt token remain the only
+execution authority. The marker deliberately carries no foreign key — it is a monotone sequence
+that is only compared, never dereferenced. The migration deterministically backfills one row per
+Agent Instance that already has Jobs, taking `MAX(job_attempts.id)` as the marker or `NULL` for an
+Instance that has never been claimed, so pre-existing data behaves as never served and no execution
+row is rewritten. `0001`–`0005` are unchanged. Unlike 0005, the downgrade **drops the table without
+refusing**, because it is derived scheduling metadata that rewrites no execution history; a later
+re-upgrade reconstructs it from the same backfill. The Worker's expected schema revision is now
+`0006_stage_c6_queue_partitions`; C6 promises no mixed C5/C6 Worker rolling operation during that
+transition.
+
+**API and frontend.** C6 adds no public structural API and no frontend change. The admission error
+stays `429 queue_capacity_exceeded` with its existing safe message, and no partition, cursor, active
+count, or saturation state is exposed.
+
+**Verification.** C6 was implemented main-agent-only, then verified with focused suites: 16 fairness
+tests (including the heterogeneous-capability counterexample as a regression test), 17 policy tests,
+13 concurrency-cap tests, 12 admission-backpressure tests, 5 query-plan tests, 8 multi-Worker tests,
+and 5 new migration tests for `0006`. The accepted candidate passed **758 Python tests** across
+`packages` and `apps` (367 core, 66 Worker, 183 API, 27 architecture, 142 provider-adapter), the
+migration upgrade/current/check/downgrade/re-upgrade lifecycle through `0006` (19 passed), the
+deterministic multi-Agent acceptance proof in which a newcomer Agent is served ahead of an older
+backlog, and the existing deterministic browser journey (exit 0). Ruff lint and format are clean,
+Pyright reports zero errors, the frontend suite (103 tests) plus lint, typecheck, and production
+build pass, the repository security scan is clean, `check.py check` passes with 846 tests, and the
+isolated `clean-check` gate passes. The protected migrations, ORM domain modules, provider adapters,
+retry policy, and C3 reclamation module were byte-identical throughout, and the default
+`~/.nervos/nervos.db` was unchanged.
+
+**Explicitly not provided by C6.** No runtime-tunable active policy, no per-Agent-Instance custom
+limits, no scheduler daemon, no leader election, no queue dispatcher, no preemption of running Jobs,
+no public queue-position API, and no public Run Events, Attempt, or Worker surface — those remain
+C7. C6 adds no new Run, Job, or Attempt status and no new Run Event type.
+
 ## C2 implementation verification
 
 C2 changes the product from awaited API-process execution to durable asynchronous execution. `POST /api/v1/agent-instances/{id}/runs` now returns `202 Accepted` after committing exactly one immutable `Run(status=created)`, one `Job(status=queued)`, and the initial `run.created`/`run.queued` events. The API/control plane validates ownership, exact `nervos.chat@1`, input bounds, and known provider identifiers, but it holds no provider credential, constructs no provider SDK client, composes no handler registry, and cannot claim/start/heartbeat/terminalize Jobs.
@@ -378,7 +476,7 @@ A separate `apps/worker` uv workspace member runs the execution plane. The Worke
 
 The dashboard renders a `created` Run as **Queued** and distinguishes the queued and running pending states with truthful copy, then observes the terminal result through polling that runs only while a Run is nonterminal and is bounded, so a stranded Run is never presented as actively progressing. Reloading reads the persisted result rather than browser state.
 
-C2 enforces a hard global pending cap (`NERVOS_MAX_PENDING_JOBS`) in the submission transaction and a node-wide active cap (`NERVOS_MAX_ACTIVE_JOBS`) in the claim transaction, with configurable per-process Worker concurrency (`NERVOS_WORKER_CONCURRENCY`). Claiming is capability-aware and one-winner: a Worker claims only Jobs whose provider it is configured for, and two Workers racing one Job produce exactly one claimant. Each claim rotates a 32-byte claim token and persists one Attempt; the execution-start boundary commits before any provider call; and an independent heartbeat renews the lease across every lease window, including finalization. Every owner write is fenced on ownership **and** an unexpired lease, so lease expiry is authority loss — an expired Worker discards its result, never overwrites, and never requeues. A Worker with no provider credentials starts successfully and claims nothing. A known-provider Run with no capable Worker remains queued rather than being failed. Failed Attempts record `SAFE_TO_RETRY`, `DO_NOT_RETRY`, or `AMBIGUOUS` as evidence, but C2 never writes `retry_wait` and never retries execution. Persistence-finalization retry replays only the fenced terminal database transaction and never re-invokes a model.
+C2 enforces a hard global pending cap (`NERVOS_MAX_PENDING_JOBS`) in the submission transaction and a node-wide active cap (`NERVOS_MAX_ACTIVE_JOBS`) in the claim transaction, with configurable per-process Worker concurrency (`NERVOS_WORKER_CONCURRENCY`). (C6 later made execution concurrency authoritative with global, per-Agent-Instance, and per-provider limits, and redefined `NERVOS_MAX_ACTIVE_JOBS` as a tightening-only ceiling that can never raise the authoritative limit; see the C6 section for the current behavior.) Claiming is capability-aware and one-winner: a Worker claims only Jobs whose provider it is configured for, and two Workers racing one Job produce exactly one claimant. Each claim rotates a 32-byte claim token and persists one Attempt; the execution-start boundary commits before any provider call; and an independent heartbeat renews the lease across every lease window, including finalization. Every owner write is fenced on ownership **and** an unexpired lease, so lease expiry is authority loss — an expired Worker discards its result, never overwrites, and never requeues. A Worker with no provider credentials starts successfully and claims nothing. A known-provider Run with no capable Worker remains queued rather than being failed. Failed Attempts record `SAFE_TO_RETRY`, `DO_NOT_RETRY`, or `AMBIGUOUS` as evidence, but C2 never writes `retry_wait` and never retries execution. Persistence-finalization retry replays only the fenced terminal database transaction and never re-invokes a model.
 
 Still absent after C2: expired-lease recovery and reconciliation, automatic execution retries, retry scheduling, cancellation, per-Agent concurrency, per-provider concurrency, fairness, queue partitions, a public Run Events API, an event-timeline UI, SSE and WebSockets, a Workers table/registry, worker-health tracking, scheduling, tools/MCP, memory, package installation, marketplace, and persistent secret management.
 
@@ -406,7 +504,7 @@ C4 activates durable execution retry for the one failure class that is positivel
 
 **Accepted limitations, recorded rather than hidden.** Run `elapsed_ms` and Run usage remain the **terminal** Attempt's values; they do not include earlier Attempts, retry-wait time, or total Run wall-clock duration, and C4 provides no cumulative cross-Attempt token accounting (per-Attempt accounting would need a schema revision, which C4 does not add). The bounded read-only UI poll (roughly 300 seconds at 2-second intervals) is unchanged and is **not** a completion guarantee: a Run's durable state stays correct across Worker downtime, provider duration, pre-start loss, lease recovery, or host downtime, and a later reload or refetch shows the current state. Richer execution observability remains C7.
 
-**Explicitly not provided by C4.** No cancellation (C5), no fairness, queue partitions, or per-Agent/per-provider concurrency (C6), and no public Run Events API, timeline, Worker dashboard, SSE, or WebSockets (C7). C4 does not read, write, or prioritize `cancel_requested_at`, and C4 ships no cancellation endpoint, no `cancelled` Run status, and no cancel-versus-retry rule. C4 does not claim exactly-once execution and claims no provider-side rollback or cancellation. (C5 later implemented owner cancellation and execution-timeout orchestration; the C4 sections remain the historical record of the state C4 shipped.)
+**Explicitly not provided by C4.** No cancellation (C5), no fairness, queue partitions, or per-Agent/per-provider concurrency (C6), and no public Run Events API, timeline, Worker dashboard, SSE, or WebSockets (C7). C4 does not read, write, or prioritize `cancel_requested_at`, and C4 ships no cancellation endpoint, no `cancelled` Run status, and no cancel-versus-retry rule. C4 does not claim exactly-once execution and claims no provider-side rollback or cancellation. (C5 later implemented owner cancellation and execution-timeout orchestration, and C6 later implemented authoritative concurrency, durable Agent fairness, and admission backpressure; the C4 sections remain the historical record of the state C4 shipped.)
 
 **Verification.** The accepted C4 candidate passed 71 focused C4 tests; the full Python suite of 704 tests (55 Worker, 158 API); 26 architecture guards; 92 frontend tests; 21 E2E-supervisor tests; Ruff lint and format; Pyright with zero errors and zero warnings; frontend lint, typecheck, and production build; the tracked-file security scan (265 files, no findings); and an `EXPLAIN QUERY PLAN` check proving the widened due-work query still resolves through the existing `jobs` status index rather than scanning. Migration head was confirmed still `0004` with exactly four migrations. A deterministic supervised browser journey proves the retry end to end — a scripted rate limit, a durable `retry_wait`, a still-running Run, a second Attempt after the due instant, and exactly two provider calls for that Run — and asserts from committed state that the retry's own `claimed_at` is not before its `available_at`, that the Run's `started_at` equals the first Attempt's start, and that no `run.failed` occurred. It passed twice consecutively, and `check` and the isolated `clean-check` gate both passed. Protected files were byte-identical throughout and the default `~/.nervos/nervos.db` was unchanged (size 65536, sha256 `f60ed2b32637d314d31a4305c704b5f80ff0db14adbefdff156368cc5f05800f`). No live provider request was made.
 
@@ -429,7 +527,7 @@ No provider call is made on any recovery path. Reconciliation runs once at Worke
 
 **The narrow failed-before-start Run shape.** When repeated pre-start Worker loss exhausts a Job's claim budget, the Run is closed as `status='failed'` with `started_at` NULL, `elapsed_ms` NULL, no output, no finish reason, no usage, and `error_code='worker_recovery_exhausted'`. The Run-lifecycle CHECK was relaxed for exactly this case and no other: the started-`failed` branch excludes that code, and the never-started branch requires it. Execution provably never began and no model request was issued for those Attempts, so NervOS records no `started_at` and no `elapsed_ms` rather than fabricating them. **This is not cancellation** — it is an infrastructure recovery-budget exhaustion, and C5 still owns cancellation.
 
-**Explicitly not provided by C3.** No automatic model/provider execution retries, no `retry_wait` scheduling, no execution backoff policy, no cancellation, no per-Agent or per-provider concurrency, no fairness or queue partitions, no public Run Events API, no event timeline, no Worker dashboard, no SSE/WebSockets. Provider SDK retries remain `max_retries=0` and there is no provider or model fallback. C3 does not claim exactly-once execution. C4 later activated the execution retry C3 deliberately left out; the C3 sections below remain the historical record of the state C3 shipped.
+**Explicitly not provided by C3.** No automatic model/provider execution retries, no `retry_wait` scheduling, no execution backoff policy, no cancellation, no per-Agent or per-provider concurrency, no fairness or queue partitions, no public Run Events API, no event timeline, no Worker dashboard, no SSE/WebSockets. Provider SDK retries remain `max_retries=0` and there is no provider or model fallback. C3 does not claim exactly-once execution. C4 later activated the execution retry C3 deliberately left out, and C5 and C6 later added cancellation and queue control; the C3 sections below remain the historical record of the state C3 shipped.
 
 **Verification.** The accepted C3 candidate passed 661 Python tests (54 of them Worker tests) and 92 frontend tests; Ruff lint and format; Pyright with zero errors and zero warnings; frontend lint, typecheck, and production build; the repository security scan (261 files, no findings); the architecture guards (24, including new C3 boundary guards); the migration upgrade/current/check/downgrade/re-upgrade lifecycle — including a populated `0003` database — on disposable paths; a dedicated deterministic pre-start recovery browser journey that asserts the durable timeline `attempt.claimed → attempt.expired → recovery.pre_start → attempt.claimed → attempt.started → run.succeeded`, that the abandoned Attempt never crossed the execution-start boundary, and that zero provider calls occurred before recovery; the full deterministic API + Worker + Web journey repeatedly; `make check`; and the isolated `clean-check` gate. Protected files were byte-identical throughout, the default `~/.nervos/nervos.db` was unchanged, and no live provider request was made.
 
@@ -452,9 +550,9 @@ Verification: the full Python suite (569 tests), the frontend suite (85 tests), 
 
 ## Next action
 
-C4 is complete and externally accepted. NervOS durably retries the one execution failure that is positively safe to replay: the current Attempt becomes failed evidence, the Job waits on a committed due instant in retry_wait, and a later compatible Worker creates a fresh fenced Attempt, surviving process restarts with no scheduler. Ambiguous outcomes stay terminal and are never replayed. The control plane still holds no provider credential and cannot claim, start, retry, or terminalize a Job.
+C6 is complete and externally accepted. Execution concurrency is authoritative across the global, per-Agent-Instance, and per-provider dimensions; selection is durable least-recently-served per Agent Instance rather than global FIFO, so a continuously eligible Agent cannot be bypassed indefinitely by a backlog that merely happens to be older; a partition that is saturated, or whose provider this Worker cannot run, is skipped rather than blocking the queue head; and admission is bounded by global, per-Agent, and per-provider pending limits. None of this introduced a scheduler, a leader, a second queue, or a persisted counter. The control plane still holds no provider credential and cannot claim, start, retry, or terminalize a Job, and its only execution-plane transition remains the C5 cancellation.
 
-The next engineering milestone is **C6 — concurrency, fairness, and backpressure**. C6 has **not** started, and it requires separate planning, external plan review, and explicit implementation authorization. It owns queue partitions, per-Agent and per-provider concurrency, global concurrency refinements, fairness, and stronger backpressure. Because C5 owns migration `0005`, the future C6 schema migration begins at **`0006`**. Nothing beyond the existing roadmap and the accepted C0–C5 architecture freezes is settled.
+The next engineering milestone is **C7 — Run Events API, execution observability, and polling/UI observability**. C7 has **not** started, and it requires separate planning, external plan review, and explicit implementation authorization. It owns the public Run Events API, Attempt and Worker observability if approved, the execution timeline, richer runtime status and polling surfaces, and streaming/SSE only if approved during C7 planning. Nothing beyond the existing roadmap and the accepted C0–C6 architecture freezes is settled.
 
 Stage C — Persistent execution engine is in progress. The C0 architecture freeze is complete. C1 passed external implementation and remediation review, was finalized as implementation commit `8e9c9da`, and was merged to `main` in merge commit `6d54eac`.
 

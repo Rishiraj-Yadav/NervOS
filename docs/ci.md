@@ -58,6 +58,13 @@ became durably `cancelled`, that the Worker stopped its blocked local call, and
 that no retry or second Attempt followed. The supervisor asserts every claim
 against committed rows rather than Worker logs.
 
+C6 adds no CI job. Its claim-selection change runs inside the same supervised
+journey, which passes unchanged with migration `0006` in the chain, and the
+fairness, concurrency-cap, admission, and multi-Worker properties are proven by
+deterministic integration suites rather than by the browser: a single-Instance
+journey cannot observe which Agent Instance wins a claim, so it would add runtime
+without adding proof.
+
 ## The `check` versus `e2e` split
 
 `scripts/check.py` exposes six command groups:

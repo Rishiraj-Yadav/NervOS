@@ -179,6 +179,10 @@ For every schema change:
 
 Never mutate the development/production schema manually as the source of truth. Alembic is the sole schema authority; do not call `Base.metadata.create_all()`.
 
+The current migration head is `0006_stage_c6_queue_partitions`. `0006` adds one table, `queue_partitions(agent_instance_id, last_served_attempt_id)`, which stores durable per-Agent fairness history and nothing else — no lease, no status, and no active or pending counter. It deterministically backfills one row per Agent Instance that already has Jobs, taking `MAX(job_attempts.id)` as the marker, or `NULL` for an Instance that has never been claimed, so pre-existing data behaves as never served. `0001`–`0005` are unchanged. Downgrade drops only this derived scheduling metadata without rewriting execution history, and a later re-upgrade reconstructs it from the same backfill.
+
+The Worker pins the schema revision it expects and refuses to start against a different one, so an upgrade across a migration is a normal migrate-then-restart transition; no mixed-revision rolling operation is supported.
+
 Use a unique file-backed database for migration/database tests, set it with `NERVOS_DATABASE_PATH`, and dispose SQLAlchemy engines before Windows cleanup. Every connection enables foreign keys and a 5000 ms busy timeout; A2 does not enable WAL. Timestamps pass through `UTCDateTime`, which rejects naive writes and restores UTC-aware values. See `docs/database.md` for the schema and migration commands.
 
 ## A3 authentication development

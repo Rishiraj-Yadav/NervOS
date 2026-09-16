@@ -25,6 +25,7 @@ EXPECTED_TABLES = {
     "job_attempts",
     "run_events",
     "workers",
+    "queue_partitions",
 }
 FORBIDDEN_SUBSYSTEMS = (
     "conversation",
@@ -177,6 +178,7 @@ def test_b3_route_surface_and_migration_freeze() -> None:
         "0003_stage_c1_durable_execution.py",
         "0004_stage_c3_worker_registry.py",
         "0005_stage_c5_run_cancellation.py",
+        "0006_stage_c6_queue_partitions.py",
     ]
     # The Worker refuses to run against a schema it does not expect, so the pinned revision and
     # the migration head are one fact in two places. Letting them drift bricks the supervised
@@ -208,10 +210,29 @@ def test_b3_creation_gate_pins_the_shared_trusted_definition() -> None:
 
 
 def test_the_persisted_schema_is_exactly_the_reviewed_table_set() -> None:
-    """C2 activated the execution plane and C3 added the registry, without a pointer column."""
+    """C2 activated the execution plane, C3 added the registry, C6 added fairness metadata.
+
+    No milestone added a pointer column to `jobs`.
+    """
     tables = set(re.findall(r'__tablename__ = "([a-z_]+)"', ORM_MODELS.read_text(encoding="utf-8")))
     assert tables == EXPECTED_TABLES
-    assert "queue_partitions" not in tables
+    # The one table C6 adds is scheduling metadata, so it must stay incapable of becoming a
+    # second queue: no cached count can drift, and it holds no execution authority.
+    fairness = (
+        ORM_MODELS.read_text(encoding="utf-8")
+        .split('__tablename__ = "queue_partitions"', 1)[1]
+        .split("class ", 1)[0]
+    )
+    for forbidden in (
+        "active_count",
+        "pending_count",
+        "running_count",
+        "claimed_count",
+        "claim_token",
+        "lease",
+        "status",
+    ):
+        assert forbidden not in fairness, forbidden
     router_text = (API_SOURCE / "api" / "router.py").read_text(encoding="utf-8").lower()
     for forbidden in ("job", "attempt", "event", "worker", "queue"):
         assert forbidden not in router_text, forbidden
@@ -479,14 +500,8 @@ def test_the_never_started_shape_is_licensed_only_by_the_exhausted_code() -> Non
     assert 'WORKER_RECOVERY_EXHAUSTED = "worker_recovery_exhausted"' in domain
 
 
-def test_c5_creates_no_c6_c7_surface() -> None:
-    """C5 cancels and bounds execution; it adds no fairness, partition, or public surface.
-
-    Cancellation events are now legitimate, but only in the reviewed places that write the
-    cancellation lifecycle. Everything C5 was told not to build stays absent: no queue
-    partition, no per-Agent or per-provider concurrency cap, no Event/Worker API, and no
-    execution-plane capability reachable from the API process.
-    """
+def test_c5_cancellation_stays_confined_to_its_reviewed_modules() -> None:
+    """Cancellation events are legitimate only in the reviewed places that write that lifecycle."""
     allowed = {
         "run_cancellation.py",  # the application service that names the transition
         "job_execution.py",  # the readback classification and the local stop
@@ -496,7 +511,7 @@ def test_c5_creates_no_c6_c7_surface() -> None:
         if "cancellation.requested" in text or "run.cancelled" in text:
             assert path.name in allowed, path
     orm = ORM_MODELS.read_text(encoding="utf-8")
-    for forbidden_table in ("queue_partitions", "run_events_api", "worker_health"):
+    for forbidden_table in ("run_events_api", "worker_health"):
         assert forbidden_table not in orm, forbidden_table
     api_sources = {path: path.read_text(encoding="utf-8") for path in python_files(API_SOURCE)}
     for name, text in api_sources.items():
@@ -507,12 +522,45 @@ def test_c5_creates_no_c6_c7_surface() -> None:
         assert "WorkerRegistry" not in text, name
         assert "claim_next" not in text, name
         assert "renew_lease" not in text, name
-    # C6 and C7 remain unbuilt: no fairness mechanism, no partition concept, no public
-    # Attempt/Event/Worker route, and no polling or streaming surface for either.
+
+
+def test_c6_adds_only_the_reviewed_fairness_surface() -> None:
+    """C6 adds queue control in exactly the reviewed shape, and nothing wider.
+
+    The reviewed surface is the durable `queue_partitions` scheduling metadata, the shared policy
+    constants, and the claim/admission predicates that read them. C7 therefore stays unbuilt: the
+    API still cannot execute, no partition/cursor/queue-position concept reaches the API or the
+    browser, and the fairness table stays incapable of becoming a second queue because it stores
+    no count, no status, and no authority.
+    """
+    orm = ORM_MODELS.read_text(encoding="utf-8")
+    assert orm.count('__tablename__ = "queue_partitions"') == 1
+    fairness = orm.split('__tablename__ = "queue_partitions"', 1)[1].split("class ", 1)[0]
+    for required in ("agent_instance_id", "last_served_attempt_id"):
+        assert required in fairness, required
+    for forbidden in ("active_count", "pending_count", "running_count", "claimed_count", "status"):
+        assert forbidden not in fairness, forbidden
+    # Fairness metadata is persistence-internal: nothing above the persistence layer reads it, so
+    # no application service, domain object, route, or Worker module can invent a second ordering
+    # rule from it.
+    for path in (
+        python_files(CORE_APPLICATION)
+        + python_files(CORE_SOURCE / "domain")
+        + python_files(API_SOURCE)
+        + python_files(WORKER_SOURCE)
+    ):
+        assert "last_served_attempt_id" not in path.read_text(encoding="utf-8"), path
+    # C7 remains unbuilt, and C6 publishes no scheduling surface.
     for path in python_files(CORE_APPLICATION) + python_files(API_SOURCE):
         text = path.read_text(encoding="utf-8").lower()
-        for forbidden in ("queue_partition", "fair_share", "per_agent_cap", "leader_election"):
+        for forbidden in ("queue_position", "fair_share", "leader_election", "worker_dashboard"):
             assert forbidden not in text, (path, forbidden)
     router_text = (API_SOURCE / "api" / "router.py").read_text(encoding="utf-8").lower()
-    for forbidden in ("attempt", "event", "worker", "sse", "stream"):
+    for forbidden in ("attempt", "event", "worker", "sse", "stream", "partition"):
         assert forbidden not in router_text, forbidden
+    for path in sorted(FRONTEND_SOURCE.rglob("*")):
+        if not path.is_file():
+            continue
+        frontend_text = path.read_text(encoding="utf-8").lower()
+        for forbidden in ("queue_partition", "queue_position", "fairness"):
+            assert forbidden not in frontend_text, (path, forbidden)

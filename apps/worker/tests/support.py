@@ -18,6 +18,7 @@ from nervos_core.application.model_completion import (
     ModelUsage,
     StopOutcome,
 )
+from nervos_core.application.queue_policy import PRODUCTION_QUEUE_POLICY, QueuePolicy
 from nervos_core.application.run_execution import RunExecutor
 from nervos_core.application.trusted_chat import create_builtin_handler_registry
 from nervos_core.domain.runs import STAGE_B_LIMITS
@@ -36,8 +37,19 @@ PROVIDER_ID = "anthropic"
 SECOND_PROVIDER_ID = "openai"
 
 
-def migrate(path: Path, monkeypatch: pytest.MonkeyPatch) -> Engine:
-    """Create one disposable migrated database holding a user and a Chat Agent Instance."""
+def migrate(
+    path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    agents: int = 1,
+    providers: tuple[str, ...] = (PROVIDER_ID,),
+) -> Engine:
+    """Create one disposable migrated database holding a user and `agents` Agent Instances.
+
+    Providers cycle over `providers`, so a suite can build a fleet whose Instances map onto
+    distinct model providers. The default keeps the single anthropic Chat Instance that the
+    earlier Worker suites assume, at id 1.
+    """
     monkeypatch.setenv("NERVOS_DATABASE_PATH", str(path))
     command.upgrade(Config(str(ROOT / "apps" / "api" / "alembic.ini")), "head")
     engine = create_sqlite_engine(path)
@@ -50,23 +62,25 @@ def migrate(path: Path, monkeypatch: pytest.MonkeyPatch) -> Engine:
             ),
             {"n": NOW},
         )
-        connection.execute(
-            text(
-                "INSERT INTO agent_instances"
-                "(owner_user_id,agent_key,agent_definition_version,display_name,enabled,"
-                "model_provider,model_name,created_at,updated_at) "
-                "VALUES(1,'nervos.chat','1','Chat',1,:p,'opaque/model',:n,:n)"
-            ),
-            {"n": NOW, "p": PROVIDER_ID},
-        )
+        for index in range(1, agents + 1):
+            provider = providers[(index - 1) % len(providers)]
+            connection.execute(
+                text(
+                    "INSERT INTO agent_instances"
+                    "(owner_user_id,agent_key,agent_definition_version,display_name,enabled,"
+                    "model_provider,model_name,created_at,updated_at) "
+                    "VALUES(1,'nervos.chat','1',:d,1,:p,:m,:n,:n)"
+                ),
+                {"d": f"Agent {index}", "p": provider, "m": "opaque/model", "n": NOW},
+            )
     return engine
 
 
-def submit(engine: Engine, *, text_value: str = "hello") -> int:
+def submit(engine: Engine, *, text_value: str = "hello", agent_instance_id: int = 1) -> int:
     """Durably accept one Run and return its identifier."""
     run = SqlAlchemyJobPersistence(engine, max_pending=1000).submit(
         owner_user_id=1,
-        agent_instance_id=1,
+        agent_instance_id=agent_instance_id,
         input_text=text_value,
         limits=STAGE_B_LIMITS,
         now=NOW,
@@ -204,9 +218,10 @@ def build_execution_service(
     engine: Engine,
     completions: dict[str, ModelCompletion],
     clock: Callable[[], datetime] | None = None,
+    policy: QueuePolicy = PRODUCTION_QUEUE_POLICY,
 ) -> tuple[SqlAlchemyJobExecutionPersistence, JobExecutionService]:
     """Compose the shipped execution service over disposable persistence."""
-    persistence = SqlAlchemyJobExecutionPersistence(engine, sleep=lambda _: None)
+    persistence = SqlAlchemyJobExecutionPersistence(engine, policy=policy, sleep=lambda _: None)
     service = JobExecutionService(
         persistence,
         RunExecutor(create_builtin_handler_registry()),
@@ -231,6 +246,7 @@ def build_worker(
     reclaim_interval: float = 3600.0,
     register: bool = True,
     clock: Callable[[], datetime] | None = None,
+    policy: QueuePolicy = PRODUCTION_QUEUE_POLICY,
 ) -> Worker:
     """Compose the shipped Worker loop over disposable persistence.
 
@@ -241,7 +257,7 @@ def build_worker(
     now = clock or (lambda: NOW)
     # The orchestration clock must be the same object the Worker uses: a start committed with a
     # clock behind the claim's own heartbeat would violate the ordering the schema enforces.
-    _persistence, execution = build_execution_service(engine, completions, now)
+    _persistence, execution = build_execution_service(engine, completions, now, policy)
     registry = WorkerRegistry(_persistence, worker_id, clock=now)
     worker = Worker(
         _persistence,

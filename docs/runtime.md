@@ -56,14 +56,44 @@ There is still no global `POST /runs`, no `POST /chat`, no Run Events endpoint, 
 - **Worker capability filter.** A Worker claims only Jobs whose `jobs.model_provider` is in its configured provider set. A Worker with zero configured providers starts, claims nothing, and fails nothing.
 - **No fallback.** There is no provider fallback and no model fallback. The immutable Run snapshot decides the provider/model for execution.
 
-## Queue and lease limits
+## Queue, fairness, and lease limits
 
-- `NERVOS_MAX_PENDING_JOBS` is a global hard admission cap enforced inside the submission transaction. A genuine cap breach returns `429 queue_capacity_exceeded` and writes no Run, Job, or Event row.
-- `NERVOS_MAX_ACTIVE_JOBS` is a node-wide active execution cap enforced inside the claim transaction.
-- `NERVOS_WORKER_CONCURRENCY` is the number of local Worker execution slots.
+Admission and execution are bounded separately, and the two must not be conflated.
+
+**Admission (backlog) limits** bound how much work NervOS accepts:
+
+- `NERVOS_MAX_PENDING_JOBS` is the global hard admission cap enforced inside the submission transaction.
+- `NERVOS_MAX_PENDING_JOBS_PER_AGENT` and `NERVOS_MAX_PENDING_JOBS_PER_PROVIDER` bound one Agent Instance's and one provider's backlog. Both default to the global bound, so neither binds until an operator lowers it.
+- All three are counted, and the Run and Job are written, inside the same admission transaction, so a rejection writes no Run, Job, or Event row and two concurrent submissions at the last slot produce exactly one winner. Any of them returns the same generic `429 queue_capacity_exceeded`; which dimension filled is not disclosed, and no queue position, partition state, or count is exposed.
+
+**Execution-concurrency limits** bound how much work runs at once, and since C6 they are authoritative:
+
+- The active predicate is a Job with `status IN ('claimed','running')` **and** `lease_expires_at > now`. A live lease is execution authority, so a Job that is claimed but not yet started still holds its slot. `queued` and `retry_wait` hold no lease and consume no execution capacity.
+- A Job is claimable only if the **global**, its **Agent Instance's**, and its **provider's** limits all have room — the intersection, decided at claim time from live Jobs. Nothing is persisted, so no counter can drift after a crash, a recovery, a retry, or a cancellation.
+- The limits are one code-level policy (4 global / 4 per Agent Instance / 4 per provider) in `nervos-core`, deliberately not environment settings: each claim compares a database-wide count against its limit, so divergent Worker configuration would raise the effective ceiling instead of being detected.
+- `NERVOS_MAX_ACTIVE_JOBS` is **tightening-only**. A Worker's own budget may lower what it claims; it can never raise the authoritative global limit.
+- `NERVOS_WORKER_CONCURRENCY` is the number of local execution slots in one process. It is one process's parallelism, never fleet concurrency.
+- An expired lease stops consuming capacity for unrelated work, and that is safe: an expired Job is still `claimed` or `running`, so the claim query cannot reach it, and C3 reconciliation remains the only path that returns it to the queue.
 - Leases are renewed while a healthy Worker is executing. Every start, heartbeat, success, failure, and finalization retry is fenced on ownership and an unexpired lease.
 
-The pending cap is intentionally global in C2: one owner's backlog can refuse another owner's submission. Per-owner or per-Agent fairness is a later milestone.
+## Fair selection
+
+C6 replaced global FIFO. Claiming still does not "stop at the blocked head": a partition whose Agent is at its concurrency limit, whose provider is at its limit, or whose provider this Worker cannot run at all is filtered out *before* selection, so it cannot head-of-line block work that this Worker can actually execute.
+
+Among the partitions that remain eligible, the **least-recently-served** one wins, read from durable per-Agent fairness metadata:
+
+```text
+never-served Agent partition first   (NULL last_served_attempt_id)
+then smallest last_served_attempt_id
+then agent_instance_id               (deterministic tie-break)
+within that Agent: available_at ASC, then Job id ASC
+```
+
+The marker is the `job_attempts.id` of a committed claim, so fairness advances **only when a claim commits**. A poll that finds nothing eligible, loses a capability filter, hits a cap, loses the compare-and-set, or rolls back advances nothing and does not penalize any partition; a partition that was skipped keeps its position and re-enters at it. Fairness is durable across restarts because it is stored, and it is identical for every Worker.
+
+Global FIFO is intentionally no longer the scheduling contract: a newer Job belonging to an Agent whose fair turn has arrived may run before an older Job belonging to an Agent that was just served. Within one Agent, oldest-due still wins.
+
+**The guarantee is bounded, not global.** For a given compatible claiming capability set, continuously eligible Agent partitions cannot be repeatedly bypassed by more-recently-served competitors. Worker capability changes which partitions are eligible at all: a partition no present Worker can run is outside the guarantee, because fairness is not promised for work that cannot execute.
 
 ## Failure, retry, and recovery truth
 
@@ -135,7 +165,7 @@ Registry health is **observability, not authority**. `stale` means "not observed
 
 ## Why is my Run stuck?
 
-- A Run shown as **Queued** (`status="created"`) means it was durably accepted but has not started. Common causes are: no Worker process is running; the running Worker has no credential for that Run's provider; or the queue is full for new submissions.
+- A Run shown as **Queued** (`status="created"`) means it was durably accepted but has not started. Common causes are: no Worker process is running; the running Worker has no credential for that Run's provider; the queue is full for new submissions; or its Agent Instance or provider is at its execution-concurrency limit while other work runs.
 - Check the Worker startup log for its configured provider identifiers. If the list is empty or does not include the Run's `model_provider`, that Worker will leave the Job queued.
 - A Run shown as **Running** that never finishes means the Worker stopped or lost authority after the execution-start boundary. That Run is reconciled to `failed` with `execution_outcome_ambiguous` once its lease expires and a Worker is running to reconcile it; it is never replayed. Check the Worker log for `claim_reclaimed` lines.
 - A Run that ends `failed` with `worker_recovery_exhausted` never started at all: its Job's claim budget was exhausted by repeated Worker loss before execution began. Redeploy the Worker and submit a new Run.
@@ -153,6 +183,6 @@ It closes legacy `running` Runs that have no Job as `failed` with `execution_out
 
 ## Still not implemented
 
-Conversation sessions, memory, tools/MCP, scheduling, event triggers, package installation, marketplace, and persistent secret management remain unimplemented. Fairness, queue partitions, and per-Agent or per-provider concurrency remain C6, which owns the future `0006` migration. A public Run Events API, an event timeline, richer execution observability, and a Worker dashboard remain C7. Provider-side remote cancellation is not implemented and is not claimed.
+Conversation sessions, memory, tools/MCP, scheduling, event triggers, package installation, marketplace, and persistent secret management remain unimplemented. A public Run Events API, an event timeline, richer execution observability, and a Worker dashboard remain C7. Provider-side remote cancellation is not implemented and is not claimed. Active-concurrency limits are not runtime-tunable: changing them means changing policy code, and per-Agent-Instance custom limits are not implemented (see ADR 0013).
 
 Two C4 limitations are worth knowing when reading a retried Run. First, `elapsed_ms` and the usage counters describe the **terminal Attempt** only: they exclude earlier Attempts, the retry wait, and total Run wall-clock duration, and there is no cumulative cross-Attempt token accounting. Second, the read-only UI polls for a bounded period and then stops; that bound is not a completion guarantee, because a Run can outlast it through Worker downtime, provider duration, pre-start loss, lease recovery, or host downtime. The Run's durable state is still correct, and reloading the page shows the current state.
