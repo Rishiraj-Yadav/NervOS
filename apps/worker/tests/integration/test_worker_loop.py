@@ -19,6 +19,8 @@ from nervos_core.application.model_completion import (
     ModelProviderError,
     ModelRequest,
     ModelResponse,
+    ModelUsage,
+    StopOutcome,
 )
 from nervos_core.domain.jobs import AttemptStatus, JobStatus, RetryDisposition
 from sqlalchemy import text
@@ -393,3 +395,113 @@ def test_the_lease_window_outlives_a_slow_provider_call() -> None:
     assert LEASE_DURATION >= 3 * HEARTBEAT_INTERVAL
     assert timedelta(seconds=30) > HEARTBEAT_INTERVAL
     assert NOW.tzinfo is not None
+
+
+@pytest.mark.anyio
+async def test_shutdown_drain_is_bounded_for_a_non_cooperative_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slot that ignores cancellation must not be able to hang Worker shutdown.
+
+    Python cannot forcibly terminate a coroutine that suppresses `CancelledError`, so the honest
+    guarantee is a bounded wait rather than a kill: the Worker stops within the grace plus the
+    drain bound, leaves the claim for C3, and consumes whatever the abandoned slot eventually
+    returns instead of reporting it as an unretrieved task exception.
+    """
+    engine = migrate(tmp_path / "worker-drain.db", monkeypatch)
+    try:
+        run_id = submit(engine)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class Stubborn(RecordingCompletion):
+            def __init__(self) -> None:
+                super().__init__()
+                self.swallowed = False
+
+            async def complete(self, request: ModelRequest) -> ModelResponse:
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.swallowed = True
+                    # Refuses to die, and eventually answers late.
+                    await release.wait()
+                return ModelResponse(
+                    "late answer",
+                    PROVIDER_ID,
+                    request.model_name,
+                    StopOutcome.STOP,
+                    ModelUsage(11, 7, 18),
+                )
+
+        completion = Stubborn()
+        worker = build_worker(
+            engine,
+            {PROVIDER_ID: completion},
+            shutdown_grace=0.1,
+            shutdown_drain_seconds=0.2,
+            poll_interval=0.01,
+        )
+        stop = asyncio.Event()
+        task = asyncio.create_task(worker.run(stop))
+        await asyncio.wait_for(started.wait(), timeout=5)
+
+        started_at = asyncio.get_running_loop().time()
+        stop.set()
+        # Shutdown must complete on the bounded budget, long before any real "forever".
+        await asyncio.wait_for(task, timeout=5)
+        elapsed = asyncio.get_running_loop().time() - started_at
+
+        assert completion.swallowed is True
+        assert elapsed < 3
+        # The abandoned slot's late answer is discarded, and shutdown wrote no terminal state.
+        release.set()
+        await asyncio.sleep(0.3)
+        assert job_row(engine, run_id)["status"] == JobStatus.RUNNING.value
+        assert run_row(engine, run_id)["status"] == "running"
+        assert run_row(engine, run_id)["output_text"] is None
+        assert "run.succeeded" not in event_types(engine, run_id)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_worker_shutdown_never_writes_cancellation_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Shutdown is operational cleanup, not an owner cancellation.
+
+    The two look similar locally -- both stop waiting on the provider -- but only an owner's
+    decision may write `cancel_requested_at` or terminalize a Run as `cancelled`. A stopping
+    Worker leaves the claim for C3 and claims nothing on the user's behalf.
+    """
+    engine = migrate(tmp_path / "worker-shutdown.db", monkeypatch)
+    try:
+        run_id = submit(engine)
+        started = asyncio.Event()
+
+        class Blocking(RecordingCompletion):
+            async def complete(self, request: ModelRequest) -> ModelResponse:
+                started.set()
+                await asyncio.Event().wait()
+                raise AssertionError("unreachable")
+
+        worker = build_worker(
+            engine, {PROVIDER_ID: Blocking()}, shutdown_grace=0.1, poll_interval=0.01
+        )
+        stop = asyncio.Event()
+        task = asyncio.create_task(worker.run(stop))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        stop.set()
+        await asyncio.wait_for(task, timeout=5)
+
+        assert job_row(engine, run_id)["cancel_requested_at"] is None
+        assert job_row(engine, run_id)["status"] == JobStatus.RUNNING.value
+        assert run_row(engine, run_id)["status"] == "running"
+        assert run_row(engine, run_id)["error_code"] is None
+        timeline = event_types(engine, run_id)
+        assert "cancellation.requested" not in timeline
+        assert "run.cancelled" not in timeline
+    finally:
+        engine.dispose()

@@ -18,10 +18,14 @@ from nervos_core.application.authentication import (
     AuthenticationError,
     AuthenticationService,
 )
+from nervos_core.application.run_cancellation import RunCancellationService
 from nervos_core.infrastructure.database import create_session_factory, create_sqlite_engine
 from nervos_core.infrastructure.database.agents import SqlAlchemyAgentPersistence
 from nervos_core.infrastructure.database.authentication import SqlAlchemyAuthenticationPersistence
-from nervos_core.infrastructure.database.jobs import SqlAlchemyJobPersistence
+from nervos_core.infrastructure.database.jobs import (
+    SqlAlchemyJobPersistence,
+    SqlAlchemyRunCancellationPersistence,
+)
 from nervos_core.infrastructure.security import Argon2PasswordHasher, SecureSessionTokens
 from nervos_models import compose_model_providers
 
@@ -60,6 +64,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         known_providers,
         SqlAlchemyJobPersistence(engine, max_pending=resolved_settings.max_pending_jobs),
     )
+    # Cancellation composes only the narrow control-plane store: this process gains the ability
+    # to revoke authority over an owned Run, and no ability to claim, start, heartbeat,
+    # terminalize, or reconcile execution.
+    run_cancellation_service = RunCancellationService(
+        SqlAlchemyRunCancellationPersistence(engine),
+        agent_service,
+        utc_now,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
@@ -78,6 +90,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # The route depends on the submission service; it is the same owner-scoped Agent service,
     # exposed under the name that describes what the cutover made it responsible for.
     app.state.run_submission_service = agent_service
+    app.state.run_cancellation_service = run_cancellation_service
     app.state.model_provider_catalog = known_providers
     app.add_exception_handler(Exception, unexpected_error_handler)
     app.add_exception_handler(AuthenticationError, authentication_error_handler)

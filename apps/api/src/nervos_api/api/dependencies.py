@@ -13,6 +13,7 @@ from nervos_core.application.authentication import (
     PublicUser,
 )
 from nervos_core.application.model_providers import ModelProviderCatalog
+from nervos_core.application.run_cancellation import RunCancellationService
 
 from nervos_api.api.cookies import SESSION_COOKIE_NAME
 from nervos_api.api.errors import InvalidOrigin
@@ -42,6 +43,11 @@ def get_agent_service(request: Request) -> AgentService:
 def get_run_submission_service(request: Request) -> AgentService:
     """Return the durable Run submission service; routes never build one."""
     return cast(AgentService, request.app.state.run_submission_service)
+
+
+def get_run_cancellation_service(request: Request) -> RunCancellationService:
+    """Return the owner-authorized Run cancellation service; routes never build one."""
+    return cast(RunCancellationService, request.app.state.run_cancellation_service)
 
 
 def get_model_provider_catalog(request: Request) -> ModelProviderCatalog:
@@ -75,6 +81,10 @@ AuthenticationServiceDependency = Annotated[
 ]
 AgentServiceDependency = Annotated[AgentService, Depends(get_agent_service)]
 RunSubmissionDependency = Annotated[AgentService, Depends(get_run_submission_service)]
+RunCancellationDependency = Annotated[
+    RunCancellationService,
+    Depends(get_run_cancellation_service),
+]
 ModelProviderCatalogDependency = Annotated[
     ModelProviderCatalog,
     Depends(get_model_provider_catalog),

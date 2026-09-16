@@ -28,6 +28,7 @@ from nervos_core.application.model_providers import (
     ModelProviderUnavailable,
     UnknownModelProvider,
 )
+from nervos_core.application.run_cancellation import RunNotCancellable
 from nervos_core.application.trusted_chat import UnknownAgentHandler
 from nervos_core.domain.agents import InvalidAgentDefinitionId, InvalidAgentInstance
 from nervos_core.domain.runs import InvalidRun
@@ -91,6 +92,11 @@ AGENT_ERROR_MAP: dict[type[Exception], tuple[int, str, str]] = {
     InvalidRun: (422, "invalid_input", "The submitted input is invalid."),
     AgentInstanceNotFound: (404, "agent_instance_not_found", "The agent instance was not found."),
     RunNotFound: (404, "run_not_found", "The run was not found."),
+    RunNotCancellable: (
+        409,
+        "run_not_cancellable",
+        "The run already reached a terminal state and cannot be cancelled.",
+    ),
     AgentInstanceUnavailable: (
         409,
         "agent_instance_unavailable",

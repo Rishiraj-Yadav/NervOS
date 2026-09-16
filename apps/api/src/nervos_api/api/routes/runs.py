@@ -10,6 +10,7 @@ from nervos_api.api.dependencies import (
     AgentServiceDependency,
     CurrentUserDependency,
     OriginDependency,
+    RunCancellationDependency,
     RunSubmissionDependency,
 )
 from nervos_api.api.routes.agent_instances import next_before_id
@@ -82,3 +83,30 @@ def get_run(
 ) -> RunResponse:
     """Return one owned Run; foreign and nonexistent ids are indistinguishable."""
     return RunResponse.from_domain(service.get_run(user.id, run_id))
+
+
+@router.post("/runs/{run_id}/cancel", response_model=RunResponse)
+def cancel_run(
+    run_id: int,
+    origin: OriginDependency,
+    user: CurrentUserDependency,
+    service: RunCancellationDependency,
+) -> RunResponse:
+    """Durably cancel one owned Run and return the resulting Run.
+
+    Cancellation is authoritative: the durable transition commits inside this request, so it
+    completes whether or not a Worker is running, and the owning Worker discovers the revoked
+    authority on its next heartbeat. It is idempotent — cancelling an already-cancelled Run
+    returns the same Run, appends no second event, and rewrites neither the original finish
+    instant nor the original elapsed interval.
+
+    A Run that already succeeded or failed is history and is never rewritten: that is a 409,
+    not a silent conversion. The response never exposes a Job, Attempt, claim token, worker id,
+    or retry disposition; the public contract is the Run alone.
+
+    Cancelling stops *NervOS* from waiting for and persisting a result. It does not and cannot
+    prove that the remote provider stopped processing a request it already received, so this
+    endpoint claims no remote cancellation, no billing stop, and no remote rollback.
+    """
+    del origin
+    return RunResponse.from_domain(service.cancel_run(user.id, run_id))

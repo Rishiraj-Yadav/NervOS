@@ -176,7 +176,15 @@ def test_b3_route_surface_and_migration_freeze() -> None:
         "0002_stage_b1_agent_instances_runs.py",
         "0003_stage_c1_durable_execution.py",
         "0004_stage_c3_worker_registry.py",
+        "0005_stage_c5_run_cancellation.py",
     ]
+    # The Worker refuses to run against a schema it does not expect, so the pinned revision and
+    # the migration head are one fact in two places. Letting them drift bricks the supervised
+    # journey with a mismatch the Worker is right to report -- so they are asserted equal here.
+    worker_app = (ROOT / "apps" / "worker" / "src" / "nervos_worker" / "app.py").read_text(
+        encoding="utf-8"
+    )
+    assert f'EXPECTED_SCHEMA_REVISION = "{migrations[-1].stem}"' in worker_app
 
 
 def test_only_one_durable_submission_call_exists() -> None:
@@ -286,17 +294,22 @@ def test_the_worker_cannot_control_and_exposes_no_http_surface() -> None:
     assert not any(module.startswith("alembic") for module in imports)
 
 
-def test_only_the_reviewed_c4_retry_surface_exists() -> None:
-    """C4 activates safe execution retry — and nothing wider than retry.
+def test_only_the_reviewed_retry_and_cancellation_surfaces_exist() -> None:
+    """C4 added retry, C5 adds cancellation — and neither adds anything wider.
 
-    C3 shipped reclamation and a registry; C4 legitimately introduces the one retry engine
-    those earlier stages deferred. The vocabulary that is *still* absent stays absent: no
-    cancellation path, no recovery/reconciler module, no `retry_wait` written anywhere other
-    than the reviewed execution and persistence modules, and no new public router surface.
+    C3 shipped reclamation and a registry; C4 introduced the one retry engine those earlier
+    stages deferred; C5 introduces the one owner-cancellation module. What is *still* absent
+    stays absent: no recovery/reconciler module in the application layer, no `retry_wait`
+    written anywhere other than the reviewed execution and persistence modules, and no new
+    public router surface.
     """
     application_names = " ".join(path.name for path in python_files(CORE_APPLICATION))
-    for forbidden in ("reconcil", "recover", "cancel"):
+    for forbidden in ("reconcil", "recover"):
         assert forbidden not in application_names, forbidden
+    # Exactly one cancellation-named module, and it is the reviewed application service.
+    assert sorted(
+        path.name for path in python_files(CORE_APPLICATION) if "cancel" in path.name
+    ) == ["run_cancellation.py"]
     worker_names = " ".join(path.name for path in python_files(ROOT / "apps" / "worker" / "src"))
     for forbidden in ("reconcil", "recover", "cancel", "worker_table"):
         assert forbidden not in worker_names, forbidden
@@ -308,6 +321,11 @@ def test_only_the_reviewed_c4_retry_surface_exists() -> None:
     policy_source = (CORE_APPLICATION / "retry_policy.py").read_text(encoding="utf-8")
     for forbidden in ("sqlalchemy", "nervos_core.infrastructure", "anthropic", "openai", "sleep("):
         assert forbidden not in policy_source, forbidden
+    # C5's cancellation service is a coordinator: it owns no database, no provider SDK, and no
+    # cancellation-event vocabulary of its own. The transition belongs to persistence.
+    cancellation_source = (CORE_APPLICATION / "run_cancellation.py").read_text(encoding="utf-8")
+    for forbidden in ("sqlalchemy", "nervos_core.infrastructure", "anthropic", "openai"):
+        assert forbidden not in cancellation_source, forbidden
     # The durable retry state is written by exactly the modules C4 reviewed.
     for path in python_files(CORE_APPLICATION) + python_files(WORKER_SOURCE):
         text = path.read_text(encoding="utf-8")
@@ -414,23 +432,30 @@ def test_the_worker_registry_holds_no_credential_and_no_pointer_column() -> None
     assert "active_attempt_id" not in orm
 
 
-def test_c3_added_no_run_status_and_kept_the_frozen_vocabulary() -> None:
-    """`worker_recovery_exhausted` reuses `failed`; it does not introduce a Run status."""
+def test_c5_added_the_cancelled_run_status_and_nothing_wider() -> None:
+    """C5 adds exactly one Run status. C3's rule that recovery introduced none still holds.
+
+    The vocabulary is now five members, and the fifth is `cancelled` alone: the never-started
+    recovery closure still reuses `failed`, so `failed_before_start` and every other invented
+    terminal state remain forbidden.
+    """
     runs_domain = (CORE_SOURCE / "domain" / "runs.py").read_text(encoding="utf-8")
     status_block = runs_domain.split("class RunStatus", 1)[1].split("class ", 1)[0]
-    for member in ("CREATED", "RUNNING", "SUCCEEDED", "FAILED"):
+    for member in ("CREATED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"):
         assert member in status_block, member
     for forbidden in (
-        "CANCELLED",
         "CANCELED",
         "ABANDONED",
         "EXPIRED",
         "ABORTED",
         "FAILED_BEFORE_START",
+        "TIMED_OUT",
+        "RETRYING",
     ):
         assert forbidden not in status_block, forbidden
-    assert "status IN ('created','running','succeeded','failed')" in ORM_MODELS.read_text(
-        encoding="utf-8"
+    assert (
+        "status IN ('created','running','succeeded','failed','cancelled')"
+        in ORM_MODELS.read_text(encoding="utf-8")
     )
 
 
@@ -454,17 +479,40 @@ def test_the_never_started_shape_is_licensed_only_by_the_exhausted_code() -> Non
     assert 'WORKER_RECOVERY_EXHAUSTED = "worker_recovery_exhausted"' in domain
 
 
-def test_c4_creates_no_c5_c6_c7_surface() -> None:
-    """C4 retries an execution; it adds no cancellation, fairness, partition, or public surface."""
+def test_c5_creates_no_c6_c7_surface() -> None:
+    """C5 cancels and bounds execution; it adds no fairness, partition, or public surface.
+
+    Cancellation events are now legitimate, but only in the reviewed places that write the
+    cancellation lifecycle. Everything C5 was told not to build stays absent: no queue
+    partition, no per-Agent or per-provider concurrency cap, no Event/Worker API, and no
+    execution-plane capability reachable from the API process.
+    """
+    allowed = {
+        "run_cancellation.py",  # the application service that names the transition
+        "job_execution.py",  # the readback classification and the local stop
+    }
     for path in python_files(CORE_APPLICATION) + python_files(WORKER_SOURCE):
         text = path.read_text(encoding="utf-8")
-        assert "cancellation.requested" not in text, path
-        assert "run.cancelled" not in text, path
+        if "cancellation.requested" in text or "run.cancelled" in text:
+            assert path.name in allowed, path
     orm = ORM_MODELS.read_text(encoding="utf-8")
     for forbidden_table in ("queue_partitions", "run_events_api", "worker_health"):
         assert forbidden_table not in orm, forbidden_table
     api_sources = {path: path.read_text(encoding="utf-8") for path in python_files(API_SOURCE)}
     for name, text in api_sources.items():
+        # The API may revoke authority over an owned Run; it may never claim, start, heartbeat,
+        # terminalize, or reclaim execution.
         assert "lease_reclamation" not in text, name
         assert "reclaim" not in text.lower(), name
         assert "WorkerRegistry" not in text, name
+        assert "claim_next" not in text, name
+        assert "renew_lease" not in text, name
+    # C6 and C7 remain unbuilt: no fairness mechanism, no partition concept, no public
+    # Attempt/Event/Worker route, and no polling or streaming surface for either.
+    for path in python_files(CORE_APPLICATION) + python_files(API_SOURCE):
+        text = path.read_text(encoding="utf-8").lower()
+        for forbidden in ("queue_partition", "fair_share", "per_agent_cap", "leader_election"):
+            assert forbidden not in text, (path, forbidden)
+    router_text = (API_SOURCE / "api" / "router.py").read_text(encoding="utf-8").lower()
+    for forbidden in ("attempt", "event", "worker", "sse", "stream"):
+        assert forbidden not in router_text, forbidden

@@ -2,7 +2,7 @@
 
 ## Current phase
 
-Stage C — Persistent execution engine is IN PROGRESS. The C0 architecture freeze, the C1 durable execution foundation, C2 — asynchronous submission and minimal durable Worker execution — C3 — Worker registry/health, expired-lease reconciliation, and fencing hardening — and C4 — the safe execution retry engine — are implemented, externally reviewed, and accepted. C5 has not started.
+Stage C — Persistent execution engine is IN PROGRESS. The C0 architecture freeze, the C1 durable execution foundation, C2 — asynchronous submission and minimal durable Worker execution — C3 — Worker registry/health, expired-lease reconciliation, and fencing hardening — C4 — the safe execution retry engine — and C5 — owner cancellation and Attempt execution-timeout orchestration — are implemented, externally reviewed, and accepted. C6 has not started.
 
 Stage B — Trusted-agent runtime proof is complete and accepted. B1 domain/persistence, B2 internal one-call execution, B3 trusted Agent/Run HTTP API with the minimal Chat dashboard interaction, and B4 second-provider portability are implemented, merged to `main`, and post-merge verified.
 
@@ -13,7 +13,7 @@ Stage B — Trusted-agent runtime proof is complete and accepted. B1 domain/pers
 - [x] C2 — Asynchronous submission and minimal durable Worker execution
 - [x] C3 — Worker registry/health, expired-lease reconciliation, and fencing hardening
 - [x] C4 — Safe execution retry engine (durable `SAFE_TO_RETRY` re-execution and backoff)
-- [ ] C5 — Not started
+- [x] C5 — Owner cancellation and Attempt execution-timeout orchestration
 - [ ] C6 — Not started
 - [ ] C7 — Not started
 - [ ] C8 — Not started
@@ -27,8 +27,15 @@ C3 passed external source review of its plan, then external implementation revie
 E2E acceptance remediation that added the deterministic pre-start recovery journey. C4 passed
 external review of its plan, then external implementation review. C4 is authored and verified
 together with this status update in a single C4 milestone change, so it deliberately records no pull
-request number and no merge commit of its own. C5 through C8 have no implementation and require
-separate planning, external plan review, and explicit implementation authorization.
+request number and no merge commit of its own. C5 passed external review of its plan, then external
+implementation review, then a remediation pass that completed the outer execution-timeout watchdog
+and the bounded Worker shutdown drain. C5 is likewise authored and verified together with this status
+update in a single C5 milestone change, so it records no pull request number and no merge commit of
+its own. C6 through C8 have no implementation and require separate planning, external plan review,
+and explicit implementation authorization.
+
+C6 — concurrency, fairness, and backpressure — has **not started**. Because C5 owns migration
+`0005`, the future C6 schema migration begins at **`0006`**.
 
 ## Stage B milestones
 
@@ -271,6 +278,98 @@ ANTHROPIC LIVE PROOF — NOT EXECUTED
 OPENAI LIVE PROOF — NOT EXECUTED
 ```
 
+## C5 implementation verification
+
+C5 adds the two execution controls the engine was missing: an owner can stop a Run, and an Attempt
+can no longer hold a Worker slot forever.
+
+**Cancellation is a durable control-plane transition, not a message to a Worker.** The API
+transaction that accepts the cancellation *is* the cancellation: it records the request, closes the
+Attempt, Job, and Run, and appends the cancellation events atomically before the response returns.
+A live Worker is therefore never required — cancellation completes with no Worker running, with a
+crashed Worker, and against a Job that is merely queued or waiting out a scheduled retry.
+`cancel_requested_at` is write-once and is never cleared; because the request and the Job's terminal
+state commit together, a Job carrying a request can never be claimable, which is why the claim query
+needed no new predicate. Repeated cancellation is idempotent: it returns the same Run, appends no
+second event, and rewrites neither the original finish instant nor the original elapsed interval.
+
+**A cancelled Run is its own terminal lifecycle.** `Run.status='cancelled'` is not `failed` with a
+reassuring code. It carries no output, no usage, and **no provider error at all**, because refusing
+to continue is not a provider outcome. A Run cancelled before execution began has no fabricated
+`started_at` and a NULL `elapsed_ms`; a Run cancelled after it began preserves its real start and
+reports the truthful interval until cancellation was accepted, using the same elapsed semantics C3
+already used for a post-start recovery close. The internal Job does carry an infrastructure-owned
+`execution_cancelled` code, because the frozen Job schema requires every terminal Job to explain
+itself; that code is never produced by a provider and cannot steer retry policy, and the public Run
+exposes none of it.
+
+**The Worker is a follower, and that is the safety argument.** Every late write in the engine was
+already fenced on a live claim — Job status, owning worker, claim token, and an unexpired lease — so a
+stale Worker's success, failure, retry schedule, start, or heartbeat matches zero rows without any of
+those paths knowing cancellation exists. Queued cancellation invokes no provider and invents no
+Attempt; `retry_wait` cancellation keeps its due instant as append-only history while making it
+unreachable; claimed-but-unstarted cancellation lands before the execution boundary; running
+cancellation revokes authority while the Worker discovers it on its next heartbeat and stops waiting
+on the local provider task. A cancelled Job cannot be claimed, retried, or requeued by C3's
+reconciler, because a terminal Job is not a candidate for any of them.
+
+**NervOS claims no remote cancellation.** Cancellation revokes *NervOS* authority, asks the local
+provider task to stop, and guarantees that a late result can never be persisted. It does not claim
+that the remote provider stopped processing a request it already received, that billing stopped, or
+that remote side effects were rolled back. The API contract, the frontend copy, and ADR 0012 all say
+so, and the provider adapters are unchanged.
+
+**Execution timeout is not cancellation.** An Attempt's deadline comes from `provider_timeout_ms`,
+already part of the Run's immutable limits snapshot, and starts only after the durable
+execution-start commit, so queue time, claim time, a scheduled retry wait, and terminal persistence
+are excluded, and each retry Attempt receives a fresh window. C5 owns two layers: the unchanged
+cooperative inner deadline in `RunExecutor`, and a new provider-neutral outer watchdog in
+`JobExecutionService` that exists because the inner bound cannot complete against a coroutine that
+suppresses `CancelledError`. Both converge on `model_timed_out`, which remains `AMBIGUOUS`, is never
+replayed, and never becomes a cancellation. The watchdog's winner rule is a fact about what already
+happened: if the provider call has already completed when the deadline becomes ready, its real result
+is consumed and a completed call is never relabelled as a timeout.
+
+**Cleanup is bounded, and honestly so.** Python cannot forcibly terminate a coroutine that refuses to
+die. C5 guarantees bounded local waiting, revoked durable authority, and no durable resurrection —
+not that every coroutine disappears. A task that outlives the drain bound is left to finish on its
+own, tracked until it completes so its eventual result or exception is retrieved and discarded rather
+than reported as an unretrieved task exception; it holds no authority and every terminal write is
+fenced, so it cannot overwrite or resurrect anything. `WorkerService` shutdown is bounded on the same
+terms and still writes no cancellation state, because operational cleanup is not the owner's
+decision — a stopping Worker leaves its claim for C3.
+
+**Migration.** `0005_stage_c5_run_cancellation` rebuilds only the `runs` table to admit a fifth
+lifecycle, reusing C3's proven rebuild discipline: an explicit column list, an autocommit section
+around the foreign-key pragma, and a `PRAGMA foreign_key_check` that raises if integrity was not
+preserved. It does not touch `jobs`, `job_attempts`, or `run_events`, creates no queue partition and
+no `active_attempt_id`, and leaves `0001`–`0004` byte-identical. A database holding cancelled Runs
+cannot be represented by C4's constraints, so the downgrade **refuses** rather than converting a
+cancellation into a failure the user never had. Because C5 owns `0005`, the future C6 migration
+begins at `0006`.
+
+**API and frontend.** `POST /api/v1/runs/{run_id}/cancel` returns the resulting Run: `200` for a
+cancelled or already-cancelled Run, `409 run_not_cancellable` for a Run that already succeeded or
+failed and is therefore never rewritten, and the same `404 run_not_found` for foreign and nonexistent
+ids so cancellation cannot probe for another user's Runs. It requires the configured `Origin`, and it
+exposes no Job, Attempt, token, worker, or disposition detail. The dashboard offers a Cancel control
+on `created` and `running` Runs only; `cancelled` is terminal, so existing polling stops for it, and a
+`retry_wait`-backed Run is publicly `running` and therefore cancellable without the frontend ever
+learning an internal Job state.
+
+**Verification.** C5 was verified with 18 focused timeout tests, 19 cancellation tests, 10
+cancellation-race and timeout-ordering integration tests, and new C3/C4 regression guards. The
+accepted candidate passed **617 Python tests**, **58 Worker tests**, **168 API tests**, **26
+architecture guards**, **88 E2E-supervisor guards**, and **103 frontend tests**; Ruff lint and format;
+Pyright with zero errors; frontend lint, typecheck, and production build; the repository security
+scan (272 files, no findings); the migration upgrade/current/check/downgrade/re-upgrade lifecycle
+through `0005`, including the downgrade refusal; the deterministic browser journey **twice**, in which
+the cancellation journey proves a running Run becomes durably `cancelled` and that a Worker observes
+the revocation; `check.py check`; and the isolated `clean-check` gate, whose pristine export passed
+every step including the E2E. The protected migrations, ORM model module, provider adapters, retry
+policy, and C3 reclamation module were byte-identical throughout, and the default `~/.nervos/nervos.db`
+was unchanged.
+
 ## C2 implementation verification
 
 C2 changes the product from awaited API-process execution to durable asynchronous execution. `POST /api/v1/agent-instances/{id}/runs` now returns `202 Accepted` after committing exactly one immutable `Run(status=created)`, one `Job(status=queued)`, and the initial `run.created`/`run.queued` events. The API/control plane validates ownership, exact `nervos.chat@1`, input bounds, and known provider identifiers, but it holds no provider credential, constructs no provider SDK client, composes no handler registry, and cannot claim/start/heartbeat/terminalize Jobs.
@@ -307,7 +406,7 @@ C4 activates durable execution retry for the one failure class that is positivel
 
 **Accepted limitations, recorded rather than hidden.** Run `elapsed_ms` and Run usage remain the **terminal** Attempt's values; they do not include earlier Attempts, retry-wait time, or total Run wall-clock duration, and C4 provides no cumulative cross-Attempt token accounting (per-Attempt accounting would need a schema revision, which C4 does not add). The bounded read-only UI poll (roughly 300 seconds at 2-second intervals) is unchanged and is **not** a completion guarantee: a Run's durable state stays correct across Worker downtime, provider duration, pre-start loss, lease recovery, or host downtime, and a later reload or refetch shows the current state. Richer execution observability remains C7.
 
-**Explicitly not provided by C4.** No cancellation (C5), no fairness, queue partitions, or per-Agent/per-provider concurrency (C6), and no public Run Events API, timeline, Worker dashboard, SSE, or WebSockets (C7). `cancel_requested_at` remains dormant: C4 does not read, write, or prioritize it, and no cancellation endpoint, `cancelled` Run status, or cancel-versus-retry rule exists. C4 does not claim exactly-once execution and claims no provider-side rollback or cancellation.
+**Explicitly not provided by C4.** No cancellation (C5), no fairness, queue partitions, or per-Agent/per-provider concurrency (C6), and no public Run Events API, timeline, Worker dashboard, SSE, or WebSockets (C7). C4 does not read, write, or prioritize `cancel_requested_at`, and C4 ships no cancellation endpoint, no `cancelled` Run status, and no cancel-versus-retry rule. C4 does not claim exactly-once execution and claims no provider-side rollback or cancellation. (C5 later implemented owner cancellation and execution-timeout orchestration; the C4 sections remain the historical record of the state C4 shipped.)
 
 **Verification.** The accepted C4 candidate passed 71 focused C4 tests; the full Python suite of 704 tests (55 Worker, 158 API); 26 architecture guards; 92 frontend tests; 21 E2E-supervisor tests; Ruff lint and format; Pyright with zero errors and zero warnings; frontend lint, typecheck, and production build; the tracked-file security scan (265 files, no findings); and an `EXPLAIN QUERY PLAN` check proving the widened due-work query still resolves through the existing `jobs` status index rather than scanning. Migration head was confirmed still `0004` with exactly four migrations. A deterministic supervised browser journey proves the retry end to end — a scripted rate limit, a durable `retry_wait`, a still-running Run, a second Attempt after the due instant, and exactly two provider calls for that Run — and asserts from committed state that the retry's own `claimed_at` is not before its `available_at`, that the Run's `started_at` equals the first Attempt's start, and that no `run.failed` occurred. It passed twice consecutively, and `check` and the isolated `clean-check` gate both passed. Protected files were byte-identical throughout and the default `~/.nervos/nervos.db` was unchanged (size 65536, sha256 `f60ed2b32637d314d31a4305c704b5f80ff0db14adbefdff156368cc5f05800f`). No live provider request was made.
 
@@ -343,7 +442,7 @@ C0 was an architecture freeze and governance milestone only: it changed no repos
 
 C1 adds the durable execution foundation without changing product behavior. Migration `0003_stage_c1_durable_execution` creates `jobs`, `job_attempts`, and `run_events`; migration head is now `0003_stage_c1_durable_execution`, and `0001` and `0002` are unchanged.
 
-The durable foundation is dormant. A Job is one internal durable obligation per Run, one Attempt is one claim/execution episode for a Job, and a Run Event is an append-only safe lifecycle fact sequenced within one Run and carrying only narrow typed safe fields. The single partial unique index `uq_job_attempts_one_active` permits at most one active `claimed` or `running` Attempt per Job while leaving multiple historical terminal Attempts legal. The `SAFE_TO_RETRY`, `DO_NOT_RETRY`, and `AMBIGUOUS` retry dispositions are persisted, but no retry engine consumed them at C1 — C4 later activated only the `SAFE_TO_RETRY` path, and `DO_NOT_RETRY` and `AMBIGUOUS` still never retry. `jobs.cancel_requested_at` is the sole dormant future cancellation-request authority, and no cancellation behavior exists.
+The durable foundation is dormant. A Job is one internal durable obligation per Run, one Attempt is one claim/execution episode for a Job, and a Run Event is an append-only safe lifecycle fact sequenced within one Run and carrying only narrow typed safe fields. The single partial unique index `uq_job_attempts_one_active` permits at most one active `claimed` or `running` Attempt per Job while leaving multiple historical terminal Attempts legal. The `SAFE_TO_RETRY`, `DO_NOT_RETRY`, and `AMBIGUOUS` retry dispositions are persisted, but no retry engine consumed them at C1 — C4 later activated only the `SAFE_TO_RETRY` path, and `DO_NOT_RETRY` and `AMBIGUOUS` still never retry. `jobs.cancel_requested_at` is the sole dormant future cancellation-request authority, and no cancellation behavior exists. (C5 later activated it; this section remains the historical record of the state C1 shipped.)
 
 At C1 completion, before the C2 cutover, the atomic Run + Job + initial-event submission primitive and the per-Run event appender had no production caller. The public `POST /api/v1/agent-instances/{id}/runs` route was unchanged and still executed synchronously, returning HTTP 201 with the terminal Run, so normal Stage B execution created no Job, Attempt, or Run Event row, and no Worker process existed. C2 replaced that route behaviour with durable HTTP 202 acceptance and a separate Worker; see the C2 section above for the current state. No `active_attempt_id` exists in either the schema or the domain.
 
@@ -355,7 +454,7 @@ Verification: the full Python suite (569 tests), the frontend suite (85 tests), 
 
 C4 is complete and externally accepted. NervOS durably retries the one execution failure that is positively safe to replay: the current Attempt becomes failed evidence, the Job waits on a committed due instant in retry_wait, and a later compatible Worker creates a fresh fenced Attempt, surviving process restarts with no scheduler. Ambiguous outcomes stay terminal and are never replayed. The control plane still holds no provider credential and cannot claim, start, retry, or terminalize a Job.
 
-The next engineering milestone is **C5 — cancellation and execution-timeout orchestration**. C5 has **not** started, and it requires separate planning, external plan review, and explicit implementation authorization. C5 owns cancellation requests and state, cancellation transitions and timestamps, and the execution-timeout orchestration the roadmap assigns it. `jobs.cancel_requested_at` is still dormant: it has no production writer, C4 does not read or prioritize it, and no `cancelled` Run status or cancellation endpoint exists. Nothing beyond the existing roadmap and the accepted C0–C4 architecture freezes is settled.
+The next engineering milestone is **C6 — concurrency, fairness, and backpressure**. C6 has **not** started, and it requires separate planning, external plan review, and explicit implementation authorization. It owns queue partitions, per-Agent and per-provider concurrency, global concurrency refinements, fairness, and stronger backpressure. Because C5 owns migration `0005`, the future C6 schema migration begins at **`0006`**. Nothing beyond the existing roadmap and the accepted C0–C5 architecture freezes is settled.
 
 Stage C — Persistent execution engine is in progress. The C0 architecture freeze is complete. C1 passed external implementation and remediation review, was finalized as implementation commit `8e9c9da`, and was merged to `main` in merge commit `6d54eac`.
 

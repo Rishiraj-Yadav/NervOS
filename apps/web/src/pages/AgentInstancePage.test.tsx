@@ -468,3 +468,58 @@ describe("agent detail page", () => {
     expect(requests.every((url) => !url.includes("owner_user_id"))).toBe(true);
   });
 });
+
+describe("agent detail page cancellation", () => {
+  it("cancels a running run through the server and shows the durable result", async () => {
+    const running = apiRun({ id: 7, status: "running" });
+    const cancelled = apiRun({
+      id: 7,
+      status: "cancelled",
+      finished_at: "2026-09-14T00:00:05Z",
+      elapsed_ms: 5000,
+    });
+    let cancelCalls = 0;
+    // The mock behaves like the real server: the durable state changes, so a refetch after the
+    // mutation observes the cancelled Run rather than the pre-cancellation one.
+    let current: ApiRun = running;
+    server.use(
+      setupStatusHandler(true),
+      authenticatedHandler(),
+      http.get("/api/v1/agent-instances/1", () => HttpResponse.json(apiAgentInstance())),
+      http.get("/api/v1/agent-instances/1/runs", () =>
+        HttpResponse.json({ items: [current], next_before_id: null }),
+      ),
+      http.post("/api/v1/runs/7/cancel", () => {
+        cancelCalls += 1;
+        current = cancelled;
+        return HttpResponse.json(cancelled);
+      }),
+    );
+
+    const { user } = await renderRoute("/agents/1");
+    const button = await screen.findByRole("button", { name: /cancel/i });
+
+    await user.click(button);
+
+    await waitFor(() => expect(screen.getByText("Cancelled")).toBeVisible());
+    expect(cancelCalls).toBe(1);
+    expect(screen.queryByRole("button", { name: /cancel/i })).toBeNull();
+  });
+
+  it("surfaces a conflict truthfully instead of pretending the run was cancelled", async () => {
+    const running = apiRun({ id: 8, status: "running" });
+    server.use(
+      ...detailHandlers({ runs: [running] }),
+      http.post("/api/v1/runs/8/cancel", () =>
+        apiError(409, "run_not_cancellable", "The run already reached a terminal state."),
+      ),
+    );
+
+    const { user } = await renderRoute("/agents/1");
+    await user.click(await screen.findByRole("button", { name: /cancel/i }));
+
+    // The run keeps the status the server actually reports; no optimistic rewrite.
+    await waitFor(() => expect(screen.queryByText("Cancelled")).toBeNull());
+    expect(screen.getByText("Running")).toBeVisible();
+  });
+});

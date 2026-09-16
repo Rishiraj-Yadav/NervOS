@@ -499,3 +499,58 @@ def test_the_retry_journey_assertion_rejects_an_unretried_run(tmp_path: Path) ->
 
     with pytest.raises(RuntimeError):
         module.assert_retry_journey(database=database, scripted_log=tmp_path / "calls.txt")
+
+
+def test_the_cancellation_journey_is_scripted_outside_production_composition() -> None:
+    """C5's blocking hold and stopping ledger live only in the supervised test plumbing."""
+    supervisor = (ROOT / "scripts" / "e2e.py").read_text(encoding="utf-8")
+    for variable in (
+        "NERVOS_E2E_BLOCK_INPUT",
+        "NERVOS_E2E_BLOCK_RELEASE",
+        "NERVOS_E2E_CANCEL_OBSERVED",
+        "NERVOS_E2E_CANCEL_INPUT",
+    ):
+        assert variable in supervisor, variable
+    assert "assert_cancellation_journey" in supervisor
+    assert "CANCEL_DISCOVERY_TIMEOUT_SECONDS" in supervisor
+
+    doubles = (ROOT / "tests" / "e2e_support" / "deterministic.py").read_text(encoding="utf-8")
+    assert "BLOCK_INPUT_VARIABLE" in doubles
+    assert "CANCEL_OBSERVED_VARIABLE" in doubles
+    # The hold must be reachable only through the environment, never by default.
+    assert 'os.environ.get(BLOCK_INPUT_VARIABLE, "").strip()' in doubles
+
+    spec = (ROOT / "apps" / "web" / "e2e" / "stage-a.spec.ts").read_text(encoding="utf-8")
+    assert "NERVOS_E2E_CANCEL_INPUT" in spec
+    assert "cancelPrompt" in spec
+
+    # No shipped module may reach the scripting seam, and none may block a provider call.
+    for root in (ROOT / "apps", ROOT / "packages"):
+        for path in root.rglob("*.py"):
+            text = path.read_text(encoding="utf-8")
+            assert "BLOCK_INPUT_VARIABLE" not in text, path
+            assert "CANCEL_OBSERVED_VARIABLE" not in text, path
+            assert "NERVOS_E2E_BLOCK" not in text, path
+
+
+def test_the_supervisor_never_alters_production_execution_tuning_for_cancellation() -> None:
+    """The journey waits for the shipped heartbeat instead of weakening the lease relationship.
+
+    Shortening the heartbeat for the whole supervised run would also shorten the lease that the
+    C3 crash-recovery journey depends on, so cancellation discovery waits on the real cadence.
+    """
+    supervisor = (ROOT / "scripts" / "e2e.py").read_text(encoding="utf-8")
+    assert "NERVOS_E2E_HEARTBEAT_SECONDS" not in supervisor
+    worker = (ROOT / "tests" / "e2e_support" / "e2e_worker.py").read_text(encoding="utf-8")
+    assert "NERVOS_E2E_HEARTBEAT_SECONDS" not in worker
+    core = (
+        ROOT
+        / "packages"
+        / "nervos-core"
+        / "src"
+        / "nervos_core"
+        / "application"
+        / "job_execution.py"
+    ).read_text(encoding="utf-8")
+    assert "LEASE_DURATION = timedelta(seconds=60)" in core
+    assert "HEARTBEAT_INTERVAL = timedelta(seconds=15)" in core

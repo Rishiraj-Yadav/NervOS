@@ -6,6 +6,7 @@ import {
   logout,
 } from "./auth";
 import {
+  cancelRun,
   createAgentInstance,
   createRun,
   getAgentInstance,
@@ -152,6 +153,31 @@ export function useCreateRun(agentInstanceId: number) {
     onSuccess: (run) => {
       queryClient.setQueryData<RunPage>(queryKeys.agentRuns(agentInstanceId), (previous) =>
         previous === undefined ? previous : { ...previous, items: [run, ...previous.items] },
+      );
+      void queryClient.invalidateQueries({ queryKey: queryKeys.agentRuns(agentInstanceId) });
+    },
+  });
+}
+
+/**
+ * Durably cancel one Run.
+ *
+ * The cache is updated from the server's own answer rather than from an optimistic guess: a Run
+ * that had already succeeded or failed is reported as 409 and stays exactly as it was, so
+ * pretending locally that it became `cancelled` would show the user something untrue.
+ */
+export function useCancelRun(agentInstanceId: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (runId: number) => cancelRun(runId),
+    onSuccess: (run) => {
+      queryClient.setQueryData<RunPage>(queryKeys.agentRuns(agentInstanceId), (previous) =>
+        previous === undefined
+          ? previous
+          : {
+              ...previous,
+              items: previous.items.map((item) => (item.id === run.id ? run : item)),
+            },
       );
       void queryClient.invalidateQueries({ queryKey: queryKeys.agentRuns(agentInstanceId) });
     },

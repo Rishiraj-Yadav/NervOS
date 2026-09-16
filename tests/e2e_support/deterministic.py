@@ -7,6 +7,7 @@ durable path end to end without contacting any provider.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import timedelta
 from pathlib import Path
@@ -57,6 +58,47 @@ PROVIDER_CALL_LOG_VARIABLE = "NERVOS_E2E_PROVIDER_CALL_LOG"
 # in-memory counter could not, and C4's whole point is that a retry survives a new process.
 SCRIPTED_FAILURES_VARIABLE = "NERVOS_E2E_SCRIPTED_FAILURES"
 SCRIPTED_CALL_LOG_VARIABLE = "NERVOS_E2E_SCRIPTED_CALL_LOG"
+
+# Test-only blocking gate. The supervisor names one prompt whose provider call must stay open
+# until a release file appears, and points the release at a path inside its own temporary
+# directory. This is what makes a cancellation journey deterministic instead of timing-dependent:
+# the browser can click Cancel knowing the Run is genuinely mid-call, and the supervisor can
+# prove the call was *stopped* rather than merely slow.
+BLOCK_INPUT_VARIABLE = "NERVOS_E2E_BLOCK_INPUT"
+BLOCK_RELEASE_VARIABLE = "NERVOS_E2E_BLOCK_RELEASE"
+
+# Test-only proof-of-stopping ledger. A blocked call that observes `CancelledError` appends one
+# line here, which is the only evidence that separates "NervOS stopped waiting" from "the
+# provider had not answered yet". Production sets neither variable, so production never blocks
+# and never writes a file.
+CANCEL_OBSERVED_VARIABLE = "NERVOS_E2E_CANCEL_OBSERVED"
+
+
+def _record_cancellation_observed(provider_id: str, user_text: str) -> None:
+    """Record that a blocked provider call was cancelled out from under the Worker."""
+    target = os.environ.get(CANCEL_OBSERVED_VARIABLE, "").strip()
+    if not target:
+        return
+    with Path(target).open("a", encoding="utf-8") as ledger:
+        ledger.write(f"{provider_id}\t{user_text}\n")
+
+
+async def _block_until_released_or_cancelled(provider_id: str, user_text: str) -> None:
+    """Hold the one scripted call open until the supervisor releases it or the Worker stops it.
+
+    A cancelled hold is reported before it propagates, because the Worker's decision to stop
+    waiting is the behavior under test and it must be observable without reading Worker logs.
+    """
+    target = os.environ.get(BLOCK_INPUT_VARIABLE, "").strip()
+    if not target or target != user_text:
+        return
+    release = os.environ.get(BLOCK_RELEASE_VARIABLE, "").strip()
+    try:
+        while not release or not Path(release).exists():
+            await asyncio.sleep(0.05)
+    except asyncio.CancelledError:
+        _record_cancellation_observed(provider_id, user_text)
+        raise
 
 
 def _record_provider_call(provider_id: str) -> None:
@@ -113,6 +155,7 @@ class DeterministicCompletion:
         prior = _record_scripted_call(self.provider_id, request.user_text)
         if prior < _scripted_failure_count(self.provider_id, request.user_text):
             raise ModelProviderError(MODEL_RATE_LIMITED)
+        await _block_until_released_or_cancelled(self.provider_id, request.user_text)
         return ModelResponse(
             self.reply,
             self.provider_id,

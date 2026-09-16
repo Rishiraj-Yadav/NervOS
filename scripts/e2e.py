@@ -40,11 +40,22 @@ RECOVERY_GRACE_SECONDS = 2
 RETRY_PROVIDER = "anthropic"
 RETRY_INPUT = "retry once before answering"
 RETRY_DELAY_SECONDS = 6
+
+# C5 cancellation journey. One prompt whose provider call the double holds open until the
+# supervisor releases it, so the browser can cancel a Run that is genuinely mid-call rather than
+# merely slow. The supervisor bounds how long it waits for the Worker to *notice* the revoked
+# authority: that discovery happens on the next heartbeat, so the bound is one production
+# heartbeat interval plus slack, and production constants are never altered for the journey.
+CANCEL_PROVIDER = "anthropic"
+CANCEL_INPUT = "hold this call open until cancelled"
+CANCEL_DISCOVERY_TIMEOUT_SECONDS = 40
 # Every provider invocation in the whole journey: one for the recovered Run, one for the
-# OpenAI Run, and two for the retried Run (its refused first Attempt and its succeeding second
-# Attempt). The number is asserted globally on top of the per-prompt count in
-# `assert_retry_journey`, so an unexpected extra invocation anywhere still fails the journey.
-TOTAL_PROVIDER_CALLS = 4
+# OpenAI Run, two for the retried Run (its refused first Attempt and its succeeding second
+# Attempt), and one for the cancelled Run. The number is asserted globally on top of the
+# per-prompt counts in `assert_retry_journey` and `assert_cancellation_journey`, so an
+# unexpected extra invocation anywhere — including a cancelled Run being executed again — still
+# fails the journey.
+TOTAL_PROVIDER_CALLS = 5
 
 
 @dataclass(frozen=True)
@@ -260,6 +271,8 @@ def run_e2e() -> int:
         # browser journey creates it after it has observed the queued Run, which makes the
         # queued state a deterministic precondition of execution instead of a race.
         worker_claim_gate = temporary / "worker-claim-gate.txt"
+        cancel_release = temporary / "cancel-release.txt"
+        cancel_observed = temporary / "cancel-observed.txt"
         # C3 pre-start recovery seam. Worker A claims one Job and exits before the
         # execution-start boundary; the supervisor waits for that marker and then starts
         # Worker B, whose startup reclamation pass must reconcile the expired claim.
@@ -298,6 +311,11 @@ def run_e2e() -> int:
             "NERVOS_E2E_SCRIPTED_FAILURES": str(scripted_failures),
             "NERVOS_E2E_SCRIPTED_CALL_LOG": str(scripted_call_log),
             "NERVOS_E2E_RETRY_DELAY_SECONDS": str(RETRY_DELAY_SECONDS),
+            # C5 cancellation seam: the double holds this one prompt open until the supervisor
+            # releases it, and records that the hold was cancelled out from under the Worker.
+            "NERVOS_E2E_BLOCK_INPUT": CANCEL_INPUT,
+            "NERVOS_E2E_BLOCK_RELEASE": str(cancel_release),
+            "NERVOS_E2E_CANCEL_OBSERVED": str(cancel_observed),
         }
         worker_environment = {**worker_environment, **retry_environment}
         worker_b_environment = {**worker_b_environment, **retry_environment}
@@ -307,6 +325,7 @@ def run_e2e() -> int:
             "NERVOS_E2E_WEB_ORIGIN": web_origin,
             "NERVOS_E2E_CLAIM_GATE": str(worker_claim_gate),
             "NERVOS_E2E_RETRY_INPUT": RETRY_INPUT,
+            "NERVOS_E2E_CANCEL_INPUT": CANCEL_INPUT,
         }
         pnpm = resolve_required_command("pnpm")
 
@@ -435,6 +454,19 @@ def run_e2e() -> int:
                 except subprocess.TimeoutExpired as error:
                     raise RuntimeError("Playwright exceeded its 120 second timeout") from error
                 watcher.join(timeout=WORKER_READY_TIMEOUT)
+                if returncode != 0:
+                    # Report the browser's own failure *before* any durable assertion. Otherwise
+                    # a downstream state mismatch -- a Run left `running` because the journey
+                    # never clicked, for instance -- masks the real Playwright error and sends
+                    # the investigation in the wrong direction.
+                    print(log_tail(playwright_log_path), file=sys.stderr)
+                    raise RuntimeError(f"Playwright journey failed with status {returncode}")
+                assert_cancellation_journey(
+                    database=database,
+                    cancel_observed=cancel_observed,
+                    provider_ledger=provider_ledger,
+                    release=cancel_release,
+                )
                 assert_retry_journey(database=database, scripted_log=scripted_call_log)
                 assert_recovery_journey(
                     database=database,
@@ -444,8 +476,6 @@ def run_e2e() -> int:
                     worker_b_started=bool(recovery["started"]),
                     crash_log=log_tail(worker_log_path),
                 )
-                if returncode != 0:
-                    print(log_tail(playwright_log_path), file=sys.stderr)
                 return returncode
         finally:
             api_reservation.close()
@@ -687,6 +717,123 @@ def main() -> int:
     ) as error:
         print(f"E2E supervisor failed: {error}", file=sys.stderr)
         return 1
+
+
+def wait_for_cancellation_observation(observed: Path) -> bool:
+    """Wait for the Worker to notice a revoked authority, on its own heartbeat cadence.
+
+    Discovery is deliberately not instantaneous: cancellation is authoritative the moment the API
+    commits it, but the *local task* is stopped when the Worker's next renewal matches zero rows.
+    The supervisor therefore waits out the shipped heartbeat interval rather than altering it, so
+    the journey never weakens the lease relationship that C3's recovery proofs depend on.
+    """
+    deadline = time.monotonic() + CANCEL_DISCOVERY_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if observed.exists() and observed.read_text(encoding="utf-8").strip():
+            return True
+        time.sleep(0.25)
+    return False
+
+
+def assert_cancellation_journey(
+    *,
+    database: Path,
+    cancel_observed: Path,
+    provider_ledger: Path,
+    release: Path,
+) -> None:
+    """Prove the C5 cancellation from committed state alone.
+
+    Every claim here is checked against durable rows, not against Worker logs: the Run is
+    `cancelled` with no fabricated start or duration, its Job carries the cancellation request
+    exactly once, its Attempt is cancelled with its real start preserved, the cancellation
+    timeline is exactly two events with no intermediate Run failure, and the provider was called
+    exactly once for it. The observed-hold ledger is the one piece of Worker-side evidence, and
+    it is what distinguishes "NervOS stopped waiting" from "the call had not answered yet".
+    """
+    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    try:
+        row = connection.execute(
+            "SELECT id, status, started_at, finished_at, elapsed_ms, output_text, error_code"
+            " FROM runs WHERE input_text=?",
+            (CANCEL_INPUT,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("the cancellation journey left no Run for its scripted prompt")
+        run_id, status, started_at, finished_at, elapsed_ms, output_text, error_code = row
+        if status != "cancelled":
+            raise RuntimeError(f"the cancelled Run settled as {status!r}, expected 'cancelled'")
+        if started_at is None:
+            raise RuntimeError("the cancelled Run lost the start boundary it really had")
+        if finished_at is None or elapsed_ms is None:
+            raise RuntimeError("the cancelled Run has no truthful finish boundary or duration")
+        if output_text is not None:
+            raise RuntimeError("a cancelled Run must never carry output")
+        if error_code is not None:
+            raise RuntimeError("a cancelled Run is not a provider failure and must carry no error")
+
+        job = connection.execute(
+            "SELECT status, cancel_requested_at, error_code, claimed_by, claim_token"
+            " FROM jobs WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        job_status, cancel_requested_at, job_error, claimed_by, claim_token = job
+        if job_status != "cancelled" or cancel_requested_at is None:
+            raise RuntimeError("the Run's Job is not a durably requested cancellation")
+        if job_error != "execution_cancelled":
+            raise RuntimeError(f"the cancelled Job reported {job_error!r}")
+        if claimed_by is not None or claim_token is not None:
+            raise RuntimeError("cancellation must release the Job's claim authority")
+
+        attempts = connection.execute(
+            "SELECT status, execution_started_at FROM job_attempts WHERE job_id="
+            "(SELECT id FROM jobs WHERE run_id=?) ORDER BY attempt_number",
+            (run_id,),
+        ).fetchall()
+        if len(attempts) != 1:
+            raise RuntimeError(f"cancellation invented {len(attempts)} Attempts, expected 1")
+        attempt_status, execution_started_at = attempts[0]
+        if attempt_status != "cancelled":
+            raise RuntimeError(f"the Attempt settled as {attempt_status!r}, expected 'cancelled'")
+        if execution_started_at is None:
+            raise RuntimeError("the cancelled Attempt lost its real execution start")
+
+        timeline = [
+            event[0]
+            for event in connection.execute(
+                "SELECT event_type FROM run_events WHERE run_id=? ORDER BY sequence", (run_id,)
+            )
+        ]
+        if timeline[-2:] != ["cancellation.requested", "run.cancelled"]:
+            raise RuntimeError(f"unexpected cancellation timeline: {timeline}")
+        if "run.succeeded" in timeline or "run.failed" in timeline:
+            raise RuntimeError(f"cancellation fabricated a terminal outcome: {timeline}")
+        if "retry.scheduled" in timeline:
+            raise RuntimeError("a cancelled Run must never schedule a retry")
+    finally:
+        connection.close()
+
+    # Discovery is not instantaneous, and deliberately so: the durable cancellation landed the
+    # moment the API committed it, but the *local* task stops when the Worker's next renewal
+    # matches zero rows. Wait on the shipped cadence rather than shortening it.
+    if not wait_for_cancellation_observation(cancel_observed):
+        raise RuntimeError(
+            "the Worker never stopped its blocked provider call within"
+            f" {CANCEL_DISCOVERY_TIMEOUT_SECONDS}s: cancellation was durable but the local task"
+            " was not observed to be cancelled"
+        )
+    if count_provider_calls(provider_ledger) != TOTAL_PROVIDER_CALLS:
+        raise RuntimeError(
+            "the cancellation journey changed the total provider invocation count:"
+            f" expected {TOTAL_PROVIDER_CALLS}, found {count_provider_calls(provider_ledger)}"
+        )
+    # Release the hold so the Worker's abandoned task can finish during cleanup.
+    release.write_text("released\n", encoding="utf-8")
+
+
+def count_provider_calls_for(ledger: Path) -> int:
+    """Count cancellation observations recorded by the blocked deterministic double."""
+    return len([line for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip()])
 
 
 if __name__ == "__main__":

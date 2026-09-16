@@ -40,7 +40,24 @@ function retryPrompt(): string {
   return prompt;
 }
 
+function cancelPrompt(): string {
+  const prompt = process.env.NERVOS_E2E_CANCEL_INPUT;
+  if (prompt === undefined || prompt === "") {
+    throw new Error(
+      "NERVOS_E2E_CANCEL_INPUT is required; run the journey through scripts/check.py e2e",
+    );
+  }
+  return prompt;
+}
+
 test("completes the Stage A setup and authentication journey", async ({ page }) => {
+  // This single authenticated session now drives C2 submission, C3 crash recovery, C4 durable
+  // retry, and C5 owner cancellation in sequence, so it legitimately outgrew the repository's
+  // default 45s budget. The extra time is real durable work -- a retry that waits for its due
+  // instant and a cancellation that a Worker discovers on its next heartbeat -- not slack, and
+  // shortening the production heartbeat to fit the old budget would weaken the lease
+  // relationship the C3 recovery proof depends on.
+  test.setTimeout(120_000);
   await page.route("**/*", async (route) => {
     const url = new URL(route.request().url());
     if (url.hostname !== "127.0.0.1" && url.hostname !== "localhost") {
@@ -168,6 +185,28 @@ test("completes the Stage A setup and authentication journey", async ({ page }) 
   await expect(page.getByText(/Deterministic Anthropic reply from NervOS\./)).toHaveCount(2, {
     timeout: ASYNC_TIMEOUT,
   });
+
+  // C5 proof: an owner can cancel a Run that is genuinely mid-provider-call. The supervisor
+  // holds this one prompt's provider call open, so the browser cancels real in-flight work
+  // rather than a Run that happened to be slow; the durable cancellation lands immediately,
+  // while the Worker stops its local task on its next heartbeat. Nothing here depends on
+  // timing luck, and no remote cancellation is claimed.
+  await page.getByLabel("Message").fill(cancelPrompt());
+  await page.getByRole("button", { name: /run agent/i }).click();
+  // Scope every assertion to this Run's own card. Any other nonterminal Run on the page would
+  // otherwise make the Cancel locator ambiguous, and a strict-mode violation fails the journey
+  // for a reason that has nothing to do with cancellation.
+  const cancelCard = page.locator("article.run-item").filter({ hasText: cancelPrompt() });
+  const cancelButton = cancelCard.getByRole("button", { name: /cancel/i });
+  await expect(cancelButton).toBeVisible({ timeout: ASYNC_TIMEOUT });
+  await expect(cancelCard.getByText(/^Running$/)).toBeVisible({ timeout: ASYNC_TIMEOUT });
+  await cancelButton.click();
+  await expect(cancelCard.getByText(/^Cancelled$/)).toBeVisible({ timeout: ASYNC_TIMEOUT });
+  // Cancellation is terminal, so it survives a reload and no cancellation control remains.
+  await page.reload();
+  const reloadedCard = page.locator("article.run-item").filter({ hasText: cancelPrompt() });
+  await expect(reloadedCard.getByText(/^Cancelled$/)).toBeVisible({ timeout: ASYNC_TIMEOUT });
+  await expect(reloadedCard.getByRole("button", { name: /cancel/i })).toHaveCount(0);
 
   // Disabling the agent blocks new Runs while leaving the existing history readable.
   await page.getByRole("button", { name: /disable agent/i }).click();

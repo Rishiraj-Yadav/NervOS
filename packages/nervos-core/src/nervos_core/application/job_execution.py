@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Awaitable, Callable, Mapping
+import logging
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -40,6 +41,7 @@ from nervos_core.application.model_completion import (
     MODEL_TIMED_OUT,
     MODEL_UNAVAILABLE,
     ModelCompletion,
+    safe_error_message,
 )
 from nervos_core.application.retry_policy import PRODUCTION_RETRY_POLICY, RetryPolicy
 from nervos_core.application.run_execution import ExecutionOutcome, RunExecutor
@@ -58,6 +60,14 @@ if LEASE_DURATION < 3 * HEARTBEAT_INTERVAL:  # pragma: no cover - import-time in
 # provider is never invoked again.
 PERSISTENCE_FINALIZATION_ATTEMPTS = 5
 PERSISTENCE_FINALIZATION_BACKOFF_SECONDS = (0.2, 0.4, 0.8, 1.6)
+
+# How long a cancelled or superseded local provider task is awaited before it is abandoned.
+# Python cannot forcibly terminate a coroutine that suppresses cancellation, so this bound is
+# what keeps every wait in a slot finite instead of letting one non-cooperative task hang the
+# Worker. Abandoning is safe: the durable fences that already protected the result remain.
+LOCAL_TASK_DRAIN_TIMEOUT = timedelta(seconds=5)
+
+logger = logging.getLogger(__name__)
 
 # The frozen classification. Exactly one code is positively safe to replay: a normalized rate
 # limit is evidence that the provider declined the request, whereas a timeout, an unavailable
@@ -99,7 +109,29 @@ class ClaimState(StrEnum):
 
     ACTIVE = "active"
     TERMINAL = "terminal"
+    # Terminal *because the owner cancelled the Run*. It is kept apart from `TERMINAL` because
+    # the two demand different local behavior: an ordinary terminal state means somebody else
+    # already settled work we had computed, so there is nothing left to stop, whereas a
+    # cancellation means we must stop waiting on the provider immediately instead of holding
+    # the slot until the execution deadline expires.
+    CANCELLED = "cancelled"
     LOST = "lost"
+
+
+class CancellationOutcome(StrEnum):
+    """What durably happened to one owner-authorized cancellation request.
+
+    Cancellation is authoritative and immediate, so this is a durable fact rather than an
+    acknowledgement: `CANCELLED` covers both the transition that just committed and an
+    idempotent repeat against an already-cancelled Run.
+    """
+
+    CANCELLED = "cancelled"
+    # The Run had already reached a different terminal lifecycle, which cancellation may not
+    # rewrite: a succeeded or failed Run stays exactly as it is.
+    NOT_CANCELLABLE = "not_cancellable"
+    # Foreign and nonexistent are indistinguishable, so cancellation cannot probe for Runs.
+    NOT_FOUND = "not_found"
 
 
 class FailureOutcome(StrEnum):
@@ -229,6 +261,7 @@ class JobExecutionService:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         lease_duration: timedelta = LEASE_DURATION,
         heartbeat_interval: timedelta = HEARTBEAT_INTERVAL,
+        drain_timeout: timedelta = LOCAL_TASK_DRAIN_TIMEOUT,
     ) -> None:
         self._persistence = persistence
         self._executor = executor
@@ -238,6 +271,20 @@ class JobExecutionService:
         self._sleep = sleep
         self._lease_duration = lease_duration
         self._heartbeat_interval = heartbeat_interval
+        self._drain_timeout = drain_timeout
+        # Local tasks this Worker stopped waiting for but could not terminate. They are held
+        # only so their eventual result or exception is consumed rather than reported as an
+        # unretrieved task exception; they carry no authority to persist anything.
+        self._abandoned: set[asyncio.Task[object]] = set()
+
+    @property
+    def abandoned_tasks(self) -> frozenset[asyncio.Task[object]]:
+        """Return the provider tasks this Worker stopped waiting for and has not yet released.
+
+        Exposed for observability and tests: a task listed here is still running somewhere, and
+        holds no authority to persist anything. It is removed as soon as it finishes.
+        """
+        return frozenset(self._abandoned)
 
     async def execute(self, claim: ClaimedAttempt) -> ExecutionOutcome | None:
         """Start, execute, and terminalize one claimed Job.
@@ -274,7 +321,15 @@ class JobExecutionService:
     async def _run_provider(
         self, claim: ClaimedAttempt, lost: asyncio.Event
     ) -> ExecutionOutcome | None:
-        """Run the immutable snapshot, abandoning it the moment authority is lost."""
+        """Run the immutable snapshot under three local racers, and let exactly one win.
+
+        The racers are the provider call, the authority-loss watcher, and the Attempt's own
+        execution deadline. The deadline is owned here, outside `RunExecutor`, so it remains
+        authoritative even when the provider coroutine refuses to cooperate with cancellation:
+        the executor's inner `asyncio.timeout` cannot complete against a coroutine that
+        suppresses `CancelledError`, and an unanswerable inner bound would otherwise let one
+        task hold its slot forever.
+        """
         run = await self._offload(self._persistence.load_run, claim.run_id)
         completion = self._completions.get(run.model_provider)
         if completion is None:
@@ -284,32 +339,95 @@ class JobExecutionService:
             return None
         execution = asyncio.create_task(self._executor.execute(run, completion))
         watch = asyncio.create_task(lost.wait())
+        # The clock starts here, immediately around the provider invocation and after the
+        # durable execution-start commit, so queue time, claim time, a scheduled retry wait,
+        # and terminal persistence are all excluded. Each retry Attempt gets a fresh window
+        # because this method is re-entered for each one.
+        deadline = asyncio.create_task(asyncio.sleep(run.limits.provider_timeout_ms / 1000))
         try:
-            await asyncio.wait({execution, watch}, return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait({execution, watch, deadline}, return_when=asyncio.FIRST_COMPLETED)
+            # A result already in hand always wins. Checking it first is what stops a deadline
+            # that merely became ready at the same moment from relabelling a completed call as
+            # a timeout: the outcome is decided by what already happened, never by which task
+            # the loop happened to schedule first.
             if execution.done():
                 return execution.result()
-            # Authority was lost while the provider was still running: stop waiting for, and
-            # never accept, a result we are no longer allowed to persist.
-            return None
+            if watch.done():
+                # Authority was lost while the provider was still running: stop waiting for,
+                # and never accept, a result we are no longer allowed to persist.
+                return None
+            # The deadline is the only remaining winner.
+            return self._timed_out(run)
         finally:
             # Runs on every exit path, including cancellation of the outer orchestration task
-            # during shutdown, so no local provider task is ever left detached to finish
-            # unsupervised.
-            await self._settle(execution, watch)
+            # during shutdown. The wait is bounded; see `_settle` for why a non-cooperative
+            # task is abandoned rather than awaited forever.
+            await self._settle(execution, watch, deadline)
+
+    def _timed_out(self, run: Run) -> ExecutionOutcome:
+        """Return the normalized deadline outcome: ambiguous, and therefore never replayed.
+
+        A local deadline proves NervOS stopped waiting. It cannot prove the provider never
+        executed the request it already received, so this is `AMBIGUOUS` and can never satisfy
+        C4's retry predicate, which admits only a positively safe normalized failure.
+        """
+        return ExecutionOutcome(
+            status="failed",
+            output_text=None,
+            finish_reason=None,
+            usage=ModelUsage(),
+            elapsed_ms=run.limits.provider_timeout_ms,
+            error_code=MODEL_TIMED_OUT,
+            error_message=safe_error_message(MODEL_TIMED_OUT),
+        )
 
     async def _settle(self, *tasks: asyncio.Task[object]) -> None:
-        """Cancel the given tasks and collect them, leaving none detached.
+        """Cancel the given tasks and collect them within a bounded wait.
 
         Cancelling here stops *NervOS* from waiting for and accepting a result. It does not
         guarantee the remote provider has stopped processing a request it already received:
-        NervOS claims no provider rollback and no remote cancellation. Because the tasks are
-        gathered with `return_exceptions=True`, an already-finished task's outcome is
-        collected rather than re-raised, so this cleanup never masks the exception that
-        caused the exit.
+        NervOS claims no provider rollback and no remote cancellation.
+
+        The collection is deliberately bounded. A coroutine that suppresses `CancelledError` or
+        blocks in cleanup cannot be forcibly terminated by `asyncio`, and the previous unbounded
+        `gather` let exactly that coroutine hang its slot -- and, through the Worker's own drain,
+        shutdown itself. Waiting no longer than `drain_timeout` keeps every wait here finite.
+
+        The promise is therefore **no unbounded wait and no durable resurrection**, not the
+        stronger claim that every coroutine is forcibly terminated. A task that outlives the
+        bound is handed to `_abandon`, which keeps it observable until it finishes and consumes
+        its result or exception, and it can never persist anything: this method is only reached
+        after the execution-start boundary committed, so the Attempt is either still fenced by a
+        lease we hold or already revoked by a cancellation.
         """
         for task in tasks:
             task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        done, pending = await asyncio.wait(tasks, timeout=self._drain_timeout.total_seconds())
+        # Collect every settled outcome so an already-finished task neither leaks a
+        # "never retrieved" warning nor masks the exception that caused this exit.
+        for task in done:
+            with contextlib.suppress(BaseException):
+                task.exception()
+        if pending:
+            logger.warning("provider_task_abandoned count=%s", len(pending))
+            self._abandon(pending)
+
+    def _abandon(self, tasks: Iterable[asyncio.Task[object]]) -> None:
+        """Track tasks that outlived the drain bound until they finish on their own."""
+        for task in tasks:
+            self._abandoned.add(task)
+            task.add_done_callback(self._discard_abandoned)
+
+    def _discard_abandoned(self, task: asyncio.Task[object]) -> None:
+        """Consume an abandoned task's outcome and stop tracking it.
+
+        Retrieving the exception is what prevents `Task exception was never retrieved`; the
+        outcome itself is deliberately thrown away, because a task that lost the race has no
+        authority to settle anything.
+        """
+        self._abandoned.discard(task)
+        with contextlib.suppress(BaseException):
+            task.exception()
 
     async def _heartbeat(self, claim: ClaimedAttempt, lost: asyncio.Event) -> None:
         """Renew the lease independently of the provider await.
@@ -337,6 +455,14 @@ class JobExecutionService:
             )
             if state is ClaimState.ACTIVE:  # pragma: no cover - defensive re-read
                 continue
+            if state is ClaimState.CANCELLED:
+                # The owner cancelled this Run, so this Worker must stop waiting on the
+                # provider now rather than hold the slot until the execution deadline lapses.
+                # The cancellation write deliberately does not wait for this discovery: the
+                # durable authority is already revoked, so whatever the provider eventually
+                # returns can never be persisted.
+                lost.set()
+                return
             if state is ClaimState.TERMINAL:
                 return
             lost.set()

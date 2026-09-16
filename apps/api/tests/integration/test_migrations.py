@@ -96,7 +96,7 @@ def test_upgrade_drift_downgrade_and_reupgrade(
         assert application_tables(engine) == APPLICATION_TABLES
         with engine.connect() as connection:
             current_revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
-            assert current_revision == "0004_stage_c3_worker_registry"
+            assert current_revision == "0005_stage_c5_run_cancellation"
             assert connection.scalar(text("PRAGMA foreign_keys")) == 1
             assert connection.scalar(text("PRAGMA busy_timeout")) == 5000
         command.check(config)
@@ -1078,5 +1078,150 @@ def test_migrated_c1_run_event_vocabulary_and_ordering_are_enforced(
         ]
         for values in invalid_events:
             assert_integrity_error(engine, "run_events", values)
+    finally:
+        engine.dispose()
+
+
+# -- C5 cancellation: the fifth Run lifecycle -------------------------------------------
+
+
+def test_migrated_c5_cancelled_run_shapes_are_enforced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The two cancelled shapes persist; every illegal cancelled shape is rejected."""
+    _, engine = migrate_database(tmp_path / "c5-cancelled.db", monkeypatch)
+    try:
+        seed_c1_parents(engine, run_count=0)
+        pre_start = {
+            **snapshot_run(),
+            "status": "cancelled",
+            "finished_at": "2026-01-01 00:00:05",
+        }
+        post_start = {
+            **pre_start,
+            "started_at": "2026-01-01 00:00:01",
+            "elapsed_ms": 4000,
+        }
+        # Both legal shapes really persist.
+        insert_row(engine, "runs", {**pre_start, "id": 1})
+        insert_row(engine, "runs", {**post_start, "id": 2})
+        # A cancelled Run is not a failure: it may never carry a provider error, output, or usage.
+        illegal = [
+            {**pre_start, "error_code": "model_unavailable", "error_message": "broke"},
+            {**pre_start, "output_text": "leaked"},
+            {**pre_start, "finish_reason": "stop"},
+            {**pre_start, "input_tokens": 3},
+            {**pre_start, "total_tokens": 3},
+            # The duration is tied to the start boundary in both directions.
+            {**pre_start, "elapsed_ms": 0},
+            {**post_start, "elapsed_ms": None},
+            # And a cancelled Run still has to finish after it started.
+            {**post_start, "finished_at": "2025-12-31 23:59:59"},
+        ]
+        for values in illegal:
+            assert_integrity_error(engine, "runs", {**values, "id": 3})
+    finally:
+        engine.dispose()
+
+
+def test_every_earlier_run_shape_still_persists_after_0005(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C5 widened the vocabulary; it did not disturb the four shapes C1-C4 already stored."""
+    _, engine = migrate_database(tmp_path / "c5-regression.db", monkeypatch)
+    try:
+        seed_c1_parents(engine, run_count=0)
+        succeeded = {
+            **snapshot_run(),
+            "status": "succeeded",
+            "started_at": "2026-01-01 00:00:01",
+            "finished_at": "2026-01-01 00:00:02",
+            "output_text": "answer",
+            "finish_reason": "stop",
+            "elapsed_ms": 1000,
+        }
+        failed = {
+            **snapshot_run(),
+            "status": "failed",
+            "started_at": "2026-01-01 00:00:01",
+            "finished_at": "2026-01-01 00:00:02",
+            "error_code": "model_unavailable",
+            "error_message": "safe message",
+            "elapsed_ms": 1000,
+        }
+        exhausted = {
+            **snapshot_run(),
+            "status": "failed",
+            "finished_at": "2026-01-01 00:00:02",
+            "error_code": "worker_recovery_exhausted",
+            "error_message": "safe message",
+        }
+        for index, values in enumerate((snapshot_run(), succeeded, failed, exhausted), start=1):
+            insert_row(engine, "runs", {**values, "id": index})
+    finally:
+        engine.dispose()
+
+
+def test_the_c5_downgrade_refuses_to_strand_a_cancelled_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """0004 cannot represent `cancelled`, so downgrade refuses rather than rewriting history."""
+    database_path = tmp_path / "c5-downgrade.db"
+    config = alembic_config(database_path, monkeypatch)
+    command.upgrade(config, "head")
+    engine = create_sqlite_engine(database_path)
+    try:
+        seed_c1_parents(engine, run_count=0)
+        insert_row(
+            engine,
+            "runs",
+            {
+                **snapshot_run(),
+                "status": "cancelled",
+                "finished_at": "2026-01-01 00:00:05",
+            },
+        )
+    finally:
+        engine.dispose()
+
+    with pytest.raises(RuntimeError, match="cancelled Run"):
+        command.downgrade(config, "0004_stage_c3_worker_registry")
+
+    # Nothing was destroyed by the refusal: the cancelled Run is still there and still cancelled.
+    engine = create_sqlite_engine(database_path)
+    try:
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT status FROM runs WHERE id=1")) == "cancelled"
+    finally:
+        engine.dispose()
+
+
+def test_the_c5_downgrade_is_clean_when_nothing_needs_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "c5-clean-downgrade.db"
+    config = alembic_config(database_path, monkeypatch)
+    command.upgrade(config, "head")
+    engine = create_sqlite_engine(database_path)
+    try:
+        # A Run that no cancellation touched must survive the round trip untouched.
+        seed_c1_parents(engine, run_count=1)
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, "0004_stage_c3_worker_registry")
+    command.upgrade(config, "head")
+
+    engine = create_sqlite_engine(database_path)
+    try:
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT count(*) FROM runs")) == 1
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+                "0005_stage_c5_run_cancellation"
+            )
     finally:
         engine.dispose()

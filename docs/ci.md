@@ -48,12 +48,15 @@ It is a CI-runner concern and is deliberately absent from local bootstrap; see
 [Playwright provisioning](#playwright-provisioning).
 
 The journey covers Stage A setup and authentication, the C2 queued-acceptance
-cutover, C3 pre-start Worker loss and recovery, and C4 durable retry. It makes
-**no** live provider request: the supervised Worker is composed with offline
-deterministic provider doubles, and the C4 retry path is scripted by the
-supervisor — one prompt has its first provider call refused with a normalized
-rate limit, and the supervisor then asserts the resulting durable timeline from
-committed state.
+cutover, C3 pre-start Worker loss and recovery, C4 durable retry, and C5 owner
+cancellation. It makes **no** live provider request: the supervised Worker is
+composed with offline deterministic provider doubles. The C4 retry path is
+scripted by the supervisor — one prompt has its first provider call refused with
+a normalized rate limit. The C5 path holds one prompt's provider call open until
+the browser cancels the Run, and then proves from committed state that the Run
+became durably `cancelled`, that the Worker stopped its blocked local call, and
+that no retry or second Attempt followed. The supervisor asserts every claim
+against committed rows rather than Worker logs.
 
 ## The `check` versus `e2e` split
 

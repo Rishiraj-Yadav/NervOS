@@ -14,6 +14,7 @@ from execution_support import NOW, attempt_row, counts, event_types, job_row, mi
 from nervos_core.application.errors import PersistenceContention, PersistenceUnavailable
 from nervos_core.application.job_execution import (
     LEASE_DURATION,
+    CancellationOutcome,
     ClaimedAttempt,
     ClaimState,
     FailureOutcome,
@@ -39,6 +40,7 @@ from nervos_core.domain.runs import STAGE_B_LIMITS, ModelUsage
 from nervos_core.infrastructure.database.jobs import (
     SqlAlchemyJobExecutionPersistence,
     SqlAlchemyJobPersistence,
+    SqlAlchemyRunCancellationPersistence,
 )
 from sqlalchemy import Engine, text
 
@@ -770,3 +772,165 @@ async def test_outer_cancellation_stops_the_local_task_and_writes_no_false_termi
         ]
     finally:
         engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_owner_cancellation_stops_the_local_provider_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Worker is a follower: it discovers the revocation and stops waiting.
+
+    This is the whole C5 Worker contract. Cancellation is already durable and authoritative
+    before the Worker notices anything, so a Worker that never noticed — or never existed —
+    would still leave the Run correctly cancelled.
+    """
+    engine = prepare(tmp_path, monkeypatch)
+    try:
+        clock = MutableClock()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class Blocking(Completion):
+            def __init__(self) -> None:
+                super().__init__()
+                self.cancelled = False
+
+            async def complete(self, request: ModelRequest) -> ModelResponse:
+                self.calls += 1
+                self.requests.append(request)
+                entered.set()
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    self.cancelled = True
+                    raise
+                return ModelResponse(
+                    "too late",
+                    PROVIDER,
+                    request.model_name,
+                    StopOutcome.STOP,
+                    ModelUsage(11, 7, 18),
+                )
+
+        blocking = Blocking()
+        repository = SqlAlchemyJobExecutionPersistence(engine, sleep=lambda _: None)
+        claimed = claim(engine)
+        # A short heartbeat makes the discovery bound observable without weakening the
+        # production 15 s/60 s relationship, which this test also asserts is in force.
+        orchestrator = service(
+            engine,
+            repository,
+            blocking,
+            clock,
+            heartbeat_interval=timedelta(milliseconds=20),
+        )
+        task = asyncio.create_task(orchestrator.execute(claimed))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+
+        cancelled = SqlAlchemyRunCancellationPersistence(engine, sleep=lambda _: None).cancel_run(
+            user_id=1, run_id=claimed.run_id, now=NOW + timedelta(seconds=1)
+        )
+        assert cancelled is CancellationOutcome.CANCELLED
+        assert await asyncio.wait_for(task, timeout=10) is None
+
+        # The local provider task really was stopped rather than left to run to its deadline.
+        assert blocking.cancelled is True
+        assert blocking.calls == 1
+        # And its (never delivered) result could not have been persisted anyway.
+        assert job_row(engine, claimed.job_id)["status"] == JobStatus.CANCELLED.value
+        assert attempt_row(engine, claimed.attempt_id)["status"] == AttemptStatus.CANCELLED.value
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT status FROM runs")) == "cancelled"
+            assert connection.scalar(text("SELECT output_text FROM runs")) is None
+        assert event_types(engine, claimed.run_id)[-2:] == [
+            "cancellation.requested",
+            "run.cancelled",
+        ]
+        assert "run.succeeded" not in event_types(engine, claimed.run_id)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_a_non_cooperative_provider_task_is_abandoned_within_the_drain_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Python cannot forcibly kill a coroutine that swallows cancellation.
+
+    C5's honest promise is therefore bounded *waiting*, not guaranteed termination: the slot is
+    released on a deadline even when the provider task refuses to cooperate, and the abandoned
+    task's eventual result is discarded by the same fences that always protected it.
+    """
+    engine = prepare(tmp_path, monkeypatch)
+    try:
+        clock = MutableClock()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class Stubborn(Completion):
+            def __init__(self) -> None:
+                super().__init__()
+                self.swallowed = False
+                self.delivered = False
+
+            async def complete(self, request: ModelRequest) -> ModelResponse:
+                self.calls += 1
+                entered.set()
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    # Ignores the cancellation and keeps going, then returns a real answer.
+                    self.swallowed = True
+                    await asyncio.sleep(0.2)
+                self.delivered = True
+                return ModelResponse(
+                    "late answer",
+                    PROVIDER,
+                    request.model_name,
+                    StopOutcome.STOP,
+                    ModelUsage(11, 7, 18),
+                )
+
+        stubborn = Stubborn()
+        repository = SqlAlchemyJobExecutionPersistence(engine, sleep=lambda _: None)
+        claimed = claim(engine)
+        orchestrator = service(
+            engine,
+            repository,
+            stubborn,
+            clock,
+            heartbeat_interval=timedelta(milliseconds=20),
+            drain_timeout=timedelta(milliseconds=50),
+        )
+        task = asyncio.create_task(orchestrator.execute(claimed))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        SqlAlchemyRunCancellationPersistence(engine, sleep=lambda _: None).cancel_run(
+            user_id=1, run_id=claimed.run_id, now=NOW + timedelta(seconds=1)
+        )
+
+        # The slot is released on the drain bound rather than blocking on the stubborn task.
+        assert await asyncio.wait_for(task, timeout=5) is None
+        assert stubborn.swallowed is True
+        assert stubborn.delivered is False  # still running at the moment the slot was freed
+
+        # Let the abandoned task finish and prove its late result is still discarded.
+        release.set()
+        await asyncio.sleep(0.4)
+        assert stubborn.delivered is True
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT status FROM runs")) == "cancelled"
+            assert connection.scalar(text("SELECT output_text FROM runs")) is None
+        assert "run.succeeded" not in event_types(engine, claimed.run_id)
+        assert counts(engine)["job_attempts"] == 1
+    finally:
+        engine.dispose()
+
+
+def test_the_production_heartbeat_and_lease_relationship_is_unchanged() -> None:
+    """C5 narrowed nothing about the frozen 15 s renewal inside a 60 s lease."""
+    from nervos_core.application.job_execution import HEARTBEAT_INTERVAL, LOCAL_TASK_DRAIN_TIMEOUT
+
+    assert timedelta(seconds=60) == LEASE_DURATION
+    assert timedelta(seconds=15) == HEARTBEAT_INTERVAL
+    assert LEASE_DURATION >= 3 * HEARTBEAT_INTERVAL
+    assert LOCAL_TASK_DRAIN_TIMEOUT < HEARTBEAT_INTERVAL
