@@ -25,6 +25,21 @@ export interface RunUsage {
   total_tokens: number | null;
 }
 
+/**
+ * The durable Job's own status, surfaced verbatim as a read-only projection of the Run.
+ *
+ * It is deliberately not a second Run status: the Run lifecycle is unchanged, and a `running` Run
+ * waiting on a retry is still `running`. This is what makes that waiting period visible at all.
+ */
+export type ExecutionPhase =
+  | "queued"
+  | "claimed"
+  | "running"
+  | "retry_wait"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
+
 export interface Run {
   id: number;
   agent_instance_id: number;
@@ -43,11 +58,73 @@ export interface Run {
   error_message: string | null;
   usage: RunUsage | null;
   elapsed_ms: number | null;
+  execution_phase: ExecutionPhase | null;
+  retry_available_at: string | null;
+}
+
+/** The durable Event vocabulary. A compile-time union, so an unknown value cannot be rendered. */
+export type RunEventType =
+  | "run.created"
+  | "run.queued"
+  | "attempt.claimed"
+  | "attempt.started"
+  | "attempt.failed"
+  | "attempt.expired"
+  | "retry.scheduled"
+  | "cancellation.requested"
+  | "run.cancelled"
+  | "run.succeeded"
+  | "run.failed"
+  | "recovery.pre_start"
+  | "recovery.ambiguous";
+
+/**
+ * One durable Run Event.
+ *
+ * These are exactly the fields the API publishes, and the API publishes exactly what the durable
+ * row can safely carry. There is no claim token, lease, worker identity, heartbeat, prompt,
+ * output, or provider payload here to render by accident.
+ */
+export interface RunEvent {
+  sequence: number;
+  event_type: RunEventType;
+  created_at: string;
+  attempt_number: number | null;
+  code: string | null;
+  message: string | null;
+  available_at: string | null;
+}
+
+export interface RunEventPage {
+  items: RunEvent[];
+  next_after_sequence: number | null;
 }
 
 export interface RunPage {
   items: Run[];
   next_before_id: number | null;
+}
+
+/** Whether a Run has stopped advancing. Only these three statuses are final. */
+export function isTerminalStatus(status: RunStatus): boolean {
+  return status === "succeeded" || status === "failed" || status === "cancelled";
+}
+
+/**
+ * Render a durable instant as a stable UTC string, or give the raw value back rather than a guess.
+ *
+ * It lives with the API value types because the string it formats is one of them, and because the
+ * component modules are kept to exporting components alone.
+ */
+export function formatInstant(value: string | null): string {
+  if (value === null) {
+    return "an unspecified time";
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return `${parsed.toISOString().replace("T", " ").slice(0, 19)} UTC`;
 }
 
 export interface AgentInstanceCreateInput {
@@ -71,12 +148,37 @@ export interface AgentInstanceEnableUpdate {
   enabled: boolean;
 }
 
-const RUN_STATUSES: readonly RunStatus[] = [
-  "created",
+const RUN_STATUSES: readonly RunStatus[] = [  "created",
   "running",
   "succeeded",
   "failed",
   "cancelled",
+];
+
+const EXECUTION_PHASES: readonly ExecutionPhase[] = [
+  "queued",
+  "claimed",
+  "running",
+  "retry_wait",
+  "succeeded",
+  "failed",
+  "cancelled",
+];
+
+const RUN_EVENT_TYPES: readonly RunEventType[] = [
+  "run.created",
+  "run.queued",
+  "attempt.claimed",
+  "attempt.started",
+  "attempt.failed",
+  "attempt.expired",
+  "retry.scheduled",
+  "cancellation.requested",
+  "run.cancelled",
+  "run.succeeded",
+  "run.failed",
+  "recovery.pre_start",
+  "recovery.ambiguous",
 ];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -129,7 +231,39 @@ export function isRun(value: unknown): value is Run {
     isNullableString(value.error_code) &&
     isNullableString(value.error_message) &&
     isNullableInteger(value.elapsed_ms) &&
-    (value.usage === null || isRunUsage(value.usage))
+    (value.usage === null || isRunUsage(value.usage)) &&
+    (value.execution_phase === null || isExecutionPhase(value.execution_phase)) &&
+    isNullableString(value.retry_available_at)
+  );
+}
+
+function isExecutionPhase(value: unknown): value is ExecutionPhase {
+  return typeof value === "string" && (EXECUTION_PHASES as readonly string[]).includes(value);
+}
+
+function isRunEventType(value: unknown): value is RunEventType {
+  return typeof value === "string" && (RUN_EVENT_TYPES as readonly string[]).includes(value);
+}
+
+export function isRunEvent(value: unknown): value is RunEvent {
+  return (
+    isRecord(value) &&
+    Number.isInteger(value.sequence) &&
+    isRunEventType(value.event_type) &&
+    typeof value.created_at === "string" &&
+    isNullableInteger(value.attempt_number) &&
+    isNullableString(value.code) &&
+    isNullableString(value.message) &&
+    isNullableString(value.available_at)
+  );
+}
+
+export function isRunEventPage(value: unknown): value is RunEventPage {
+  return (
+    isRecord(value) &&
+    Array.isArray(value.items) &&
+    value.items.every(isRunEvent) &&
+    isNullableInteger(value.next_after_sequence)
   );
 }
 
@@ -204,4 +338,14 @@ export function getRun(runId: number): Promise<Run> {
 /** Durably cancel one owned Run. Idempotent: cancelling a cancelled Run returns the same Run. */
 export function cancelRun(runId: number): Promise<Run> {
   return apiRequest(`/runs/${runId}/cancel`, isRun, { method: "POST" });
+}
+
+/**
+ * Read one page of a Run's durable Event timeline, strictly after `afterSequence`.
+ *
+ * A keyset cursor rather than an offset: the stream is append-only, so an offset would shift under
+ * concurrent appends and silently skip Events. `afterSequence` of 0 starts from the beginning.
+ */
+export function listRunEvents(runId: number, afterSequence: number): Promise<RunEventPage> {
+  return apiRequest(`/runs/${runId}/events?after_sequence=${afterSequence}`, isRunEventPage);
 }

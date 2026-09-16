@@ -1,7 +1,7 @@
 import { http, HttpResponse } from "msw";
 import userEvent from "@testing-library/user-event";
 
-import type { RunStatus } from "../api/agentInstances";
+import type { ExecutionPhase, RunEventType, RunStatus } from "../api/agentInstances";
 import { appRoutes } from "../router";
 import { renderWithRouter } from "./render";
 
@@ -37,6 +37,18 @@ export interface ApiRun {
   error_message: string | null;
   usage: { input_tokens: number | null; output_tokens: number | null; total_tokens: number | null } | null;
   elapsed_ms: number | null;
+  execution_phase: ExecutionPhase | null;
+  retry_available_at: string | null;
+}
+
+export interface ApiRunEvent {
+  sequence: number;
+  event_type: RunEventType;
+  created_at: string;
+  attempt_number: number | null;
+  code: string | null;
+  message: string | null;
+  available_at: string | null;
 }
 
 const TIMESTAMP = "2026-01-01T00:00:00Z";
@@ -75,6 +87,21 @@ export function apiRun(overrides: Partial<ApiRun> = {}): ApiRun {
     error_message: null,
     usage: { input_tokens: 11, output_tokens: 3, total_tokens: null },
     elapsed_ms: 12,
+    execution_phase: "succeeded",
+    retry_available_at: null,
+    ...overrides,
+  };
+}
+
+export function apiRunEvent(overrides: Partial<ApiRunEvent> = {}): ApiRunEvent {
+  return {
+    sequence: 1,
+    event_type: "run.created",
+    created_at: TIMESTAMP,
+    attempt_number: null,
+    code: null,
+    message: null,
+    available_at: null,
     ...overrides,
   };
 }

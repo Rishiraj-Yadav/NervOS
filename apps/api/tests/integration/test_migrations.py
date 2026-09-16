@@ -1399,3 +1399,65 @@ def test_the_c6_downgrade_drops_metadata_and_reconstructs_it(
         assert execution_snapshot(engine) == history
     finally:
         engine.dispose()
+
+
+# ---------------------------------------------------------------------------------------
+# C7 -- observability added no migration
+# ---------------------------------------------------------------------------------------
+
+VERSIONS = ROOT / "apps" / "api" / "alembic" / "versions"
+REVIEWED_MIGRATIONS = [
+    "0001_stage_a_schema.py",
+    "0002_stage_b1_agent_instances_runs.py",
+    "0003_stage_c1_durable_execution.py",
+    "0004_stage_c3_worker_registry.py",
+    "0005_stage_c5_run_cancellation.py",
+    "0006_stage_c6_queue_partitions.py",
+]
+
+
+def test_c7_consumed_no_migration_number() -> None:
+    """The public Event timeline needed no schema and no index, so the head is unchanged.
+
+    This is a measured conclusion rather than a preference. `UNIQUE(run_id, sequence)` already
+    materialises in SQLite as an implicit index, and the pagination predicate
+    (`run_id = ? AND sequence > ? ORDER BY sequence`) is a bounded range seek on both of its
+    columns, so an explicit index would be a duplicate SQLite already maintains -- cost with no
+    benefit, and a permanently wider reviewed schema.
+    """
+    names = sorted(path.name for path in VERSIONS.glob("*.py"))
+
+    assert names == REVIEWED_MIGRATIONS
+    assert not any(name.startswith("0007") for name in names)
+    assert not any(name.startswith("0008") for name in names)
+
+
+def test_the_run_event_index_set_is_the_same_one_c6_shipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C7 reads the implicit unique index rather than adding one of its own.
+
+    SQLAlchemy's inspector does not report SQLite's implicit autoindexes, which is exactly why the
+    Event read asserts its query *plan* instead: the index exists and is used, and it is not an
+    explicit object anyone can accidentally duplicate.
+    """
+    database_path = tmp_path / "event-indexes.db"
+    config = alembic_config(database_path, monkeypatch)
+    command.upgrade(config, "head")
+    engine = create_sqlite_engine(database_path)
+    try:
+        inspector = inspect(engine)
+        assert {item["name"] for item in inspector.get_indexes("run_events")} == {
+            "ix_run_events_attempt_id_id"
+        }
+        with engine.connect() as connection:
+            implicit = connection.scalar(
+                text(
+                    "SELECT count(*) FROM sqlite_master WHERE type='index'"
+                    " AND tbl_name='run_events' AND name LIKE 'sqlite_autoindex%'"
+                )
+            )
+        # The unique constraint is real, and it is the index the timeline query seeks.
+        assert implicit == 1
+    finally:
+        engine.dispose()

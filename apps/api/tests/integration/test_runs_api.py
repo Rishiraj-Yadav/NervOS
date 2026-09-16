@@ -529,15 +529,17 @@ def test_disabling_an_instance_does_not_cancel_an_accepted_run(
     assert runs_of(owner_client, instance_id) == [after]
 
 
-def test_an_internal_retry_wait_is_projected_as_an_ordinary_running_run(
+def test_an_internal_retry_wait_is_projected_only_as_the_derived_phase(
     owner_client: TestClient, app_under_test: FastAPI
 ) -> None:
-    """C4's retry state is execution-plane detail and must not become a public Run shape.
+    """C7 makes the execution phase public, and nothing wider than the phase.
 
-    A Job waiting to retry has no public representation: the Run it belongs to is simply still
-    running, exactly as it was while the provider call was in flight. This asserts the response
-    is byte-identical to the same Run before the retry was scheduled, so no Job status, attempt
-    number, disposition, deadline, or claim field can leak through the projection.
+    Before C7 the Run shape could not express C4's retry state at all: a Job waiting to retry and a
+    Job executing now were both an ordinary `running` Run, so the dashboard could not tell them
+    apart. C7 adds the phase as a *derived* projection of the durable Job, and stops there. The Run
+    lifecycle itself is not rewritten -- waiting to retry is still a `running` Run, exactly as it
+    was while the provider call was in flight -- the phase is read-only convenience with no
+    authority behind it, and no execution-plane identifier crosses into the response.
     """
     instance_id = make_instance(owner_client)
     run = submit(owner_client, instance_id).json()
@@ -563,11 +565,24 @@ def test_an_internal_retry_wait_is_projected_as_an_ordinary_running_run(
         )
 
     projected = owner_client.get(f"/api/v1/runs/{run['id']}", headers=ORIGIN).json()
+    # The Run lifecycle is untouched: waiting to retry is still a running Run.
     assert projected["status"] == "running"
     assert projected["error_code"] is None and projected["error_message"] is None
     assert projected["finished_at"] is None and projected["elapsed_ms"] is None
+    # The only difference is the derived phase, and a retry instant that means something only there.
+    assert projected["execution_phase"] == "retry_wait"
+    assert projected["retry_available_at"] is not None
     assert set(projected) == set(created)
-    for leak in ("retry_wait", "attempt", "available_at", "claim", "disposition"):
+    # The phase is derived per read, not cached: the same Run reports the Job's current state.
+    with engine.begin() as connection:
+        connection.execute(
+            text("UPDATE jobs SET status='running' WHERE run_id=:r"), {"r": run["id"]}
+        )
+    still_running = owner_client.get(f"/api/v1/runs/{run['id']}", headers=ORIGIN).json()
+    assert still_running["execution_phase"] == "running"
+    assert still_running["retry_available_at"] is None
+    # No execution-plane identifier reaches the browser, in any phase.
+    for leak in ("claim", "token", "worker", "lease", "disposition", "job", "attempt"):
         assert not any(leak in str(key).lower() for key in projected), leak
     assert [item["id"] for item in runs_of(owner_client, instance_id)] == [run["id"]]
 

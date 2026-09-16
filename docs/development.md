@@ -139,7 +139,7 @@ The Python supervisor creates a unique temporary run directory and SQLite databa
 
 Readiness uses bounded semantic HTTP polling and child-liveness checks rather than startup sleeps. The supervisor owns and cleans the exact Uvicorn, Vite, Playwright, and Chromium process trees on success, failure, timeout, or interruption. It fingerprints the default NervOS database before and after each run. Playwright traces and screenshots are retained only on failure under ignored output paths; temporary databases and logs are removed after process handles close.
 
-The one Chromium journey uses the real UI, API, Worker, migrations, and opaque cookie session without MSW or external services. It proves fresh setup, dashboard identity, logout, login, browser-reload restoration, final logout, and direct `/dashboard` redirection to login. Since B4 it also proves deterministic two-provider portability: the same Agent Instance executes through the Anthropic double, reloads, is reconfigured to OpenAI, executes again, and shows both immutable provider/model snapshots after another reload. The supervisor removes both `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` from every child environment and installs two distinct offline provider doubles, so the journey cannot reach a real provider even when the operator has credentials exported. Unexpected non-loopback browser requests are rejected. Aggregate `check` remains E2E-free; run both `check` and `e2e` for full local verification, which is exactly what `.github/workflows/ci.yml` does in two separate jobs.
+The one Chromium journey uses the real UI, API, Worker, migrations, and opaque cookie session without MSW or external services. It proves fresh setup, dashboard identity, logout, login, browser-reload restoration, final logout, and direct `/dashboard` redirection to login. Since B4 it also proves deterministic two-provider portability: the same Agent Instance executes through the Anthropic double, reloads, is reconfigured to OpenAI, executes again, and shows both immutable provider/model snapshots after another reload. Since C7 it proves execution observability end to end: the retry Run's timeline is expanded in the browser and asserted row by row in order and exactly once — accepted, queued, claimed, started, the first failure, the scheduled retry with its due instant, the second claim, the second start, and the success — then the page is reloaded and the identical timeline is rebuilt from durable server state; the cancelled Run's timeline is asserted to be exactly its two cancellation facts, with nothing fabricated to fill the gap that the absence of an `attempt.cancelled` event leaves. The supervisor removes both `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` from every child environment and installs two distinct offline provider doubles, so the journey cannot reach a real provider even when the operator has credentials exported. Unexpected non-loopback browser requests are rejected. Aggregate `check` remains E2E-free; run both `check` and `e2e` for full local verification, which is exactly what `.github/workflows/ci.yml` does in two separate jobs.
 
 Troubleshooting:
 
@@ -209,6 +209,33 @@ Stage A's A5 E2E journey is:
 ```text
 fresh migrated install -> setup -> dashboard -> logout -> login -> dashboard -> reload -> dashboard -> logout -> direct protected route -> login
 ```
+
+### Durable execution and observability
+
+Execution tests drive the **real** persistence, reclamation, retry, cancellation, and Worker modules; a hand-written fixture that fabricates a transition could agree with itself while disagreeing with production. Two conventions make that practical and keep CI bounded.
+
+**Time is a parameter, never a wait.** A lease expires and a retry becomes due by passing a later `now=` into persistence calls, and a Worker's auxiliary poll intervals are parked far out so a test drives those transitions explicitly instead of racing a timer. Only the journeys where the process loop itself is under test use the real clock.
+
+**Every database is disposable.** Tests migrate into `tmp_path` and set `NERVOS_DATABASE_PATH` to point there. The developer's `~/.nervos/nervos.db` is never migrated, read, or written: the migration suite carries an autouse fixture that fingerprints it before and after every test and fails on any change, and no suite calls a live provider.
+
+When adding to one of these areas:
+
+- **Event pagination** is a keyset cursor on `sequence`. Test it by draining pages with `after_sequence` and asserting the collected sequences are contiguous with no duplicates, not by asserting a page size.
+- **Query plans** are asserted by capturing the statements the code really issues and replaying them through `EXPLAIN QUERY PLAN`, checking the *shape* (an index range seek scoped by `run_id`, no `SCAN`, no temporary B-tree). Asserting the plan's exact string would fail on an unrelated SQLite version change.
+- **Concurrency** is proved with separate engines over one database file and a `threading.Barrier`, never with a forked process. Nothing in the suite relies on `fork`, `fcntl`, Unix signals, Unix sockets, or filesystem locks, which is what keeps it honest on Windows.
+- **Restart** is simulated by disposing and reopening the database engine and rebuilding the runtime composition inside the test process. That establishes that no correctness depends on in-memory state; it does not spawn a second interpreter, and it does not claim to.
+
+### Integrated Stage C acceptance
+
+The Stage C acceptance suites live under `tests/integration/` and are part of the canonical `pytest` run:
+
+| Suite | What it establishes |
+| --- | --- |
+| `test_stage_c_acceptance.py` | The A–L composition matrix: recovery, retry, cancellation, timeout, the three concurrency dimensions, fairness, backpressure, and timeline/durable-state agreement |
+| `test_stage_c_restart.py` | Queued work, an exact retry instant, fairness markers, Worker incarnation, and every Run and Event surviving teardown and reopen |
+| `test_stage_c_stress.py` | A bounded deterministic 120-Job soak over 4 Agent Instances, 2 providers and 3 heterogeneous Workers, plus SQLite integrity checks |
+
+C8 is acceptance, not architecture: it adds no API, status, table, migration, policy, transport, configuration, or authority mechanism. If integrated acceptance ever appears to need one, that is a stop-and-review signal rather than something to absorb into a test file.
 
 ## Review workflow
 

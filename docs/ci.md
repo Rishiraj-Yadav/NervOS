@@ -65,6 +65,63 @@ deterministic integration suites rather than by the browser: a single-Instance
 journey cannot observe which Agent Instance wins a claim, so it would add runtime
 without adding proof.
 
+C7 adds browser assertions rather than a new journey for the same reason. The
+existing retry Run's execution timeline is expanded in the page and asserted row
+by row, exactly once each and in order, then rebuilt identically after a reload;
+the cancelled Run's timeline is asserted to be exactly its two cancellation
+facts. What the browser can prove here — and integration tests cannot — is that
+durable Events reach a real user interface in the right order across a real
+retry; the ordering, pagination, and concurrency properties themselves are proved
+deterministically by the integration suites.
+
+C8 adds no CI job either. Its integrated acceptance, restart, and bounded stress
+suites live under `tests/integration/`, which `pyproject.toml` already lists in
+`testpaths`, so the existing `check` job runs them unchanged.
+
+## Final Stage C verification
+
+The accepted Stage C tree passed the following, with the `check` and `e2e` jobs
+covering the same ground in CI.
+
+**Python** — `uv run pytest`: **929 passed**.
+
+| Suite | Tests |
+| --- | --- |
+| `packages/nervos-core/tests` | 396 |
+| `apps/api/tests` | 213 |
+| `apps/worker/tests` | 66 |
+| `packages/nervos-models/tests` | 142 |
+| `tests/` (E2E supervisor + Stage C acceptance) | 111 |
+| architecture guards | 28 |
+
+C7 focused suites: Run Event read 16, Event query plans 6, Events API 28, Runs API
+35, Agent service reads 17, migration lifecycle 21. C3–C6 regression: 105. Stage C
+integrated acceptance, restart, and stress: 24. E2E supervisor: 23.
+
+**Frontend** — 138 tests, plus lint, typecheck, and a production build.
+
+**Static and security** — Ruff lint clean; Ruff format across 216 files; Pyright
+with **0 errors**; the tracked-file security scan across **291 files with no
+findings**.
+
+**Browser** — the deterministic supervised Chromium journey, including the Stage C
+observability assertions above.
+
+**Gates** — `scripts/check.py check` and `scripts/clean_check.py` (lockfile,
+bootstrap, check, build, e2e) both passed.
+
+**Database** — `PRAGMA integrity_check` returned `ok` and `PRAGMA foreign_key_check`
+was empty on the acceptance databases; no WAL was enabled; the migration head
+remained `0006_stage_c6_queue_partitions` with no `0007` or `0008`; the migration
+lifecycle, including the supported downgrades, was exercised; and the default
+`~/.nervos/nervos.db` was unchanged (size 65536, sha256
+`f60ed2b32637d314d31a4305c704b5f80ff0db14adbefdff156368cc5f05800f`).
+
+**C8 acceptance categories** — integrated A–L matrix; restart and re-composition;
+multi-Worker composition; bounded deterministic stress; SQLite integrity;
+migration lifecycle; security and leak acceptance; query-plan acceptance; and the
+browser observability proof. No live provider request was made.
+
 ## The `check` versus `e2e` split
 
 `scripts/check.py` exposes six command groups:

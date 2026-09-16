@@ -1,4 +1,7 @@
-import type { Run } from "../api/agentInstances";
+import type { ReactNode } from "react";
+import { useState } from "react";
+
+import { formatInstant, type Run } from "../api/agentInstances";
 
 const STATUS_LABELS: Record<Run["status"], string> = {
   created: "Queued",
@@ -29,19 +32,25 @@ function usageLine(run: Run): string | null {
  * become markup. Only a durably persisted Run is ever shown; there is no fabricated answer.
  *
  * Cancellation is offered only while the Run is still nonterminal, and only when the page
- * supplies the action: this component stays presentational and owns no request of its own.
+ * supplies the action: this component stays presentational and owns no request of its own. The
+ * timeline it reveals follows the same rule -- the element is supplied by the page and is only
+ * mounted once the reader asks for it, so a collapsed Run costs no request.
  */
 export function RunItem({
   run,
   onCancel,
   isCancelling = false,
+  timeline,
 }: {
   run: Run;
   onCancel?: (runId: number) => void;
   isCancelling?: boolean;
+  timeline?: ReactNode;
 }) {
   const usage = usageLine(run);
   const cancellable = (run.status === "created" || run.status === "running") && onCancel !== undefined;
+  const [showTimeline, setShowTimeline] = useState(false);
+  const timelineId = `run-timeline-${run.id}`;
 
   return (
     <article className="run-item">
@@ -88,7 +97,23 @@ export function RunItem({
         </p>
       ) : null}
 
-      {run.status === "running" ? (
+      {run.status === "running" && run.execution_phase === "retry_wait" ? (
+        <p className="run-pending" role="note">
+          Waiting to retry. The last attempt ended with an outcome the provider positively declined,
+          and another attempt is scheduled for {formatInstant(run.retry_available_at)}. Nothing
+          promises that the next attempt will succeed.
+        </p>
+      ) : null}
+
+      {run.status === "running" && run.execution_phase === "claimed" ? (
+        <p className="run-pending" role="note">
+          A worker has claimed this run and has not yet begun the model request.
+        </p>
+      ) : null}
+
+      {run.status === "running" &&
+      run.execution_phase !== "retry_wait" &&
+      run.execution_phase !== "claimed" ? (
         <p className="run-pending" role="note">
           Running. If the worker stops before it finishes, NervOS closes this run as failed
           without replaying it, because the model request may already have been sent. A failure
@@ -103,6 +128,25 @@ export function RunItem({
           that had already been sent may still have been processed by the provider, so
           cancellation cannot promise that the provider stopped or that nothing was billed.
         </p>
+      ) : null}
+
+      {timeline !== undefined ? (
+        <div className="run-timeline-panel">
+          <button
+            type="button"
+            className="run-timeline-toggle"
+            aria-expanded={showTimeline}
+            aria-controls={timelineId}
+            onClick={() => setShowTimeline((expanded) => !expanded)}
+          >
+            {showTimeline ? "Hide timeline" : "Show timeline"}
+          </button>
+          {showTimeline ? (
+            <div id={timelineId} className="run-timeline-body">
+              {timeline}
+            </div>
+          ) : null}
+        </div>
       ) : null}
     </article>
   );

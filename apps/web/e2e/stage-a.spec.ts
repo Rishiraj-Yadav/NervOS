@@ -177,7 +177,11 @@ test("completes the Stage A setup and authentication journey", async ({ page }) 
   await page.getByRole("button", { name: /save configuration/i }).click();
   await page.getByLabel("Message").fill(retryPrompt());
   await page.getByRole("button", { name: /run agent/i }).click();
-  await expect(page.getByText(/may be retried/i)).toBeVisible({ timeout: ASYNC_TIMEOUT });
+  // C7 made this card phase-aware. Before C7 a Run waiting to retry and a Run executing now were
+  // both an ordinary `running` Run, so the copy had to hedge across both cases in one paragraph.
+  // The derived phase lets the card say which one it is, and the retry wait is this journey's six
+  // seconds -- several polls deep at the 2s cadence.
+  await expect(page.getByText(/waiting to retry/i)).toBeVisible({ timeout: ASYNC_TIMEOUT });
   await expect(page.getByText(/Deterministic Anthropic reply from NervOS\./)).toHaveCount(2, {
     timeout: ASYNC_TIMEOUT,
   });
@@ -185,6 +189,36 @@ test("completes the Stage A setup and authentication journey", async ({ page }) 
   await expect(page.getByText(/Deterministic Anthropic reply from NervOS\./)).toHaveCount(2, {
     timeout: ASYNC_TIMEOUT,
   });
+
+  // C7 proof: the durable execution timeline reaches an actual user interface, in order, across a
+  // real retry. Every row below is a persisted Event rather than anything the client inferred, and
+  // the browser is not the authority for any of it: the timeline is fetched from the API, keyed on
+  // the durable sequence, and rebuilt from scratch after a reload.
+  const retryCard = page.locator("article.run-item").filter({ hasText: retryPrompt() });
+  await retryCard.getByRole("button", { name: /show timeline/i }).click();
+  const retryTimeline = retryCard.locator("ol.run-timeline");
+  await expect(retryTimeline.locator("li")).toHaveCount(9, { timeout: ASYNC_TIMEOUT });
+  const expectedTimeline = [
+    "Run accepted",
+    "Queued for a worker",
+    "A worker claimed this run",
+    "Execution started",
+    "Attempt 1 failed",
+    "Retry scheduled",
+    "A worker claimed this run",
+    "Execution started",
+    "Run succeeded",
+  ];
+  await expect(retryTimeline.locator(".run-timeline-headline")).toHaveText(expectedTimeline);
+  // The retry row names the instant it is waiting for, taken from the durable Job.
+  await expect(retryTimeline.getByText(/^Waiting until /)).toBeVisible();
+  // Nothing internal is rendered, whatever the API chose to send.
+  await expect(retryTimeline).not.toContainText(/claim_token|worker_id|lease|heartbeat|job_id/);
+
+  await page.reload();
+  const reloadedRetry = page.locator("article.run-item").filter({ hasText: retryPrompt() });
+  await reloadedRetry.getByRole("button", { name: /show timeline/i }).click();
+  await expect(reloadedRetry.locator(".run-timeline-headline")).toHaveText(expectedTimeline);
 
   // C5 proof: an owner can cancel a Run that is genuinely mid-provider-call. The supervisor
   // holds this one prompt's provider call open, so the browser cancels real in-flight work
@@ -207,6 +241,20 @@ test("completes the Stage A setup and authentication journey", async ({ page }) 
   const reloadedCard = page.locator("article.run-item").filter({ hasText: cancelPrompt() });
   await expect(reloadedCard.getByText(/^Cancelled$/)).toBeVisible({ timeout: ASYNC_TIMEOUT });
   await expect(reloadedCard.getByRole("button", { name: /cancel/i })).toHaveCount(0);
+
+  // A cancelled Run's timeline is exactly its two durable cancellation facts. There is no
+  // `attempt.cancelled` Event in the vocabulary, so nothing may be fabricated to fill the gap.
+  await reloadedCard.getByRole("button", { name: /show timeline/i }).click();
+  const cancelledTimeline = reloadedCard.locator("ol.run-timeline");
+  await expect(cancelledTimeline.locator("li")).toHaveCount(6, { timeout: ASYNC_TIMEOUT });
+  await expect(cancelledTimeline.locator(".run-timeline-headline")).toHaveText([
+    "Run accepted",
+    "Queued for a worker",
+    "A worker claimed this run",
+    "Execution started",
+    "Cancellation requested",
+    "Run cancelled",
+  ]);
 
   // Disabling the agent blocks new Runs while leaving the existing history readable.
   await page.getByRole("button", { name: /disable agent/i }).click();
