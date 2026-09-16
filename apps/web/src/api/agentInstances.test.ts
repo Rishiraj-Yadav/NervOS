@@ -172,17 +172,18 @@ describe("runtime guards", () => {
   it("accepts a valid run including a null usage object", () => {
     expect(isRun(apiRun())).toBe(true);
     expect(isRun(apiRun({ usage: null }))).toBe(true);
-    expect(isRun({ ...apiRun(), status: "cancelled" })).toBe(false);
+    expect(isRun({ ...apiRun(), status: "cancelled" })).toBe(true);
     expect(isRun({ ...apiRun(), output_text: 7 })).toBe(false);
   });
 
   it("rejects every status the domain does not define", () => {
-    // Only the four B1 states are representable; a run must never be shown as cancelled,
-    // retrying, or timed out.
-    for (const invented of ["cancelled", "retrying", "timed_out", "queued", "SUCCEEDED", ""]) {
+    // C5 made `cancelled` a real terminal lifecycle, so it is accepted here. Anything the
+    // engine does not define — including internal effort states like `retrying`, which the
+    // durable retry deliberately keeps invisible — must still never reach the UI.
+    for (const invented of ["retrying", "timed_out", "queued", "SUCCEEDED", ""]) {
       expect(isRun({ ...apiRun(), status: invented })).toBe(false);
     }
-    for (const real of ["created", "running", "succeeded", "failed"]) {
+    for (const real of ["created", "running", "succeeded", "failed", "cancelled"]) {
       expect(isRun({ ...apiRun(), status: real })).toBe(true);
     }
   });

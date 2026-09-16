@@ -39,6 +39,19 @@ logger = logging.getLogger("nervos_worker")
 DEFAULT_POLL_INTERVAL_SECONDS = 1.0
 DEFAULT_IDLE_MAX_SECONDS = 2.0
 DEFAULT_SHUTDOWN_GRACE_SECONDS = 10.0
+# How long a slot that ignored its cancellation is awaited before it is left to finish on its
+# own. Bounded so one non-cooperative provider coroutine cannot hang shutdown forever.
+DEFAULT_SHUTDOWN_DRAIN_SECONDS = 5.0
+
+
+def _discard_slot_outcome(task: asyncio.Task[None]) -> None:
+    """Consume an abandoned slot's eventual outcome so it is never reported as unretrieved.
+
+    The outcome is deliberately discarded: a slot that outlived its drain bound may still hold an
+    expiring lease, and C3 -- not this callback -- owns whatever its claim reconciles to.
+    """
+    with contextlib.suppress(BaseException):
+        task.exception()
 
 
 class Worker:
@@ -59,6 +72,7 @@ class Worker:
         poll_interval: float = DEFAULT_POLL_INTERVAL_SECONDS,
         idle_max: float = DEFAULT_IDLE_MAX_SECONDS,
         shutdown_grace: float = DEFAULT_SHUTDOWN_GRACE_SECONDS,
+        shutdown_drain_seconds: float = DEFAULT_SHUTDOWN_DRAIN_SECONDS,
         heartbeat_interval: float = WORKER_HEARTBEAT_INTERVAL.total_seconds(),
         reclaim_interval: float = RECLAIM_INTERVAL.total_seconds(),
     ) -> None:
@@ -78,6 +92,7 @@ class Worker:
         self._poll_interval = poll_interval
         self._idle_max = idle_max
         self._shutdown_grace = shutdown_grace
+        self._shutdown_drain_seconds = shutdown_drain_seconds
         self._heartbeat_interval = heartbeat_interval
         self._reclaim_interval = reclaim_interval
 
@@ -176,16 +191,27 @@ class Worker:
         with an expiring lease and C3 reconciles it. C2 never converts a shutdown into a false
         failure, and it never claims the remote provider stopped processing a request it had
         already received.
+
+        The follow-up wait is bounded too. A slot whose provider coroutine suppresses
+        cancellation cannot be forcibly terminated, and awaiting it without a limit let one such
+        task hang shutdown indefinitely. A slot that outlives the bound is left to finish on its
+        own with its outcome consumed, so shutdown is finite without pretending the coroutine was
+        killed -- and because cancellation is never written here, that slot still holds only an
+        expiring lease for C3 to reconcile.
         """
         if not slots:
             return
         _done, pending = await asyncio.wait(slots, timeout=self._shutdown_grace)
         for task in pending:
             task.cancel()
-        for task in pending:
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        if pending:
+            _settled, stubborn = await asyncio.wait(pending, timeout=self._shutdown_drain_seconds)
+            for task in stubborn:
+                logger.warning("slot_abandoned_at_shutdown code=internal_execution_error")
+                task.add_done_callback(_discard_slot_outcome)
         for task in slots:
+            if not task.done():
+                continue
             error = None if task.cancelled() else task.exception()
             if error is not None:
                 logger.warning("slot_exited_unexpectedly code=internal_execution_error")

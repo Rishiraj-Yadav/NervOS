@@ -120,7 +120,7 @@ def job_row(engine: Engine, run_id: int) -> dict[str, object]:
             connection.execute(
                 text(
                     "SELECT id, status, attempt_count, claimed_by, claim_token, error_code,"
-                    " available_at FROM jobs WHERE run_id=:r"
+                    " available_at, cancel_requested_at FROM jobs WHERE run_id=:r"
                 ),
                 {"r": run_id},
             )
@@ -225,6 +225,7 @@ def build_worker(
     max_active: int = 4,
     poll_interval: float = 0.01,
     idle_max: float = 0.02,
+    shutdown_drain_seconds: float = 0.5,
     shutdown_grace: float = 2.0,
     heartbeat_interval: float = 3600.0,
     reclaim_interval: float = 3600.0,
@@ -255,6 +256,7 @@ def build_worker(
         poll_interval=poll_interval,
         idle_max=idle_max,
         shutdown_grace=shutdown_grace,
+        shutdown_drain_seconds=shutdown_drain_seconds,
         heartbeat_interval=heartbeat_interval,
         reclaim_interval=reclaim_interval,
     )

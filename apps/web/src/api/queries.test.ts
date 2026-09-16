@@ -56,3 +56,24 @@ describe("runPollInterval predicate", () => {
     expect(runPollInterval(page, MAX_NONTERMINAL_POLL_COUNT + 10)).toBe(false);
   });
 });
+
+describe("runPollInterval stops on cancellation", () => {
+  it("treats a cancelled run as terminal", () => {
+    // Cancellation is terminal, so polling must stop for it exactly like succeeded/failed.
+    expect(
+      runPollInterval({
+        items: [apiRun({ status: "cancelled" })],
+        next_before_id: null,
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps polling while a sibling run is still nonterminal", () => {
+    expect(
+      runPollInterval({
+        items: [apiRun({ status: "cancelled" }), apiRun({ id: 2, status: "running" })],
+        next_before_id: null,
+      }),
+    ).toBe(RUN_POLL_INTERVAL_MS);
+  });
+});

@@ -25,6 +25,12 @@ INTERNAL_EXECUTION_ERROR = "internal_execution_error"
 # response, and it lives in the same allowlist as every provider code precisely so that there
 # is exactly one place that decides which codes may ever be persisted and what they say.
 EXECUTION_OUTCOME_AMBIGUOUS = "execution_outcome_ambiguous"
+# Infrastructural closeout code for a Run whose owner cancelled it. It is not a provider error,
+# a timeout, a retry disposition, or a Worker loss, so it must not be confused with any of them.
+# It exists because the frozen `jobs` CHECK requires every terminal Job to carry a non-null
+# error pair, and because a cancelled Job must say *why* it ended; the public Run deliberately
+# carries no error at all, because cancellation is a terminal lifecycle rather than a failure.
+EXECUTION_CANCELLED = "execution_cancelled"
 # Infrastructural closeout code for a Run that never reached the execution-start boundary and
 # whose Job exhausted its claim budget to repeated Worker losses. It is not a provider error, a
 # timeout, a cancellation, or a retry disposition: execution provably never began, so this code
@@ -55,6 +61,9 @@ SAFE_ERROR_MESSAGES: Mapping[str, str] = MappingProxyType(
         WORKER_RECOVERY_EXHAUSTED: (
             "NervOS could not start this run after repeated worker losses, so it was closed "
             "without invoking the model."
+        ),
+        EXECUTION_CANCELLED: (
+            "This run was cancelled by its owner and was not executed any further."
         ),
     }
 )

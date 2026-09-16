@@ -1,6 +1,6 @@
 import { apiRequest } from "./client";
 
-export type RunStatus = "created" | "running" | "succeeded" | "failed";
+export type RunStatus = "created" | "running" | "succeeded" | "failed" | "cancelled";
 
 export interface AgentInstance {
   id: number;
@@ -71,7 +71,13 @@ export interface AgentInstanceEnableUpdate {
   enabled: boolean;
 }
 
-const RUN_STATUSES: readonly RunStatus[] = ["created", "running", "succeeded", "failed"];
+const RUN_STATUSES: readonly RunStatus[] = [
+  "created",
+  "running",
+  "succeeded",
+  "failed",
+  "cancelled",
+];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -193,4 +199,9 @@ export function listRuns(agentInstanceId: number, beforeId?: number): Promise<Ru
 
 export function getRun(runId: number): Promise<Run> {
   return apiRequest(`/runs/${runId}`, isRun);
+}
+
+/** Durably cancel one owned Run. Idempotent: cancelling a cancelled Run returns the same Run. */
+export function cancelRun(runId: number): Promise<Run> {
+  return apiRequest(`/runs/${runId}/cancel`, isRun, { method: "POST" });
 }

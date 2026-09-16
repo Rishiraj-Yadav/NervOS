@@ -41,7 +41,12 @@ from nervos_core.application.errors import (
     PersistenceUnavailable,
     QueueCapacityExceeded,
 )
-from nervos_core.application.job_execution import ClaimedAttempt, ClaimState, FailureOutcome
+from nervos_core.application.job_execution import (
+    CancellationOutcome,
+    ClaimedAttempt,
+    ClaimState,
+    FailureOutcome,
+)
 from nervos_core.application.lease_reclamation import (
     ReclaimedClaim,
     ReclamationKind,
@@ -50,6 +55,7 @@ from nervos_core.application.lease_reclamation import (
     classify_worker,
 )
 from nervos_core.application.model_completion import (
+    EXECUTION_CANCELLED,
     EXECUTION_OUTCOME_AMBIGUOUS,
     MODEL_RATE_LIMITED,
     safe_error_message,
@@ -827,14 +833,19 @@ class SqlAlchemyJobExecutionPersistence:
             )
         if job is None or attempt_status is None:
             return ClaimState.LOST
+        # Cancellation is reported apart from every other terminal state: the Worker must stop
+        # waiting on the provider rather than quietly let it run to its deadline.
+        if (
+            job["status"] == JobStatus.CANCELLED.value
+            or attempt_status == AttemptStatus.CANCELLED.value
+        ):
+            return ClaimState.CANCELLED
         if job["status"] in (
             JobStatus.SUCCEEDED.value,
             JobStatus.FAILED.value,
-            JobStatus.CANCELLED.value,
         ) or attempt_status in (
             AttemptStatus.SUCCEEDED.value,
             AttemptStatus.FAILED.value,
-            AttemptStatus.CANCELLED.value,
             AttemptStatus.EXPIRED.value,
         ):
             return ClaimState.TERMINAL
@@ -898,6 +909,12 @@ class SqlAlchemyJobExecutionPersistence:
                 JobRecord.claimed_by == claim.worker_id,
                 JobRecord.claim_token == claim.claim_token,
                 JobRecord.lease_expires_at > now,
+                # An accepted cancellation revokes the right to cross the execution boundary.
+                # Cancellation terminalizes in the same transaction that records the request,
+                # so this predicate is a redundant guard rather than a live race outcome --
+                # and it is what makes "no provider call after an accepted cancellation"
+                # checkable here instead of merely argued.
+                JobRecord.cancel_requested_at.is_(None),
             )
             .values(status=JobStatus.RUNNING.value, updated_at=now)
         )
@@ -1367,6 +1384,7 @@ class SqlAlchemyJobExecutionPersistence:
                     JobRecord.lease_expires_at,
                     JobRecord.attempt_count,
                     JobRecord.max_attempts,
+                    JobRecord.cancel_requested_at,
                 ).where(JobRecord.id == claim.job_id)
             )
             .mappings()
@@ -1379,6 +1397,11 @@ class SqlAlchemyJobExecutionPersistence:
             or job["claim_token"] != claim.claim_token
             or job["lease_expires_at"] is None
             or job["lease_expires_at"] <= now
+            # A cancellation request revokes permission to continue, so it also revokes
+            # permission to schedule a successor Attempt. Like the start fence, this is a
+            # redundant guard: the request and the terminal state commit together, so a live
+            # claim and a recorded request cannot both be true.
+            or job["cancel_requested_at"] is not None
         ):
             raise _Fenced
         budget_remaining = int(job["attempt_count"]) < int(job["max_attempts"])
@@ -2102,3 +2125,187 @@ __all__ = [
     "SqlAlchemyJobPersistence",
     "run_from_record",
 ]
+
+
+class SqlAlchemyRunCancellationPersistence:
+    """Control-plane-only owner cancellation, with no execution capability at all.
+
+    Cancellation belongs to the control plane: it is a user revoking authority over their own
+    Run, exactly as submission is a user creating one. It deliberately lives in its own class
+    rather than on the execution-plane store so the API can compose this one seam and gain no
+    ability to claim, start, heartbeat, terminalize, or reclaim anything.
+    """
+
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._engine = engine
+        self._runner = _TransactionRunner(engine, sleep)
+
+    # -- owner cancellation ------------------------------------------------------------
+
+    def cancel_run(self, *, user_id: int, run_id: int, now: datetime) -> CancellationOutcome:
+        """Durably cancel one owned Run in a single authoritative transaction.
+
+        Cancellation is authoritative rather than a request. The transition commits inside this
+        call, so it completes whether or not a Worker exists, whether or not one is alive, and
+        whether the Job is `queued`, `retry_wait`, `claimed`, or `running`. The owning Worker
+        discovers the revoked authority through its next heartbeat and stops its local provider
+        task; it is never a prerequisite.
+
+        Nothing else in the engine needs to know cancellation exists. A late success, failure,
+        retry schedule, start, or heartbeat is already fenced on the live Job claim and the
+        `running` Run this transaction destroys, so each one matches zero rows on its own.
+
+        Ownership is re-verified here, in the same transaction as the write, because a check
+        performed in a separate read could race the transition it authorizes.
+        """
+
+        def operation(connection: Connection) -> CancellationOutcome:
+            row = (
+                connection.execute(
+                    select(RunRecord.status, RunRecord.started_at)
+                    .join(
+                        AgentInstanceRecord,
+                        AgentInstanceRecord.id == RunRecord.agent_instance_id,
+                    )
+                    .where(
+                        RunRecord.id == run_id,
+                        AgentInstanceRecord.owner_user_id == user_id,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
+                return CancellationOutcome.NOT_FOUND
+            status = row["status"]
+            if status == RunStatus.CANCELLED.value:
+                # Idempotent repeat: the earliest request, the original finish instant, and the
+                # original elapsed interval all stand, and no second event is appended.
+                return CancellationOutcome.CANCELLED
+            if status not in (RunStatus.CREATED.value, RunStatus.RUNNING.value):
+                return CancellationOutcome.NOT_CANCELLABLE
+            job = (
+                connection.execute(
+                    select(JobRecord.id, JobRecord.status).where(JobRecord.run_id == run_id)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if job is None:
+                # A nonterminal Run with no durable obligation predates the queue: it has no Job
+                # whose authority could be revoked and no legal way to carry a cancellation
+                # event, because `run_events.job_id` is NOT NULL. The operator closeout owns
+                # that artifact; C5 does not invent a timeline for it.
+                return CancellationOutcome.NOT_CANCELLABLE
+            job_id = int(job["id"])
+            # Write-once. The first accepted request is the durable audit fact; a later request
+            # never moves it, and nothing clears it, including terminalization.
+            connection.execute(
+                update(JobRecord)
+                .where(JobRecord.id == job_id, JobRecord.cancel_requested_at.is_(None))
+                .values(cancel_requested_at=now)
+            )
+            active = (
+                connection.execute(
+                    select(JobAttemptRecord.id, JobAttemptRecord.attempt_number)
+                    .where(
+                        JobAttemptRecord.job_id == job_id,
+                        JobAttemptRecord.status.in_(
+                            (AttemptStatus.CLAIMED.value, AttemptStatus.RUNNING.value)
+                        ),
+                    )
+                    .order_by(JobAttemptRecord.attempt_number.desc())
+                    .limit(1)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            attempt_id: int | None = None
+            attempt_number: int | None = None
+            if active is not None:
+                attempt_id = int(active["id"])
+                attempt_number = int(active["attempt_number"])
+                # The Attempt keeps its execution start, its owner, and its token as immutable
+                # historical evidence; only its lifecycle closes. A never-started claim keeps a
+                # NULL execution_started_at, so a pre-start cancellation can never claim a start
+                # boundary it did not have.
+                closed_attempt = connection.execute(
+                    update(JobAttemptRecord)
+                    .where(
+                        JobAttemptRecord.id == attempt_id,
+                        JobAttemptRecord.job_id == job_id,
+                        JobAttemptRecord.status.in_(
+                            (AttemptStatus.CLAIMED.value, AttemptStatus.RUNNING.value)
+                        ),
+                    )
+                    .values(status=AttemptStatus.CANCELLED.value, finished_at=now)
+                )
+                if _rowcount(closed_attempt) != 1:
+                    raise _Fenced
+            # Authority is released here and nowhere else: the Job stays claimless and
+            # errorless of any live owner, while the Attempt keeps its own evidence.
+            values: dict[str, Any] = {
+                "updated_at": now,
+                "claimed_by": None,
+                "claim_token": None,
+                "lease_expires_at": None,
+                "last_heartbeat_at": None,
+            }
+            values.update(
+                status=JobStatus.CANCELLED.value,
+                finished_at=now,
+                error_code=EXECUTION_CANCELLED,
+                error_message=safe_error_message(EXECUTION_CANCELLED),
+            )
+            closed_job = connection.execute(
+                update(JobRecord)
+                .where(
+                    JobRecord.id == job_id,
+                    # Pinned on the observed source status rather than a broad set, so a Job
+                    # that moved for any other reason cannot be rewritten by this transition.
+                    JobRecord.status == job["status"],
+                )
+                .values(**values)
+            )
+            if _rowcount(closed_job) != 1:
+                raise _Fenced
+            started_at = row["started_at"]
+            closed_run = connection.execute(
+                update(RunRecord)
+                .where(RunRecord.id == run_id, RunRecord.status == status)
+                .values(
+                    status=RunStatus.CANCELLED.value,
+                    finished_at=now,
+                    # Truthful only: a Run that never started has no duration to report, and a
+                    # Run that did start reports the real interval until cancellation was
+                    # accepted -- the same semantics C3 uses for a post-start recovery close.
+                    # It is deliberately not the provider-completion duration.
+                    elapsed_ms=None if started_at is None else _elapsed_ms(started_at, now),
+                )
+            )
+            if _rowcount(closed_run) != 1:
+                raise _Fenced
+            base = _sequence_base(connection, run_id)
+            for offset, event_type in enumerate(
+                (RunEventType.CANCELLATION_REQUESTED, RunEventType.RUN_CANCELLED), start=1
+            ):
+                _append_event_on_connection(
+                    connection,
+                    run_id=run_id,
+                    job_id=job_id,
+                    attempt_id=attempt_id,
+                    sequence=base + offset,
+                    event_type=event_type,
+                    code=EXECUTION_CANCELLED,
+                    message=safe_error_message(EXECUTION_CANCELLED),
+                    attempt_number=attempt_number,
+                    created_at=now,
+                )
+            return CancellationOutcome.CANCELLED
+
+        return self._runner.run(operation)

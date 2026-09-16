@@ -580,3 +580,118 @@ def test_invalid_run_list_queries_are_rejected(owner_client: TestClient, query: 
 
     assert response.status_code == 422, response.text
     assert response.json()["error"]["code"] == "validation_error"
+
+
+# -- C5 owner cancellation ---------------------------------------------------------------
+
+
+def cancel(client: TestClient, run_id: int) -> Any:
+    return client.post(f"/api/v1/runs/{run_id}/cancel", headers=ORIGIN)
+
+
+def test_cancelling_a_queued_run_returns_the_cancelled_run(
+    owner_client: TestClient, app_under_test: FastAPI
+) -> None:
+    instance_id = make_instance(owner_client)
+    run_id = int(submit(owner_client, instance_id).json()["id"])
+
+    response = cancel(owner_client, run_id)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "cancelled"
+    # A Run cancelled before execution began invents no start boundary and no duration, and
+    # carries no provider error: cancellation is a lifecycle, not a failure.
+    assert body["started_at"] is None
+    assert body["elapsed_ms"] is None
+    assert body["error_code"] is None and body["error_message"] is None
+    assert body["output_text"] is None and body["usage"] is None
+    assert body["finished_at"] is not None
+    # The projection is the Run alone: no Job, Attempt, token, or worker detail leaks.
+    for forbidden in ("job", "attempt", "claim_token", "claimed_by", "worker", "disposition"):
+        assert forbidden not in body
+    # Exactly two events are appended, in order, and no Run-level failure is fabricated.
+    assert [event for _, event in events_of(app_under_test, run_id)][-2:] == [
+        "cancellation.requested",
+        "run.cancelled",
+    ]
+    assert "run.failed" not in [event for _, event in events_of(app_under_test, run_id)]
+    # No Attempt was invented for work that never began.
+    assert row_counts(app_under_test)["job_attempts"] == 0
+
+
+def test_cancelling_twice_is_idempotent(owner_client: TestClient, app_under_test: FastAPI) -> None:
+    instance_id = make_instance(owner_client)
+    run_id = int(submit(owner_client, instance_id).json()["id"])
+    first = cancel(owner_client, run_id)
+    events_after_first = events_of(app_under_test, run_id)
+
+    second = cancel(owner_client, run_id)
+
+    assert second.status_code == 200
+    assert second.json() == first.json()
+    assert events_of(app_under_test, run_id) == events_after_first
+
+
+def test_a_cancelled_run_projects_as_cancelled_in_reads(
+    owner_client: TestClient,
+) -> None:
+    instance_id = make_instance(owner_client)
+    run_id = int(submit(owner_client, instance_id).json()["id"])
+    cancel(owner_client, run_id)
+
+    single = owner_client.get(f"/api/v1/runs/{run_id}", headers=ORIGIN)
+    assert single.status_code == 200
+    assert single.json()["status"] == "cancelled"
+    listed = [run for run in runs_of(owner_client, instance_id) if run["id"] == run_id]
+    assert listed and listed[0]["status"] == "cancelled"
+
+
+def test_cancelling_a_foreign_run_is_indistinguishable_from_a_missing_one(
+    owner_client: TestClient,
+    seed_user_account: Callable[[str], int],
+    sign_in_as: Callable[[str], None],
+) -> None:
+    instance_id = make_instance(owner_client)
+    run_id = int(submit(owner_client, instance_id).json()["id"])
+    seed_user_account("intruder")
+    sign_in_as("intruder")
+
+    foreign = cancel(owner_client, run_id)
+    missing = cancel(owner_client, run_id + 9999)
+
+    assert foreign.status_code == missing.status_code == 404
+    assert foreign.json() == missing.json()
+    assert foreign.json()["error"]["code"] == "run_not_found"
+
+
+def test_cancellation_requires_the_configured_origin(owner_client: TestClient) -> None:
+    instance_id = make_instance(owner_client)
+    run_id = int(submit(owner_client, instance_id).json()["id"])
+
+    assert owner_client.post(f"/api/v1/runs/{run_id}/cancel").status_code == 403
+
+
+def test_cancelling_an_already_terminal_run_is_a_conflict(
+    owner_client: TestClient, app_under_test: FastAPI
+) -> None:
+    """A succeeded Run is history; cancellation reports that truthfully instead of rewriting it."""
+    instance_id = make_instance(owner_client)
+    run_id = int(submit(owner_client, instance_id).json()["id"])
+    with app_under_test.state.database_engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE runs SET status='succeeded', started_at=created_at,"
+                " finished_at=created_at, output_text='done', finish_reason='stop',"
+                " elapsed_ms=1 WHERE id=:r"
+            ),
+            {"r": run_id},
+        )
+
+    response = cancel(owner_client, run_id)
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "run_not_cancellable"
+    assert (
+        owner_client.get(f"/api/v1/runs/{run_id}", headers=ORIGIN).json()["status"] == "succeeded"
+    )

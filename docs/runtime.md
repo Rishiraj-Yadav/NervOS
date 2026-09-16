@@ -42,9 +42,10 @@ PATCH  /api/v1/agent-instances/{agent_instance_id}
 POST   /api/v1/agent-instances/{agent_instance_id}/runs
 GET    /api/v1/agent-instances/{agent_instance_id}/runs
 GET    /api/v1/runs/{run_id}
+POST   /api/v1/runs/{run_id}/cancel
 ```
 
-There is still no global `POST /runs`, no `POST /chat`, no Run Events endpoint, no cancellation endpoint, no worker-health endpoint, no streaming, and no re-execute endpoint.
+There is still no global `POST /runs`, no `POST /chat`, no Run Events endpoint, no worker-health endpoint, no streaming, and no re-execute endpoint.
 
 ## Boundaries preserved and changed
 
@@ -97,7 +98,34 @@ An expired lease is authority loss: the old Worker may not heartbeat, start, ter
 
 NervOS makes **no exactly-once guarantee**. Recovery reduces stranded work and removes blind replay; it does not promise a request reached the provider exactly once.
 
-Shutdown cancellation is local only: NervOS stops waiting for the provider result and writes no terminal state. It does not claim the remote provider cancelled or rolled back a request it already received.
+Shutdown cancellation is local only: NervOS stops waiting for the provider result and writes no terminal state. It does not claim the remote provider cancelled or rolled back a request it already received. Worker shutdown is **not** owner cancellation — it writes no `cancel_requested_at` and never terminalizes a Run as `cancelled`; a stopping Worker leaves its claim for C3.
+
+## Owner cancellation
+
+Since C5 an owner can cancel their own Run. Cancellation is a **durable control-plane transition, not a message to a Worker**: the API transaction that accepts the request *is* the cancellation. It records `cancel_requested_at` (write-once, never cleared), terminalizes the Attempt, Job, and Run, and appends the events atomically, all before the response returns. Cancellation therefore completes with no Worker running, with a crashed Worker, and against a Job that is merely queued or waiting out a scheduled retry.
+
+Every case is covered:
+
+- **Queued** (`created`) — cancelled before execution. No Attempt is invented and the provider is never invoked.
+- **Waiting on a scheduled retry** — cancelled immediately. The due instant stays as append-only history, but no retry can ever execute.
+- **Claimed but not started** — cancelled before the execution boundary, so the provider is never called.
+- **Running** — cancelled durably. The Worker discovers the revoked authority on its next heartbeat and stops waiting on the local provider task; a late result can never be persisted.
+
+A cancelled Run is its own terminal lifecycle, **not a failure**. It carries no output, no usage, and no provider error. A Run cancelled before execution began has no fabricated `started_at` and a NULL `elapsed_ms`; one cancelled after it began keeps its real `started_at` and reports the truthful interval until cancellation was accepted.
+
+Cancelling appends exactly two events — `cancellation.requested`, then `run.cancelled`. Repeated cancellation is idempotent: the same Run is returned, no second event is appended, and the original finish instant and elapsed interval are preserved. A Run that already **succeeded** or **failed** is history and is never rewritten; cancelling it is refused rather than converted.
+
+**NervOS claims no remote cancellation.** Cancellation revokes *NervOS* authority, asks the local provider task to stop, and guarantees a late result can never be persisted. It does **not** claim the remote provider stopped processing a request it already received, that billing stopped, or that remote side effects were rolled back.
+
+## Attempt execution timeout
+
+Every Attempt has a deadline measured from its own execution boundary. It comes from `provider_timeout_ms` in the Run's immutable limits snapshot and starts only after the durable execution-start commit — queue time, claim time, a scheduled retry wait, and terminal persistence are excluded, and each retry Attempt receives a fresh window.
+
+There are two layers. The inner deadline inside `RunExecutor` bounds a provider call that accepts cancellation. The outer, provider-neutral watchdog in `JobExecutionService` exists because that inner bound cannot complete against a coroutine which suppresses `CancelledError`, and an unanswerable inner bound would let one task hold its slot forever.
+
+Both converge on `model_timed_out`, which is **`AMBIGUOUS`**: a local deadline proves NervOS stopped waiting, never that the provider did not execute the request it already received. A timeout is therefore never replayed, never schedules a retry, and never becomes a cancellation — it terminalizes as a failure. If the provider call has already completed when the deadline becomes ready, its real result is used and a completed call is never relabelled as a timeout.
+
+**Cleanup is bounded, and honestly so.** Python cannot forcibly terminate a coroutine that refuses to die, so C5 guarantees bounded local waiting, revoked durable authority, and no durable resurrection — not that every coroutine disappears. A task that outlives the drain bound is left to finish on its own, tracked until it completes so its eventual result or exception is retrieved and discarded rather than reported as unretrieved. It holds no authority and every terminal write is fenced, so it cannot overwrite or resurrect anything. `WorkerService` shutdown is bounded on the same terms.
 
 ## Worker registry and health
 
@@ -125,6 +153,6 @@ It closes legacy `running` Runs that have no Job as `failed` with `execution_out
 
 ## Still not implemented
 
-Conversation sessions, memory, tools/MCP, scheduling, event triggers, package installation, marketplace, and persistent secret management remain unimplemented. Cancellation and execution-timeout orchestration remain C5 (and `jobs.cancel_requested_at` is still dormant: nothing reads or writes it). Fairness, queue partitions, and per-Agent or per-provider concurrency remain C6. A public Run Events API, an event timeline, richer execution observability, and a Worker dashboard remain C7.
+Conversation sessions, memory, tools/MCP, scheduling, event triggers, package installation, marketplace, and persistent secret management remain unimplemented. Fairness, queue partitions, and per-Agent or per-provider concurrency remain C6, which owns the future `0006` migration. A public Run Events API, an event timeline, richer execution observability, and a Worker dashboard remain C7. Provider-side remote cancellation is not implemented and is not claimed.
 
 Two C4 limitations are worth knowing when reading a retried Run. First, `elapsed_ms` and the usage counters describe the **terminal Attempt** only: they exclude earlier Attempts, the retry wait, and total Run wall-clock duration, and there is no cumulative cross-Attempt token accounting. Second, the read-only UI polls for a bounded period and then stops; that bound is not a completion guarantee, because a Run can outlast it through Worker downtime, provider duration, pre-start loss, lease recovery, or host downtime. The Run's durable state is still correct, and reloading the page shows the current state.

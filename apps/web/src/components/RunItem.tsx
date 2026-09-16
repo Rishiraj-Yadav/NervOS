@@ -5,6 +5,7 @@ const STATUS_LABELS: Record<Run["status"], string> = {
   running: "Running",
   succeeded: "Succeeded",
   failed: "Failed",
+  cancelled: "Cancelled",
 };
 
 function usageLine(run: Run): string | null {
@@ -26,9 +27,21 @@ function usageLine(run: Run): string | null {
  *
  * Everything is rendered as plain React text, so model output is escaped by React and can never
  * become markup. Only a durably persisted Run is ever shown; there is no fabricated answer.
+ *
+ * Cancellation is offered only while the Run is still nonterminal, and only when the page
+ * supplies the action: this component stays presentational and owns no request of its own.
  */
-export function RunItem({ run }: { run: Run }) {
+export function RunItem({
+  run,
+  onCancel,
+  isCancelling = false,
+}: {
+  run: Run;
+  onCancel?: (runId: number) => void;
+  isCancelling?: boolean;
+}) {
   const usage = usageLine(run);
+  const cancellable = (run.status === "created" || run.status === "running") && onCancel !== undefined;
 
   return (
     <article className="run-item">
@@ -40,6 +53,16 @@ export function RunItem({ run }: { run: Run }) {
         </span>
         {run.elapsed_ms !== null ? <span className="run-meta">{run.elapsed_ms} ms</span> : null}
         {usage !== null ? <span className="run-meta">{usage}</span> : null}
+        {cancellable ? (
+          <button
+            type="button"
+            className="run-cancel"
+            onClick={() => onCancel(run.id)}
+            disabled={isCancelling}
+          >
+            {isCancelling ? "Cancelling…" : "Cancel"}
+          </button>
+        ) : null}
       </header>
 
       <p className="run-label">Prompt</p>
@@ -71,6 +94,14 @@ export function RunItem({ run }: { run: Run }) {
           without replaying it, because the model request may already have been sent. A failure
           the provider positively declined may be retried, so this run can be waiting briefly
           before it executes again.
+        </p>
+      ) : null}
+
+      {run.status === "cancelled" ? (
+        <p className="run-pending" role="note">
+          Cancelled. NervOS stopped waiting for this run and will not execute it again. A request
+          that had already been sent may still have been processed by the provider, so
+          cancellation cannot promise that the provider stopped or that nothing was billed.
         </p>
       ) : null}
     </article>

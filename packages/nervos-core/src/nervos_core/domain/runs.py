@@ -57,6 +57,9 @@ class RunStatus(StrEnum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    # A distinct terminal lifecycle, never a euphemism for `failed`: a cancelled Run carries no
+    # provider error, because refusing to continue is not a provider outcome.
+    CANCELLED = "cancelled"
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +204,8 @@ class Run:
             validate_output_text(self.output_text, self.limits)
             if self.error_code is not None or self.error_message is not None:
                 raise InvalidRun
+        elif self.status is RunStatus.CANCELLED:
+            self._require_cancellation(started, finished)
         else:
             if finished is None or self.error_code is None or self.error_message is None:
                 raise InvalidRun
@@ -217,6 +222,28 @@ class Run:
                     raise InvalidRun("exhausted recovery cannot carry usage")
             elif started is None or self.elapsed_ms is None:
                 raise InvalidRun
+
+    def _require_cancellation(self, started: datetime | None, finished: datetime | None) -> None:
+        """Validate the two legal cancelled shapes, mirroring the lifecycle CHECK exactly.
+
+        Cancellation is a terminal lifecycle, not a provider failure, so it never carries an
+        error code or message. A Run cancelled before execution began keeps a NULL start
+        boundary and therefore no elapsed time; a Run cancelled after it began keeps its real
+        start and carries the truthful interval until cancellation was accepted.
+        """
+        if finished is None:
+            raise InvalidRun("cancelled run requires a finish boundary")
+        if self.output_text is not None or self.finish_reason is not None:
+            raise InvalidRun("cancelled run cannot carry output")
+        if self.error_code is not None or self.error_message is not None:
+            raise InvalidRun("cancelled run cannot carry a provider error")
+        if any(value is not None for value in self.usage.values()):
+            raise InvalidRun("cancelled run cannot carry usage")
+        if started is None:
+            if self.elapsed_ms is not None:
+                raise InvalidRun("cancelled run without a start cannot carry elapsed time")
+        elif self.elapsed_ms is None:
+            raise InvalidRun("cancelled run with a start requires elapsed time")
 
     def _require_empty(self, started: datetime | None, finished: datetime | None) -> None:
         if any(

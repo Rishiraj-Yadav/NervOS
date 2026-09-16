@@ -1,6 +1,7 @@
 import { http, HttpResponse } from "msw";
 import userEvent from "@testing-library/user-event";
 
+import type { RunStatus } from "../api/agentInstances";
 import { appRoutes } from "../router";
 import { renderWithRouter } from "./render";
 
@@ -26,7 +27,7 @@ export interface ApiRun {
   model_provider: string;
   model_name: string;
   input_text: string;
-  status: "created" | "running" | "succeeded" | "failed";
+  status: RunStatus;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;

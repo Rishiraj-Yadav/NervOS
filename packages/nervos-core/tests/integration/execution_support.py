@@ -63,7 +63,7 @@ def job_row(engine: Engine, job_id: int) -> dict[str, object]:
                 text(
                     "SELECT status, attempt_count, max_attempts, claimed_by, claim_token,"
                     " lease_expires_at, last_heartbeat_at, error_code, error_message,"
-                    " available_at, finished_at"
+                    " available_at, finished_at, cancel_requested_at"
                     " FROM jobs WHERE id=:j"
                 ),
                 {"j": job_id},

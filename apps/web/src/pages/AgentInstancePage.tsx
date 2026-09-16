@@ -2,7 +2,13 @@ import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 
 import { MODEL_PROVIDERS } from "../api/providers";
-import { agentInstanceQuery, agentRunsQuery, useCreateRun, useUpdateAgentInstance } from "../api/queries";
+import {
+  agentInstanceQuery,
+  agentRunsQuery,
+  useCancelRun,
+  useCreateRun,
+  useUpdateAgentInstance,
+} from "../api/queries";
 import { ErrorState, InlineError, LoadingState } from "../components/AsyncState";
 import { Brand } from "../components/Brand";
 import { RunItem } from "../components/RunItem";
@@ -26,6 +32,9 @@ function AgentInstanceView({ agentInstanceId }: { agentInstanceId: number }) {
   const updateConfiguration = useUpdateAgentInstance(agentInstanceId);
   const updateEnabled = useUpdateAgentInstance(agentInstanceId);
   const createRun = useCreateRun(agentInstanceId);
+  // Cancellation is its own mutation so a failure is reported next to the Run it belongs to,
+  // and so a second click while one request is in flight cannot start another.
+  const cancelRun = useCancelRun(agentInstanceId);
 
   async function handleConfigure(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -206,7 +215,14 @@ function AgentInstanceView({ agentInstanceId }: { agentInstanceId: number }) {
                 <>
                   <div className="run-list">
                     {runs.data.items.map((run) => (
-                      <RunItem key={run.id} run={run} />
+                      <RunItem
+                        key={run.id}
+                        run={run}
+                        onCancel={(runId) => void cancelRun.mutate(runId)}
+                        isCancelling={
+                          cancelRun.isPending && cancelRun.variables === run.id
+                        }
+                      />
                     ))}
                   </div>
                   {runs.data.next_before_id !== null ? (

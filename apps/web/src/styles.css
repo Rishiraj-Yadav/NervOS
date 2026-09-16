@@ -90,6 +90,10 @@ code { background: #101311; border-radius: .3rem; padding: .1rem .35rem; }
 .run-status-succeeded { color: #b9f646; }
 .run-status-failed { color: #ff9d9d; }
 .run-status-running, .run-status-created { color: #d8a04a; }
+.run-status-cancelled { color: #8e968e; }
+.run-cancel { background: transparent; border: 1px solid #4a5348; border-radius: .45rem; color: #c9d1c9; cursor: pointer; font-size: .74rem; font-weight: 700; letter-spacing: .06em; margin-left: auto; padding: .3rem .7rem; text-transform: uppercase; }
+.run-cancel:disabled { cursor: default; opacity: .55; }
+.run-cancel:focus-visible { outline: 2px solid #b9f646; outline-offset: 2px; }
 .run-meta { color: #8e968e; font-size: .78rem; }
 .run-label { color: #b9f646; font-size: .7rem; font-weight: 800; letter-spacing: .14em; margin: 0 0 .25rem; text-transform: uppercase; }
 .run-text { line-height: 1.6; margin: 0 0 .9rem; overflow-wrap: anywhere; white-space: pre-wrap; }

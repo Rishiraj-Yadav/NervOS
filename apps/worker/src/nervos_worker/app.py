@@ -34,8 +34,8 @@ from nervos_worker.identity import generate_worker_id
 from nervos_worker.registry import ReclaimLoop, WorkerRegistry
 from nervos_worker.service import Worker
 
-# Bumped only by the milestone that adds a migration. C3 ships migration 0004.
-EXPECTED_SCHEMA_REVISION = "0004_stage_c3_worker_registry"
+# Bumped only by the milestone that adds a migration. C5 ships migration 0005.
+EXPECTED_SCHEMA_REVISION = "0005_stage_c5_run_cancellation"
 
 SCHEMA_MIGRATION_HINT = (
     "Run `uv run alembic -c apps/api/alembic.ini upgrade head` first. "
