@@ -62,7 +62,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         create_builtin_definition_registry(),
         utc_now,
         known_providers,
-        SqlAlchemyJobPersistence(engine, max_pending=resolved_settings.max_pending_jobs),
+        SqlAlchemyJobPersistence(
+            engine,
+            max_pending=resolved_settings.max_pending_jobs,
+            max_pending_per_agent=resolved_settings.max_pending_jobs_per_agent,
+            max_pending_per_provider=resolved_settings.max_pending_jobs_per_provider,
+        ),
     )
     # Cancellation composes only the narrow control-plane store: this process gains the ability
     # to revoke authority over an owned Run, and no ability to claim, start, heartbeat,

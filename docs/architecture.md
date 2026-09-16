@@ -82,7 +82,7 @@ Beyond health, setup, and authentication, the API currently serves exactly two o
 
 Routes depend on **application services** (`AgentService`, the durable submission service, and `ModelProviderCatalog`) resolved from `app.state`. No route module imports SQLAlchemy, `nervos_core.infrastructure`, `anthropic`, or `nervos_models`, and exactly one route calls the durable submission service. The control plane cannot claim, start, heartbeat, or terminalize Jobs.
 
-C2 activated the minimal Worker execution plane, C3 added durable Worker liveness plus expired-lease reconciliation, C4 added the durable safe execution retry engine, and C5 added owner cancellation plus Attempt execution-timeout orchestration. Installation, schedules, tools, memory, permissions, Marketplace, SDK, fairness, queue partitions, and event streaming remain target architecture. Provider-side remote cancellation is not implemented and is not claimed; see ADR 0012.
+C2 activated the minimal Worker execution plane, C3 added durable Worker liveness plus expired-lease reconciliation, C4 added the durable safe execution retry engine, C5 added owner cancellation plus Attempt execution-timeout orchestration, and C6 added authoritative global/per-Agent/per-provider execution concurrency, durable least-recently-served Agent fairness, and per-dimension admission backpressure. Installation, schedules, tools, memory, permissions, Marketplace, SDK, and event streaming remain target architecture. Provider-side remote cancellation is not implemented and is not claimed; see ADRs 0012 and 0013.
 
 ## Execution plane
 

@@ -15,8 +15,19 @@ ROOT = Path(__file__).resolve().parents[4]
 NOW = datetime(2026, 9, 14, tzinfo=UTC)
 
 
-def migrate(path: Path, monkeypatch: pytest.MonkeyPatch) -> Engine:
-    """Create one disposable migrated database holding a user and a Chat Agent Instance."""
+def migrate(
+    path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    agents: int = 1,
+    providers: tuple[str, ...] = ("anthropic",),
+) -> Engine:
+    """Create one disposable migrated database holding a user and `agents` Agent Instances.
+
+    Providers cycle over `providers`, so a test can build a fleet whose Instances map onto
+    distinct model providers without hand-writing SQL. The default keeps the single
+    `anthropic` Chat Instance every earlier suite assumes, at id 1.
+    """
     monkeypatch.setenv("NERVOS_DATABASE_PATH", str(path))
     command.upgrade(Config(str(ROOT / "apps" / "api" / "alembic.ini")), "head")
     engine = create_sqlite_engine(path)
@@ -29,16 +40,32 @@ def migrate(path: Path, monkeypatch: pytest.MonkeyPatch) -> Engine:
             ),
             {"n": NOW},
         )
-        connection.execute(
-            text(
-                "INSERT INTO agent_instances"
-                "(owner_user_id,agent_key,agent_definition_version,display_name,enabled,"
-                "model_provider,model_name,created_at,updated_at) "
-                "VALUES(1,'nervos.chat','1','Chat',1,'anthropic','opaque/model',:n,:n)"
-            ),
-            {"n": NOW},
-        )
+        for index in range(1, agents + 1):
+            provider = providers[(index - 1) % len(providers)]
+            connection.execute(
+                text(
+                    "INSERT INTO agent_instances"
+                    "(owner_user_id,agent_key,agent_definition_version,display_name,enabled,"
+                    "model_provider,model_name,created_at,updated_at) "
+                    "VALUES(1,'nervos.chat','1',:d,1,:p,:m,:n,:n)"
+                ),
+                {"d": f"Agent {index}", "p": provider, "m": "opaque/model", "n": NOW},
+            )
     return engine
+
+
+def partition_rows(engine: Engine) -> dict[int, int | None]:
+    """Return the durable fairness marker of every Agent partition that has a row."""
+    with engine.connect() as connection:
+        return {
+            int(row[0]): None if row[1] is None else int(row[1])
+            for row in connection.execute(
+                text(
+                    "SELECT agent_instance_id, last_served_attempt_id"
+                    " FROM queue_partitions ORDER BY agent_instance_id"
+                )
+            ).all()
+        }
 
 
 def counts(engine: Engine) -> dict[str, int]:

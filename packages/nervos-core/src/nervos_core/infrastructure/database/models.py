@@ -401,3 +401,36 @@ class WorkerRecord(Base):
     started_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     last_heartbeat_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     stopped_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class QueuePartitionRecord(Base):
+    """Durable fairness history for one Agent Instance partition (C6).
+
+    This table is *scheduling metadata and nothing else*. It is not another queue, not a copy of
+    Job state, not execution authority, and not an active or pending count. Jobs remain the only
+    durable execution obligations, and the Job lease plus Attempt token remain the only authority
+    to execute. The single fact stored here is the monotonically increasing Attempt identifier of
+    the most recent committed claim for this partition, which is what makes
+    least-recently-served ordering identical for every Worker, bounded in time (no history scan),
+    and durable across a restart or a change in a Worker's provider capability set.
+
+    `last_served_attempt_id` deliberately carries no foreign key. It is a monotone sequence
+    marker that is only ever compared, never dereferenced: correctness does not require the
+    referenced Attempt row to still be meaningful, and an FK would add a RESTRICT edge that
+    would make pruning attempt history impossible for no scheduling benefit. A partition with no
+    row, or with a NULL marker, has simply never been served.
+    """
+
+    __tablename__ = "queue_partitions"
+    __table_args__ = (
+        CheckConstraint("agent_instance_id > 0", name="agent_instance_positive"),
+        CheckConstraint(
+            "last_served_attempt_id IS NULL OR last_served_attempt_id > 0",
+            name="last_served_positive",
+        ),
+    )
+
+    agent_instance_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_instances.id", ondelete="RESTRICT"), primary_key=True, autoincrement=False
+    )
+    last_served_attempt_id: Mapped[int | None] = mapped_column(Integer, nullable=True)

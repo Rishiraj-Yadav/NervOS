@@ -21,6 +21,7 @@ def test_metadata_contains_exact_application_tables() -> None:
         "job_attempts",
         "run_events",
         "workers",
+        "queue_partitions",
     }
 
 

@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     # Global hard bound on accepted-but-unfinished Jobs. It is enforced inside the submission
     # transaction, so two concurrent submissions cannot both observe a free slot.
     max_pending_jobs: int = Field(default=1000, ge=1, le=100_000)
+    # Per-dimension admission bounds, so that one Agent Instance's or one model provider's
+    # backlog cannot consume the whole queue and refuse every other submitter. Each defaults to
+    # the global bound, which makes it non-binding until an operator lowers it: a single
+    # dimension can then never exceed what the global ceiling already refuses, so C6 gives the
+    # operator the knob without refusing a Run that C2 would have admitted.
+    max_pending_jobs_per_agent: int = Field(default=1000, ge=1, le=100_000)
+    max_pending_jobs_per_provider: int = Field(default=1000, ge=1, le=100_000)
 
     @field_validator("database_path", mode="before")
     @classmethod

@@ -30,7 +30,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, TypeVar
 
-from sqlalchemy import Connection, Engine, and_, func, insert, or_, select, update
+from sqlalchemy import ColumnElement, Connection, Engine, and_, func, insert, or_, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -60,6 +61,7 @@ from nervos_core.application.model_completion import (
     MODEL_RATE_LIMITED,
     safe_error_message,
 )
+from nervos_core.application.queue_policy import PRODUCTION_QUEUE_POLICY, QueuePolicy
 from nervos_core.application.retry_policy import RetryPolicy, retry_due_at
 from nervos_core.domain.agents import AgentDefinitionId
 from nervos_core.domain.jobs import AttemptStatus, JobStatus, RetryDisposition, RunEventType
@@ -76,6 +78,7 @@ from nervos_core.infrastructure.database.models import (
     AgentInstanceRecord,
     JobAttemptRecord,
     JobRecord,
+    QueuePartitionRecord,
     RunEventRecord,
     RunRecord,
     WorkerRecord,
@@ -108,6 +111,22 @@ _CLAIMABLE_SOURCES = (
     (JobStatus.QUEUED, RunStatus.CREATED),
     (JobStatus.RETRY_WAIT, RunStatus.RUNNING),
 )
+
+# Job states that consume execution concurrency. A live lease is execution authority, so a
+# `claimed` Job that has not started yet still occupies a slot. `retry_wait` holds no lease and
+# `queued` has never been claimed, so neither consumes concurrency.
+_ACTIVE_STATUSES = (JobStatus.CLAIMED.value, JobStatus.RUNNING.value)
+
+_MIN_PENDING_CAP = 1
+_MAX_PENDING_CAP = 100_000
+
+
+def _validate_pending_cap(value: int, name: str) -> int:
+    """Reject a pending cap outside the accepted bound, naming the offending dimension."""
+    if not _MIN_PENDING_CAP <= value <= _MAX_PENDING_CAP:
+        raise ValueError(f"{name} must be between {_MIN_PENDING_CAP} and {_MAX_PENDING_CAP}")
+    return value
+
 
 _T = TypeVar("_T")
 
@@ -291,12 +310,26 @@ class SqlAlchemyJobPersistence:
         engine: Engine,
         *,
         max_pending: int = 1000,
+        max_pending_per_agent: int | None = None,
+        max_pending_per_provider: int | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
-        if not 1 <= max_pending <= 100_000:
-            raise ValueError("max_pending must be between 1 and 100000")
+        """Bind the admission limits.
+
+        A per-dimension limit left unset resolves to the global one, which makes it non-binding:
+        a single dimension can then never exceed what the global ceiling already refuses, so C6
+        adds the dimension without refusing a Run that C2 would have admitted.
+        """
         self._engine = engine
-        self._max_pending = max_pending
+        self._max_pending = _validate_pending_cap(max_pending, "max_pending")
+        self._max_pending_per_agent = _validate_pending_cap(
+            self._max_pending if max_pending_per_agent is None else max_pending_per_agent,
+            "max_pending_per_agent",
+        )
+        self._max_pending_per_provider = _validate_pending_cap(
+            self._max_pending if max_pending_per_provider is None else max_pending_per_provider,
+            "max_pending_per_provider",
+        )
         self._runner = _TransactionRunner(engine, sleep)
 
     def submit(
@@ -310,14 +343,26 @@ class SqlAlchemyJobPersistence:
         now: datetime,
         max_attempts: int = 3,
         max_pending: int | None = None,
+        max_pending_per_agent: int | None = None,
+        max_pending_per_provider: int | None = None,
     ) -> Run:
         """Atomically snapshot an owned enabled Instance into Run, Job, and two events."""
         validate_input_text(input_text, limits)
         if not 1 <= max_attempts <= 10:
             raise ValueError("max_attempts must be between 1 and 10")
-        capacity = self._max_pending if max_pending is None else max_pending
-        if not 1 <= capacity <= 100_000:
-            raise ValueError("max_pending must be between 1 and 100000")
+        capacity = _validate_pending_cap(
+            self._max_pending if max_pending is None else max_pending, "max_pending"
+        )
+        agent_capacity = _validate_pending_cap(
+            self._max_pending_per_agent if max_pending_per_agent is None else max_pending_per_agent,
+            "max_pending_per_agent",
+        )
+        provider_capacity = _validate_pending_cap(
+            self._max_pending_per_provider
+            if max_pending_per_provider is None
+            else max_pending_per_provider,
+            "max_pending_per_provider",
+        )
 
         progress = _SubmissionProgress()
         try:
@@ -332,6 +377,8 @@ class SqlAlchemyJobPersistence:
                     now=now,
                     max_attempts=max_attempts,
                     capacity=capacity,
+                    agent_capacity=agent_capacity,
+                    provider_capacity=provider_capacity,
                     progress=progress,
                 )
             )
@@ -358,6 +405,8 @@ class SqlAlchemyJobPersistence:
         now: datetime,
         max_attempts: int,
         capacity: int,
+        agent_capacity: int,
+        provider_capacity: int,
         progress: _SubmissionProgress,
     ) -> Run:
         predicates = [
@@ -381,18 +430,33 @@ class SqlAlchemyJobPersistence:
         if instance is None:
             raise DurableSubmissionRejected
 
-        # The hard pending cap is counted inside the same `BEGIN IMMEDIATE` transaction that
-        # inserts the Job, so two concurrent submissions serialize on the write lock: the
-        # second reads the first's committed Job rather than racing it.
-        pending = int(
-            connection.scalar(
-                select(func.count())
-                .select_from(JobRecord)
-                .where(JobRecord.status.in_(_OCCUPYING_STATUSES))
+        # All three admission dimensions are counted inside the same `BEGIN IMMEDIATE`
+        # transaction that inserts the Job, so two concurrent submissions serialize on the write
+        # lock: the second reads the first's committed Job rather than racing it. One grouped
+        # read produces every dimension at one consistent database state, so the three checks
+        # cannot disagree with each other and nothing is counted twice.
+        occupying = connection.execute(
+            select(
+                JobRecord.agent_instance_id,
+                JobRecord.model_provider,
+                func.count(),
             )
-            or 0
-        )
+            .where(JobRecord.status.in_(_OCCUPYING_STATUSES))
+            .group_by(JobRecord.agent_instance_id, JobRecord.model_provider)
+        ).all()
+        pending = sum(int(count) for _agent, _provider, count in occupying)
         if pending >= capacity:
+            raise QueueCapacityExceeded
+        provider_id = str(instance["model_provider"])
+        agent_pending = sum(
+            int(count) for owner, _provider, count in occupying if int(owner) == agent_instance_id
+        )
+        if agent_pending >= agent_capacity:
+            raise QueueCapacityExceeded
+        provider_pending = sum(
+            int(count) for _owner, provider, count in occupying if str(provider) == provider_id
+        )
+        if provider_pending >= provider_capacity:
             raise QueueCapacityExceeded
 
         run_result = connection.execute(
@@ -553,9 +617,11 @@ class SqlAlchemyJobExecutionPersistence:
         self,
         engine: Engine,
         *,
+        policy: QueuePolicy = PRODUCTION_QUEUE_POLICY,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._engine = engine
+        self._policy = policy
         self._runner = _TransactionRunner(engine, sleep)
 
     # -- claim -------------------------------------------------------------------------
@@ -569,11 +635,18 @@ class SqlAlchemyJobExecutionPersistence:
         now: datetime,
         lease_duration: timedelta,
     ) -> ClaimedAttempt | None:
-        """Claim the oldest eligible Job, or return None.
+        """Claim the fairest eligible Job, or return None.
 
         Eligibility is capability-aware: a Worker only ever claims a Job whose provider it
         has configured. An empty configured set issues no query at all rather than a
         malformed empty `IN` list.
+
+        Selection is two-dimensional. A Job must satisfy every cap to be a candidate at all
+        (global, per-Agent, per-provider), and among the surviving Agent partitions the
+        least-recently-served one wins. A partition that is saturated, or whose only work is on a
+        provider this Worker cannot run, is removed from the candidate set *before* selection
+        rather than after it, which is what keeps a blocked partition from head-of-line blocking
+        an eligible one.
         """
         if not provider_ids:
             return None
@@ -613,49 +686,112 @@ class SqlAlchemyJobExecutionPersistence:
         token: bytes,
         progress: _ClaimProgress,
     ) -> ClaimedAttempt | None:
-        # Only live leases occupy active capacity. That is coherent precisely because an
-        # expired lease means no write authority, so freeing the slot cannot produce two
-        # authorized concurrent executions.
-        active = int(
-            connection.scalar(
-                select(func.count())
-                .select_from(JobRecord)
-                .where(
-                    JobRecord.status.in_((JobStatus.CLAIMED.value, JobStatus.RUNNING.value)),
-                    JobRecord.lease_expires_at > now,
-                )
+        # Live leases occupy execution concurrency: a lease is execution authority, so a
+        # `claimed` Job that has not started yet still holds its slot. An expired lease holds no
+        # authority, so it frees capacity immediately -- and that cannot authorize a second
+        # execution of the same Job, because an expired Job is still `claimed`/`running` and so
+        # is unreachable from `_CLAIMABLE_SOURCES`; only C3 reclamation can requeue it. One
+        # grouped read yields all three dimensions at one consistent database state.
+        live = connection.execute(
+            select(JobRecord.agent_instance_id, JobRecord.model_provider, func.count())
+            .where(
+                JobRecord.status.in_(_ACTIVE_STATUSES),
+                JobRecord.lease_expires_at > now,
             )
-            or 0
-        )
-        if active >= max_active:
+            .group_by(JobRecord.agent_instance_id, JobRecord.model_provider)
+        ).all()
+
+        # A Worker's own budget may only tighten the global limit, never raise it, so a fleet
+        # whose Workers were configured differently still respects the authoritative ceiling.
+        if sum(int(count) for _owner, _provider, count in live) >= min(
+            self._policy.global_active_limit, max_active
+        ):
             return None
 
+        active_agents: dict[int, int] = {}
+        active_providers: dict[str, int] = {}
+        for owner, provider, count in live:
+            active_agents[int(owner)] = active_agents.get(int(owner), 0) + int(count)
+            name = str(provider)
+            active_providers[name] = active_providers.get(name, 0) + int(count)
+        saturated_agents = sorted(
+            owner
+            for owner, total in active_agents.items()
+            if total >= self._policy.per_agent_active_limit
+        )
+        saturated_providers = sorted(
+            name
+            for name, total in active_providers.items()
+            if total >= self._policy.per_provider_active_limit
+        )
+
+        # The head Job of every eligible partition, ranked inside the partition by the accepted
+        # within-partition order: oldest due first, with the stable Job id as tie-break. A due
+        # `retry_wait` Job enters this ranking on exactly the same terms as queued work -- there
+        # is no retry lane and no retry priority.
+        ranked = (
+            select(
+                JobRecord.id.label("job_id"),
+                JobRecord.run_id.label("run_id"),
+                JobRecord.agent_instance_id.label("agent_instance_id"),
+                JobRecord.model_provider.label("model_provider"),
+                JobRecord.attempt_count.label("attempt_count"),
+                JobRecord.status.label("status"),
+                func.row_number()
+                .over(
+                    partition_by=JobRecord.agent_instance_id,
+                    order_by=(JobRecord.available_at.asc(), JobRecord.id.asc()),
+                )
+                .label("rank"),
+            )
+            .join(RunRecord, RunRecord.id == JobRecord.run_id)
+            .where(
+                or_(
+                    *(
+                        and_(
+                            JobRecord.status == job_status.value,
+                            RunRecord.status == run_status.value,
+                        )
+                        for job_status, run_status in _CLAIMABLE_SOURCES
+                    )
+                ),
+                JobRecord.available_at <= now,
+                JobRecord.attempt_count < JobRecord.max_attempts,
+                JobRecord.model_provider.in_(provider_ids),
+            )
+            .subquery("ranked")
+        )
+        heads = select(ranked).where(ranked.c.rank == 1).subquery("heads")
+        exclusions: list[ColumnElement[bool]] = []
+        if saturated_agents:
+            exclusions.append(heads.c.agent_instance_id.not_in(saturated_agents))
+        if saturated_providers:
+            exclusions.append(heads.c.model_provider.not_in(saturated_providers))
+
+        # Least-recently-served wins, read from durable per-partition metadata so the choice is
+        # identical for every Worker no matter which providers it is capable of running. A
+        # partition with no row, or with a NULL marker, has never been served and sorts first;
+        # the Agent id breaks any remaining tie deterministically. Only a committed claim writes
+        # the marker, so a poll that finds nothing, loses a CAS, or rolls back never penalizes a
+        # partition's position, and a partition that was skipped re-enters at its own place.
         candidate = (
             connection.execute(
                 select(
-                    JobRecord.id,
-                    JobRecord.run_id,
-                    JobRecord.model_provider,
-                    JobRecord.attempt_count,
-                    JobRecord.max_attempts,
-                    JobRecord.status,
+                    heads.c.job_id,
+                    heads.c.run_id,
+                    heads.c.agent_instance_id,
+                    heads.c.attempt_count,
+                    heads.c.status,
                 )
-                .join(RunRecord, RunRecord.id == JobRecord.run_id)
-                .where(
-                    or_(
-                        *(
-                            and_(
-                                JobRecord.status == job_status.value,
-                                RunRecord.status == run_status.value,
-                            )
-                            for job_status, run_status in _CLAIMABLE_SOURCES
-                        )
-                    ),
-                    JobRecord.available_at <= now,
-                    JobRecord.attempt_count < JobRecord.max_attempts,
-                    JobRecord.model_provider.in_(provider_ids),
+                .outerjoin(
+                    QueuePartitionRecord,
+                    QueuePartitionRecord.agent_instance_id == heads.c.agent_instance_id,
                 )
-                .order_by(JobRecord.available_at.asc(), JobRecord.id.asc())
+                .where(*exclusions)
+                .order_by(
+                    QueuePartitionRecord.last_served_attempt_id.asc().nullsfirst(),
+                    heads.c.agent_instance_id.asc(),
+                )
                 .limit(1)
             )
             .mappings()
@@ -664,8 +800,9 @@ class SqlAlchemyJobExecutionPersistence:
         if candidate is None:
             return None
 
-        job_id = int(candidate["id"])
+        job_id = int(candidate["job_id"])
         run_id = int(candidate["run_id"])
+        agent_instance_id = int(candidate["agent_instance_id"])
         # A due `retry_wait` Job is claimable through exactly the same path as queued work. The
         # compare-and-set below therefore pins the *observed* source status rather than
         # accepting either claimable state: a Job that changed hands between the select and the
@@ -718,6 +855,23 @@ class SqlAlchemyJobExecutionPersistence:
             raise PersistenceUnavailable
         progress.attempt_id = int(attempt_id)
         progress.attempt_number = attempt_number
+
+        # Advancing the partition is part of the claim, not a follow-up: the marker moves only
+        # inside this transaction, so it moves only for a claim that actually commits. A poll
+        # that found nothing, lost the CAS, or rolled back leaves the partition's position
+        # untouched, and the next Worker reads the same history regardless of the providers it
+        # can run.
+        connection.execute(
+            sqlite_insert(QueuePartitionRecord)
+            .values(
+                agent_instance_id=agent_instance_id,
+                last_served_attempt_id=int(attempt_id),
+            )
+            .on_conflict_do_update(
+                index_elements=[QueuePartitionRecord.agent_instance_id],
+                set_={"last_served_attempt_id": int(attempt_id)},
+            )
+        )
 
         _append_event_on_connection(
             connection,

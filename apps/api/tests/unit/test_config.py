@@ -12,6 +12,8 @@ VARIABLES = (
     "NERVOS_APP_ORIGIN",
     "NERVOS_LOG_LEVEL",
     "NERVOS_MAX_PENDING_JOBS",
+    "NERVOS_MAX_PENDING_JOBS_PER_AGENT",
+    "NERVOS_MAX_PENDING_JOBS_PER_PROVIDER",
     "ANTHROPIC_API_KEY",
     "NERVOS_ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
@@ -45,6 +47,8 @@ def test_the_api_settings_cannot_represent_a_provider_credential(
         "app_origin",
         "log_level",
         "max_pending_jobs",
+        "max_pending_jobs_per_agent",
+        "max_pending_jobs_per_provider",
     }
     for field in type(settings).model_fields:
         assert "anthropic" not in field and "openai" not in field
@@ -164,3 +168,32 @@ def test_production_requires_https_origin() -> None:
         Settings(environment="production", app_origin="https://example.test").app_origin
         == "https://example.test"
     )
+
+
+@pytest.mark.parametrize(
+    ("variable", "field"),
+    [
+        ("NERVOS_MAX_PENDING_JOBS_PER_AGENT", "max_pending_jobs_per_agent"),
+        ("NERVOS_MAX_PENDING_JOBS_PER_PROVIDER", "max_pending_jobs_per_provider"),
+    ],
+)
+def test_a_per_dimension_pending_cap_defaults_and_reads_the_environment(
+    variable: str, field: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each dimension defaults to the global bound, so neither binds until an operator lowers it."""
+    assert getattr(Settings(), field) == 1000
+    monkeypatch.setenv(variable, "17")
+    assert getattr(Settings(), field) == 17
+
+
+@pytest.mark.parametrize(
+    "variable",
+    ["NERVOS_MAX_PENDING_JOBS_PER_AGENT", "NERVOS_MAX_PENDING_JOBS_PER_PROVIDER"],
+)
+@pytest.mark.parametrize("value", ["0", "-1", "100001", "not-a-number"])
+def test_a_per_dimension_pending_cap_is_bounded(
+    variable: str, value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(variable, value)
+    with pytest.raises(ValidationError):
+        Settings()
