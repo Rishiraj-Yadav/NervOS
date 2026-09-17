@@ -36,6 +36,12 @@ APPLICATION_TABLES = {
     "run_events",
     "workers",
     "queue_partitions",
+    # Stage D (D1): the durable tool, capability and audit tables. Their existence is a schema
+    # fact only -- nothing in Stage D discovers, authorizes or dispatches a tool yet.
+    "mcp_connections",
+    "tool_definitions",
+    "agent_tool_grants",
+    "tool_invocations",
 }
 DEFAULT_DATABASE = (Path.home() / ".nervos" / "nervos.db").resolve(strict=False)
 
@@ -97,7 +103,7 @@ def test_upgrade_drift_downgrade_and_reupgrade(
         assert application_tables(engine) == APPLICATION_TABLES
         with engine.connect() as connection:
             current_revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
-            assert current_revision == "0006_stage_c6_queue_partitions"
+            assert current_revision == "0007_stage_d1_tool_capability_audit"
             assert connection.scalar(text("PRAGMA foreign_keys")) == 1
             assert connection.scalar(text("PRAGMA busy_timeout")) == 5000
         command.check(config)
@@ -740,6 +746,10 @@ def test_migrated_c1_columns_defaults_keys_and_indexes_match_the_orm(
             "fk_run_events_run_id_runs",
             "fk_run_events_job_id_jobs",
             "fk_run_events_attempt_id_job_attempts",
+            # D1's nullable pointer from a tool event to the invocation it describes. It is the
+            # identity channel that keeps a tool name out of `message`, whose contract is the
+            # safe error pair and which a read side would otherwise have to string-parse.
+            "fk_run_events_tool_invocation_id_tool_invocations",
         }
         all_foreign_keys = (
             *jobs_foreign_keys.values(),
@@ -1222,7 +1232,7 @@ def test_the_c5_downgrade_is_clean_when_nothing_needs_cancellation(
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM runs")) == 1
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                "0006_stage_c6_queue_partitions"
+                "0007_stage_d1_tool_capability_audit"
             )
     finally:
         engine.dispose()
@@ -1235,13 +1245,45 @@ def test_the_c5_downgrade_is_clean_when_nothing_needs_cancellation(
 C6_TABLES = ("queue_partitions",)
 EXECUTION_TABLES = ("runs", "jobs", "job_attempts", "run_events", "workers")
 
+# Every execution table's reviewed columns, named explicitly rather than read with `SELECT *`.
+# An additive migration moves the row *shape* -- D1 adds five `runs` columns, three `job_attempts`
+# columns and one `run_events` column -- but no migration may rewrite a *value*. Naming the
+# columns is what keeps these snapshots a claim about values, and what keeps them comparable
+# across a schema change they are not asserting anything about.
+EXECUTION_COLUMNS = {
+    "runs": (
+        "id, agent_instance_id, status, agent_key, agent_definition_version, model_provider,"
+        " model_name, input_text, input_max_bytes, input_max_code_points, output_max_bytes,"
+        " output_max_code_points, provider_timeout_ms, max_output_tokens, max_model_calls,"
+        " output_text, finish_reason, error_code, error_message, input_tokens, output_tokens,"
+        " total_tokens, elapsed_ms, created_at, started_at, finished_at"
+    ),
+    "jobs": (
+        "id, run_id, agent_instance_id, model_provider, status, available_at, attempt_count,"
+        " max_attempts, cancel_requested_at, claimed_by, claim_token, lease_expires_at,"
+        " last_heartbeat_at, error_code, error_message, created_at, updated_at, finished_at"
+    ),
+    "job_attempts": (
+        "id, job_id, attempt_number, status, worker_id, claim_token, claimed_at,"
+        " execution_started_at, lease_expires_at, last_heartbeat_at, finished_at,"
+        " retry_disposition, error_code, error_message, created_at"
+    ),
+    "run_events": (
+        "id, run_id, job_id, attempt_id, sequence, event_type, code, message, attempt_number,"
+        " available_at, created_at"
+    ),
+    "workers": "id, worker_id, started_at, last_heartbeat_at, stopped_at",
+}
+
 
 def execution_snapshot(engine: Engine) -> dict[str, list[tuple[Any, ...]]]:
     """Return every execution row, ordered stably, so 0006 can be proven not to rewrite any."""
     snapshot: dict[str, list[tuple[Any, ...]]] = {}
     with engine.connect() as connection:
         for table in EXECUTION_TABLES:
-            rows = connection.exec_driver_sql(f"SELECT * FROM {table}").fetchall()
+            rows = connection.exec_driver_sql(
+                f"SELECT {EXECUTION_COLUMNS[table]} FROM {table} ORDER BY id"
+            ).fetchall()
             snapshot[table] = [tuple(row) for row in rows]
     return snapshot
 
@@ -1276,7 +1318,7 @@ def test_migration_0006_creates_only_the_fairness_table(
         assert "queue_partitions" in application_tables(engine)
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                "0006_stage_c6_queue_partitions"
+                "0007_stage_d1_tool_capability_audit"
             )
             columns = [
                 str(row[1])
@@ -1413,6 +1455,7 @@ REVIEWED_MIGRATIONS = [
     "0004_stage_c3_worker_registry.py",
     "0005_stage_c5_run_cancellation.py",
     "0006_stage_c6_queue_partitions.py",
+    "0007_stage_d1_tool_capability_audit.py",
 ]
 
 
@@ -1424,11 +1467,16 @@ def test_c7_consumed_no_migration_number() -> None:
     (`run_id = ? AND sequence > ? ORDER BY sequence`) is a bounded range seek on both of its
     columns, so an explicit index would be a duplicate SQLite already maintains -- cost with no
     benefit, and a permanently wider reviewed schema.
+
+    Stage D's D1 later consumed `0007` for the tool, capability and audit schema. That does not
+    weaken this claim, and the claim is not rewritten to accommodate it: exactly one migration
+    follows C6's, it is D1's, and `0008` still does not exist -- so the number C7 could have taken
+    is provably still not C7's.
     """
     names = sorted(path.name for path in VERSIONS.glob("*.py"))
 
     assert names == REVIEWED_MIGRATIONS
-    assert not any(name.startswith("0007") for name in names)
+    assert names[-1] == "0007_stage_d1_tool_capability_audit.py"
     assert not any(name.startswith("0008") for name in names)
 
 

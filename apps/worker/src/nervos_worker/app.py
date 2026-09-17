@@ -35,7 +35,7 @@ from nervos_worker.registry import ReclaimLoop, WorkerRegistry
 from nervos_worker.service import Worker
 
 # Bumped only by the milestone that adds a migration. C6 ships migration 0006.
-EXPECTED_SCHEMA_REVISION = "0006_stage_c6_queue_partitions"
+EXPECTED_SCHEMA_REVISION = "0007_stage_d1_tool_capability_audit"
 
 SCHEMA_MIGRATION_HINT = (
     "Run `uv run alembic -c apps/api/alembic.ini upgrade head` first. "
