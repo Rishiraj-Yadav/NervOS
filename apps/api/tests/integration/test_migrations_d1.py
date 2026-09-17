@@ -68,6 +68,7 @@ def frozen_digest(path: Path) -> str:
     """Hash a migration's content, independent of the checkout's line endings."""
     return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
+
 NOW = datetime(2026, 9, 17, tzinfo=UTC)
 # An unexpired lease: `lease_expires_at > claimed_at` is a C2 invariant, not an incidental value.
 LEASE = NOW + timedelta(minutes=1)
