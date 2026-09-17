@@ -6,7 +6,38 @@ Stage C — Persistent execution engine is COMPLETE. The C0 architecture freeze,
 
 Stage B — Trusted-agent runtime proof is complete and accepted. B1 domain/persistence, B2 internal one-call execution, B3 trusted Agent/Run HTTP API with the minimal Chat dashboard interaction, and B4 second-provider portability are implemented, merged to `main`, and post-merge verified.
 
-The next engineering milestone is **Stage D — tool and MCP layer**: the tool registry, the MCP gateway and client, capability schemas, the permission engine, tool audit events, and the first default tools. **Stage D has not started.**
+The current engineering milestone is **Stage D — tool and MCP layer**. Its **D0 architecture,
+protocol and safety freeze is complete and externally accepted**. D0 delivered governance only: it
+froze the tool, capability, permission and tool-durability architecture in ADRs 0015–0017 and changed
+no runtime behaviour. **No part of the tool or MCP layer is operational**, and the next milestone is
+**D1 — durable tool, capability, and audit schema**.
+
+## Stage D milestones
+
+- [x] D0 — Architecture, protocol, and safety freeze (documentation/governance only; no schema, no dependency, no implementation)
+- [ ] D1 — Durable tool, capability, and audit schema
+- [ ] D2 — Capability grants and the call-time permission decision
+- [ ] D3 — Tool registry, canonical schema, and the first built-in tools
+- [ ] D4 — Provider-neutral tool calling and the Think → Act → Observe loop
+- [ ] D5 — MCP client/gateway and connection lifecycle
+- [ ] D6 — Tool audit, failure semantics, and C3–C6 integration
+- [ ] D7 — Integrated acceptance, MVP closeout, and documentation
+
+D0 is **architecture frozen and externally accepted**. It fixed: the MCP protocol target
+(`2026-07-28`, modern era only, Streamable HTTP and stdio, official SDK v2 with no custom protocol
+stack); the capability model (per-Agent Instance grants held as explicit ALLOW rows, default not
+granted, evaluated live before every call); the durable monotonic Run grant cutoff that makes
+revocation immediate and a new grant invisible to a Run already started; the two-transaction
+call boundary with its ten re-checked predicates; the definition fingerprint and drift rule; the
+no-blind-replay rule and the crash matrix that follows from it; and the C4 narrowing that forbids a
+whole-Attempt retry once any tool has dispatched. The boundary with Stage H is explicit: Stage D owns
+static grants and call-time enforcement, while Stage H owns interactive approvals, encrypted secret
+management, sandboxing and deeper isolation.
+
+**D0 shipped no user-facing capability.** There is no `0007` migration, no tool table, no MCP
+dependency in the lockfile, no tool registry, no execution loop, and no API or UI surface for tools.
+The migration head remains `0006_stage_c6_queue_partitions`. D1 will implement the reviewed schema
+separately.
 
 ## Stage C milestones
 

@@ -28,6 +28,11 @@ Outcome: multiple triggered jobs execute safely without one permanent process pe
 
 Tool registry, MCP gateway/client, capability schemas, permissions, tool audit events, first default tools.
 
+The **capability grant model and the call-time permission decision** are owned here: persistent
+per-Agent tool grants, held as explicit ALLOW rows and evaluated live before every tool call, together
+with the minimal operator-owned trust and egress controls needed to onboard a tool source at all. See
+ADR 0015 and ADR 0016.
+
 Outcome: agents can perform controlled actions.
 
 ## Stage E — Scheduling and events
@@ -51,6 +56,12 @@ Outcome: agents become installable software.
 ## Stage H — Security isolation
 
 Capability permissions, approvals, encrypted secret manager, sandbox boundary, resource controls, path/network controls, publisher trust.
+
+Stage D lands the capability **grant** model; Stage H deepens it. The division is deliberate:
+**Stage D owns static per-Agent grants and the decision made at call time**, while **Stage H owns
+interactive per-call approvals (`Ask`/`Approve`/`Deny`), the encrypted secret manager, and real
+sandbox, resource and network isolation.** The minimal operator-owned trust and egress controls
+Stage D adds to make onboarding possible are replaced and hardened here.
 
 Outcome: safer third-party execution.
 
