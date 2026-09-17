@@ -10,13 +10,14 @@ The current engineering milestone is **Stage D — tool and MCP layer**. Its **D
 protocol and safety freeze is complete and externally accepted**. D0 delivered governance only: it
 froze the tool, capability, permission and tool-durability architecture in ADRs 0015–0017 and changed
 no runtime behaviour. **D1 — durable tool, capability, and audit schema is complete and accepted**.
-The next milestone is **D2 — capability grants and the call-time permission decision**.
+**D2 — capability grants and the call-time permission decision is complete and accepted**. The next
+milestone is **D3 — tool registry, canonical schema, and the first built-in tools**.
 
 ## Stage D milestones
 
 - [x] D0 — Architecture, protocol, and safety freeze (documentation/governance only; no schema, no dependency, no implementation)
 - [x] D1 — Durable tool, capability, and audit schema
-- [ ] D2 — Capability grants and the call-time permission decision
+- [x] D2 — Capability grants and the call-time permission decision
 - [ ] D3 — Tool registry, canonical schema, and the first built-in tools
 - [ ] D4 — Provider-neutral tool calling and the Think → Act → Observe loop
 - [ ] D5 — MCP client/gateway and connection lifecycle
@@ -783,7 +784,9 @@ C8 proves that the finished kernel composes. Each of C2–C7 proved its own slic
 
 Taken together, the guarantees NervOS now offers are: **fenced durable authority**, so only a live lease holder may write; **no blind replay of ambiguous execution**, so an unknown outcome is closed as failed rather than repeated; **safe retry only for a positively safe outcome**; and **late stale writes cannot overwrite truth**. NervOS does **not** guarantee exactly-once remote provider execution. Remote provider processing, billing, and side effects may still occur after an ambiguous post-start crash, a running cancellation, or an execution timeout, and these remain outside the local transaction boundary.
 
-The next engineering milestone is **D2 — capability grants and the call-time permission decision**. D2 implements the grant CRUD service, the frozen precedence evaluator, fail-closed defaults, and security tests proving that no grant means denied by default, that foreign grants are unreachable, that revoked grants are denied at the next call, and that drifted definitions are denied until re-confirmed.
+The next engineering milestone is **D3 — tool registry, canonical schema, and the first built-in tools**.
+
+D2 adds the permission layer that will gate every future tool call, and it adds nothing that can call one. A user's Agent Instance holds an explicit ALLOW row per tool; there is no DENY row, so "not granted" and "revoked" are the same observable state and an entire class of precedence bug cannot be expressed. The call-time evaluator derives its authority from durable rows rather than from its caller: it takes only a Run id and a tool definition id, loads the Run to obtain the Agent Instance and the monotonic grant cutoff, loads the grant, and loads the definition to compare `grant.reviewed_fingerprint` against `tool_definitions.fingerprint` directly. No caller can supply an Agent, a cutoff, or a fingerprint, so a stale grant cannot be revived by presenting the fingerprint it was reviewed at. Revocation deletes the row and bites at the very next check; a new grant is invisible to a Run already submitted because its id exceeds that Run's snapshotted cutoff; re-granting and re-confirming both mint a new AUTOINCREMENT id, so the capability reaches only Runs submitted afterwards. Drift fails closed as `DEFINITION_CHANGED`, an unavailable definition as `DEFINITION_UNAVAILABLE`, a disabled MCP connection as `CONNECTION_DISABLED`, and a cross-owner MCP grant as `OWNER_MISMATCH` — the last re-proven at call time against the connection's owner rather than trusted from grant creation, so a grant row inserted directly into the database still fails closed. Annotations remain presentation-only and never grant. The evaluator is a pure read: it writes no `tool_invocations` row, emits no Run Event, and touches no execution state. **D2 added no migration and no dependency**; the migration head remains `0007_stage_d1_tool_capability_audit`. Nothing executes a tool yet: there is still no registry, no canonical schema validator, no built-in tool, no MCP client, no provider tool calling, and no Think → Act → Observe loop.
 
 Stage C — Persistent execution engine is complete. C0–C8 are all implemented, externally reviewed, and accepted. The C0 architecture freeze is complete. C1 passed external implementation and remediation review, was finalized as implementation commit `8e9c9da`, and was merged to `main` in merge commit `6d54eac`. C7 and C8 were planned and implemented as one combined Stage C delivery and are recorded in ADR 0014 and the C7/C8 sections above.
 
