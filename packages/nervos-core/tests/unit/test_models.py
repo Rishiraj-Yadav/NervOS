@@ -22,6 +22,10 @@ def test_metadata_contains_exact_application_tables() -> None:
         "run_events",
         "workers",
         "queue_partitions",
+        "mcp_connections",
+        "tool_definitions",
+        "agent_tool_grants",
+        "tool_invocations",
     }
 
 

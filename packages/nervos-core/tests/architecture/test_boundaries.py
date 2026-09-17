@@ -26,6 +26,14 @@ EXPECTED_TABLES = {
     "run_events",
     "workers",
     "queue_partitions",
+    # D1 adds the durable tool, capability and audit tables. They are *persistence only*: no
+    # registry, permission evaluator, MCP client or tool loop exists to read or write them yet,
+    # which is why the name-level guards below are narrowed only for the schema and not for the
+    # `tool`/`mcp` route surface, which stays forbidden.
+    "mcp_connections",
+    "tool_definitions",
+    "agent_tool_grants",
+    "tool_invocations",
 }
 FORBIDDEN_SUBSYSTEMS = (
     "conversation",
@@ -179,6 +187,7 @@ def test_b3_route_surface_and_migration_freeze() -> None:
         "0004_stage_c3_worker_registry.py",
         "0005_stage_c5_run_cancellation.py",
         "0006_stage_c6_queue_partitions.py",
+        "0007_stage_d1_tool_capability_audit.py",
     ]
     # The Worker refuses to run against a schema it does not expect, so the pinned revision and
     # the migration head are one fact in two places. Letting them drift bricks the supervised

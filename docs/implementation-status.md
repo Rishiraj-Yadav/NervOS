@@ -9,13 +9,13 @@ Stage B — Trusted-agent runtime proof is complete and accepted. B1 domain/pers
 The current engineering milestone is **Stage D — tool and MCP layer**. Its **D0 architecture,
 protocol and safety freeze is complete and externally accepted**. D0 delivered governance only: it
 froze the tool, capability, permission and tool-durability architecture in ADRs 0015–0017 and changed
-no runtime behaviour. **No part of the tool or MCP layer is operational**, and the next milestone is
-**D1 — durable tool, capability, and audit schema**.
+no runtime behaviour. **D1 — durable tool, capability, and audit schema is complete and accepted**.
+The next milestone is **D2 — capability grants and the call-time permission decision**.
 
 ## Stage D milestones
 
 - [x] D0 — Architecture, protocol, and safety freeze (documentation/governance only; no schema, no dependency, no implementation)
-- [ ] D1 — Durable tool, capability, and audit schema
+- [x] D1 — Durable tool, capability, and audit schema
 - [ ] D2 — Capability grants and the call-time permission decision
 - [ ] D3 — Tool registry, canonical schema, and the first built-in tools
 - [ ] D4 — Provider-neutral tool calling and the Think → Act → Observe loop
@@ -783,7 +783,7 @@ C8 proves that the finished kernel composes. Each of C2–C7 proved its own slic
 
 Taken together, the guarantees NervOS now offers are: **fenced durable authority**, so only a live lease holder may write; **no blind replay of ambiguous execution**, so an unknown outcome is closed as failed rather than repeated; **safe retry only for a positively safe outcome**; and **late stale writes cannot overwrite truth**. NervOS does **not** guarantee exactly-once remote provider execution. Remote provider processing, billing, and side effects may still occur after an ambiguous post-start crash, a running cancellation, or an execution timeout, and these remain outside the local transaction boundary.
 
-The next engineering milestone is **Stage D — tool and MCP layer**. Stage D **has not started**, and it requires separate planning, external plan review, and explicit implementation authorization. It owns the tool registry, the MCP gateway and client, capability schemas, the permission engine, tool audit events, and the first default tools. Nothing beyond the existing roadmap and the accepted Stage C architecture freezes is settled.
+The next engineering milestone is **D2 — capability grants and the call-time permission decision**. D2 implements the grant CRUD service, the frozen precedence evaluator, fail-closed defaults, and security tests proving that no grant means denied by default, that foreign grants are unreachable, that revoked grants are denied at the next call, and that drifted definitions are denied until re-confirmed.
 
 Stage C — Persistent execution engine is complete. C0–C8 are all implemented, externally reviewed, and accepted. The C0 architecture freeze is complete. C1 passed external implementation and remediation review, was finalized as implementation commit `8e9c9da`, and was merged to `main` in merge commit `6d54eac`. C7 and C8 were planned and implemented as one combined Stage C delivery and are recorded in ADR 0014 and the C7/C8 sections above.
 
