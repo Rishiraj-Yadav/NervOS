@@ -12,8 +12,8 @@ never waits on a real backoff and CI cost stays bounded.
 
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -52,7 +52,6 @@ from stage_c_support import (
     job_row,
     live_attempt_violations,
     migrate,
-    must_claim,
     partition_rows,
     pending_job_count,
     run_row,
@@ -119,17 +118,32 @@ def assert_caps_hold(engine: Engine, *, now: datetime) -> None:
     assert live_attempt_violations(engine) == 0
 
 
-@pytest.fixture
-def soak(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Engine]:
-    engine = migrate(tmp_path / "stress.db", monkeypatch, agents=AGENTS, providers=BOTH_PROVIDERS)
-    try:
-        yield engine
-    finally:
-        engine.dispose()
+@dataclass(frozen=True, slots=True)
+class SoakRun:
+    """What one deterministic soak produced, so two consumers can share a single database."""
+
+    admitted: tuple[tuple[int, int, str], ...]
+    refusals: int
+    applied: int
 
 
-def test_the_bounded_stress_soak_holds_every_stage_c_property(soak: Engine, tmp_path: Path) -> None:
-    engine = soak
+@dataclass(frozen=True, slots=True)
+class SoakedStress:
+    """One migrated database, already driven through the frozen soak workload."""
+
+    engine: Engine
+    database_path: Path
+    run: SoakRun
+
+
+def _drive_soak(engine: Engine) -> SoakRun:
+    """Drive the frozen 120-Job mixed workload to settlement, returning what it did.
+
+    This lives in a helper rather than in a test because the soak is the expensive part of this
+    file and it must happen exactly once. Two consumers need it: the property test below asserts
+    the Stage C behaviour the workload exercised, and the integrity test asserts the structure it
+    left behind. Both read the same database, and neither mutates what the other reads.
+    """
     submission = SqlAlchemyJobPersistence(
         engine,
         max_pending=PENDING,
@@ -256,6 +270,36 @@ def test_the_bounded_stress_soak_holds_every_stage_c_property(soak: Engine, tmp_
                 succeed(engine, start(engine, claimed, now=now), now=now)
         now = now + timedelta(seconds=60)
 
+    assert pending_job_count(engine) == 0
+    return SoakRun(admitted=tuple(admitted), refusals=refusals, applied=applied)
+
+
+@pytest.fixture(scope="module")
+def soaked(tmp_path_factory: pytest.TempPathFactory) -> Iterator[SoakedStress]:
+    """One migrated database, driven once through the frozen soak workload.
+
+    Module-scoped on purpose. The soak is this file's expensive step, and both consumers below need
+    the *same* database: one to assert the Stage C behaviour it exercised, one to assert the
+    structure it left behind. Driving it in the fixture rather than inside either test keeps the two
+    order-independent -- neither test's assertions depend on the other having run, and neither
+    mutates what the other reads. The integrity test in particular writes nothing at all, so it can
+    never perturb the property test's view of the workload.
+    """
+    patch = pytest.MonkeyPatch()
+    database_path = tmp_path_factory.mktemp("soak") / "stress.db"
+    engine = migrate(database_path, patch, agents=AGENTS, providers=BOTH_PROVIDERS)
+    try:
+        yield SoakedStress(engine=engine, database_path=database_path, run=_drive_soak(engine))
+    finally:
+        patch.undo()
+        engine.dispose()
+
+
+def test_the_bounded_stress_soak_holds_every_stage_c_property(soaked: SoakedStress) -> None:
+    engine = soaked.engine
+    admitted = soaked.run.admitted
+    applied = soaked.run.applied
+
     # ---- the invariants ----
 
     final_statuses = {str(run_row(engine, run_id)["status"]) for _, run_id, _ in admitted}
@@ -294,22 +338,70 @@ def test_the_bounded_stress_soak_holds_every_stage_c_property(soak: Engine, tmp_
     assert applied > 0
 
 
-def test_the_stress_database_is_structurally_sound(soak: Engine, tmp_path: Path) -> None:
-    """The integrity checks the acceptance report quotes, on the database the soak produced."""
-    engine = soak
-    database_path = tmp_path / "stress.db"
-    for index in range(12):
-        run_id = submit(engine, agent=(index % AGENTS) + 1, text_value=f"integrity-{index}")
-        claimed = must_claim(engine, providers=BOTH_PROVIDERS, policy=CAPS, now=NOW)
-        succeed(engine, start(engine, claimed, now=NOW), now=NOW)
-        assert run_id > 0
+def test_the_stress_database_is_structurally_sound(soaked: SoakedStress) -> None:
+    """The integrity checks the acceptance report quotes, on the database the soak produced.
+
+    This test writes nothing. It reads the module-scoped database that the soak above drove, so the
+    structure examined here is the structure a 120-Job mixed workload actually left behind, rather
+    than the structure of a smaller and quieter database that a differently-scoped fixture happened
+    to build.
+
+    Every assertion can fail for a real reason. The row-count checks are not decoration: without
+    them, a database that silently stopped recording -- or lost rows to a cascade -- would satisfy
+    every "no violations found" query below by simply being empty.
+    """
+    engine = soaked.engine
+    admitted = soaked.run.admitted
 
     with engine.connect() as connection:
+        # The file itself is sound.
         assert connection.scalar(text("PRAGMA integrity_check")) == "ok"
         assert list(connection.execute(text("PRAGMA foreign_key_check")).all()) == []
-        # No WAL: the rollback journal is unchanged, which the migrations suite also asserts.
-        assert connection.scalar(text("PRAGMA journal_mode")) in ("delete", "memory")
-        # Every active Attempt is unique per Job.
+
+        # No WAL. Stage C's accepted contract is the rollback journal, so this asserts the single
+        # value that contract names rather than accepting anything that merely is not WAL.
+        assert connection.scalar(text("PRAGMA journal_mode")) == "delete"
+
+        # The workload is genuinely in this database. This is what stops the checks below from
+        # passing vacuously on an empty file.
+        assert connection.scalar(text("SELECT count(*) FROM runs")) == len(admitted)
+        assert connection.scalar(text("SELECT count(*) FROM job_attempts")) >= len(admitted)
+        events = connection.scalar(text("SELECT count(*) FROM run_events"))
+        assert events is not None and events > 0
+
+        # Nothing is left mid-flight or waiting to retry: the soak settled every Job it admitted.
+        assert (
+            connection.scalar(
+                text(
+                    "SELECT count(*) FROM jobs"
+                    " WHERE status NOT IN ('succeeded','failed','cancelled')"
+                )
+            )
+            == 0
+        )
+
+        # Run and Job are 1:1, in both directions.
+        assert (
+            connection.scalar(
+                text(
+                    "SELECT count(*) FROM runs r LEFT JOIN jobs j ON j.run_id = r.id"
+                    " WHERE j.id IS NULL"
+                )
+            )
+            == 0
+        )
+        assert (
+            connection.scalar(
+                text(
+                    "SELECT count(*) FROM jobs j LEFT JOIN runs r ON r.id = j.run_id"
+                    " WHERE r.id IS NULL"
+                )
+            )
+            == 0
+        )
+
+        # The single structural invariant the claim/lease design rests on: no Job ever holds two
+        # live Attempts. Asserted here against the settled database as well as under load.
         assert (
             connection.scalar(
                 text(
@@ -319,26 +411,51 @@ def test_the_stress_database_is_structurally_sound(soak: Engine, tmp_path: Path)
             )
             == 0
         )
+
         # `jobs.attempt_count` agrees with the durable Attempt count for every Job.
-        mismatched = connection.scalar(
-            text(
-                "SELECT count(*) FROM jobs j WHERE j.attempt_count <>"
-                " (SELECT count(*) FROM job_attempts a WHERE a.job_id = j.id)"
+        assert (
+            connection.scalar(
+                text(
+                    "SELECT count(*) FROM jobs j WHERE j.attempt_count <>"
+                    " (SELECT count(*) FROM job_attempts a WHERE a.job_id = j.id)"
+                )
             )
+            == 0
         )
-        assert mismatched == 0
-        # Every fairness marker references a real committed Attempt, or is null.
-        dangling = connection.scalar(
-            text(
-                "SELECT count(*) FROM queue_partitions p"
-                " WHERE p.last_served_attempt_id IS NOT NULL AND NOT EXISTS"
-                " (SELECT 1 FROM job_attempts a WHERE a.id = p.last_served_attempt_id)"
+
+        # Run Event sequences are contiguous 1..N within each Run -- the property C7's pagination
+        # proof depends on. Read from the durable rows, not through the read service.
+        assert (
+            connection.scalar(
+                text(
+                    "SELECT count(*) FROM (SELECT run_id FROM run_events GROUP BY run_id"
+                    " HAVING max(sequence) <> count(*) OR count(DISTINCT sequence) <> count(*))"
+                )
             )
+            == 0
         )
-        assert dangling == 0
-    assert engine is not None
-    assert Path(database_path).is_file()
-    assert sqlite3.sqlite_version
+
+        # Every Attempt belongs to a real Job, and every fairness marker references a real committed
+        # Attempt or is null.
+        assert (
+            connection.scalar(
+                text(
+                    "SELECT count(*) FROM job_attempts a"
+                    " WHERE NOT EXISTS (SELECT 1 FROM jobs j WHERE j.id = a.job_id)"
+                )
+            )
+            == 0
+        )
+        assert (
+            connection.scalar(
+                text(
+                    "SELECT count(*) FROM queue_partitions p"
+                    " WHERE p.last_served_attempt_id IS NOT NULL AND NOT EXISTS"
+                    " (SELECT 1 FROM job_attempts a WHERE a.id = p.last_served_attempt_id)"
+                )
+            )
+            == 0
+        )
 
 
 def test_a_fleet_of_workers_drains_a_real_workload_end_to_end(
