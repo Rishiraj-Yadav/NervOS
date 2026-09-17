@@ -332,17 +332,29 @@ the stricter bound**, so one name is valid for both providers with no per-provid
 name is therefore not reliably provider-safe.
 
 ```
-nervos__builtin__<esc(upstream_name)>
-nervos__c<connection_id>__<esc(upstream_name)>
+nervos__builtin__<esc(upstream_name)><suffix>
+nervos__c<connection_id>__<esc(upstream_name)><suffix>
 
-esc(x)  lowercase, then per character:
-          'a'-'z' | '0'-'9' | '-'   ->  itself
-          '_'                       ->  '_5f'
-          anything else             ->  '_' + 2 hex digits of the code point
+esc(x)  lowercase x, then encode it as UTF-8 and escape each BYTE:
+          the bytes of 'a'-'z' | '0'-'9' | '-'   ->  themselves
+          every other byte                       ->  '_' + 2 lowercase hex digits
 ```
 
-`esc` is injective, so distinct upstream names cannot collide. Length is bounded by reserving the
-fixed parts **before** truncating the variable one:
+> **Errata, applied at D3 finalization.** The escape rule previously read *"2 hex digits of the code
+> point"*. A fixed two-digit body cannot represent a code point above `U+00FF`, which made the escape
+> **non-injective**: `'€'` (U+20AC) escaped to `_20ac`, exactly as `' ' + 'ac'` did, so two distinct
+> upstream names would have produced one model name — and because assembly fails closed, one such name
+> would take an entire connection's catalog down. Escaping **bytes** keeps the two-digit body total
+> and the escape unambiguous. For code points below `U+0080` a byte equals its code point, so the
+> earlier wording was already correct there; this corrects the wider case only.
+
+`esc` is injective, so distinct upstream names cannot collide. A literal `_` is itself escaped — its
+byte `0x5F` becomes `_5f` — so `_` always begins exactly one two-digit escape and the encoding parses
+unambiguously.
+
+The suffix is **always** appended, in both namespaces: that keeps one code path, and the length
+budget holds for each. Length is bounded by reserving the fixed parts **before** truncating the
+variable one:
 
 ```
 FIXED  = "nervos__" + ("builtin" | "c" + str(connection_id)) + "__"   # never truncated
@@ -357,10 +369,27 @@ model_name = FIXED + esc(upstream_name)[:BUDGET] + SUFFIX
 embedded it and could therefore emit 140-character names, over any provider's limit; the human label
 lives in `display_name` on the definition row, which is what the UI renders.
 
-The name is **persisted once and never recomputed**, and connection ids are `sqlite_autoincrement`,
-so a deleted-and-recreated connection receives a *new* id rather than a reused one — a recreated
-connection is a genuinely new durable identity, and its grants do not survive it. `UNIQUE(model_name)`
-remains the final fail-closed collision guard.
+**`current_time`, `calculate` and `json_transform` are `upstream_name`s — human-readable labels, not
+persisted values.** Because the suffix is unconditional, the durable `model_name` of each carries the
+namespace prefix, the escaped name and the suffix the rule above computes:
+
+```
+nervos__builtin__current_5ftime_0b2bbe727e67
+nervos__builtin__calculate_47975cbf6573
+nervos__builtin__json_5ftransform_db92ca499734
+```
+
+The suffix shown is the one the implementation actually produces; it is a deterministic function of
+the composed name and is quoted here only so the examples are not mistaken for a bare-string rule.
+
+**The name is persisted once and never recomputed.** For a definition that already exists,
+reconciliation preserves the stored `model_name` byte-for-byte and computes the refreshed fingerprint
+*from that persisted name* — so a material change to a description or a schema cannot silently rename
+an identity a model has already been offered and a user has already reviewed. A change to
+`upstream_name` is a **new** definition rather than a rename of an existing one. Connection ids are
+`sqlite_autoincrement`, so a deleted-and-recreated connection receives a *new* id rather than a reused
+one — a recreated connection is a genuinely new durable identity, and its grants do not survive it.
+`UNIQUE(model_name)` remains the final fail-closed collision guard.
 
 ### Built-in tool sources: no Connection, and checks 8–10 do not apply
 
@@ -385,9 +414,11 @@ Consequently, for a built-in definition:
 | 10 — operator trust policy permits this target | **vacuously satisfied** — no network target exists |
 
 The **first built-in tools**, which are what makes point 1 of D's usability demonstrable rather than
-asserted: `nervos__builtin__current_time`, `nervos__builtin__calculate` (a bounded arithmetic grammar,
-**not** `eval`), and `nervos__builtin__json_transform`. All three are deterministic, side-effect-free
-and credential-free — chosen precisely so the architecture is proven before any remote source exists.
+asserted: `current_time`, `calculate` (a bounded arithmetic grammar, **not** `eval`), and
+`json_transform` — the `upstream_name` of each, which is the human-readable label; the persisted
+`model_name` carries the built-in prefix and the unconditional suffix shown above. All three are
+deterministic, side-effect-free and credential-free — chosen precisely so the architecture is proven
+before any remote source exists.
 **No filesystem, shell, HTTP or credentialed tool is built in Stage D**; each would either need
 Stage H's isolation or would smuggle Stage H work into the first demo.
 
