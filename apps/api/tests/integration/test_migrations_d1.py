@@ -31,31 +31,43 @@ DEFAULT_DATABASE = (Path.home() / ".nervos" / "nervos.db").resolve(strict=False)
 D1_REVISION = "0007_stage_d1_tool_capability_audit"
 C6_REVISION = "0006_stage_c6_queue_partitions"
 
-# The exact bytes of every migration D1 builds on. D1 adds 0007 and rewrites nothing, and a
+# The exact content of every migration D1 builds on. D1 adds 0007 and rewrites nothing, and a
 # frozen-history claim is only worth making if something fails when it stops being true.
+#
+# The hashes are over line-ending-normalised bytes, not raw checkout bytes. A raw hash would make
+# the frozen claim depend on the machine's `core.autocrlf`: a Windows checkout with CRLF produces a
+# different digest than the LF bytes every other environment reads, so the same unchanged file
+# would pass in one place and fail in another. Normalising keeps the guard about *content*, which is
+# what "rewrites nothing" actually means.
 FROZEN_MIGRATIONS = (
-    ("0001_stage_a_schema.py", "7d5b3294b39d23e48328f7865953310ae08223989dcad1ad84baf6aa4719b68d"),
+    ("0001_stage_a_schema.py", "7d7117616bfe1266309417ab427fba70c1e6690663ff18924c64794460a06f0b"),
     (
         "0002_stage_b1_agent_instances_runs.py",
-        "81da5151346ee1fc4ef8824d45fc194ecf42d752f30c299d2a11fe36af418893",
+        "4fa78a579fd4a334a9262e74ef688eaf0c93241dd450962cdfb77fd2487f1044",
     ),
     (
         "0003_stage_c1_durable_execution.py",
-        "15ddf654b3c77b80dcab073ac83dcd73d7dec8eb58f7fa05a150d7a22831a0c1",
+        "b4f4ddf8c1edb8e8666422fe8b795016e420286a8a4bbf8e987e1c566cbcbd4f",
     ),
     (
         "0004_stage_c3_worker_registry.py",
-        "51db9bc47f65b232461e65c1ea9f85e1b8cdc7aca622f321a6a32a94058733e0",
+        "aed42996824451e8f986fbbcd0d84c77c446012a3783e83f7a3ecf8ea58d863b",
     ),
     (
         "0005_stage_c5_run_cancellation.py",
-        "b423645228ed9e8634716e7e7b80a8fee4c0c7709be656324258c001ae7a82ad",
+        "fa40c802febb87719fde1f4b62ef9784282cf45b8cfef88b532b87900457e336",
     ),
     (
         "0006_stage_c6_queue_partitions.py",
-        "be85e3125fcdb883a3e2dd07a066257c8d24458b10c30f210d4299947f4ca970",
+        "2827ed7cdfcbb2520204040999b3bed6f5d59e6f8d9a293bd9d894ab09f639c7",
     ),
 )
+
+
+def frozen_digest(path: Path) -> str:
+    """Hash a migration's content, independent of the checkout's line endings."""
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+
 
 NOW = datetime(2026, 9, 17, tzinfo=UTC)
 # An unexpired lease: `lease_expires_at > claimed_at` is a C2 invariant, not an incidental value.
@@ -325,8 +337,7 @@ def assert_refused_and_intact(database_path: Path, config: Config, blocker: str)
 def test_d1_rewrites_no_earlier_migration() -> None:
     """0001 through 0006 are byte-for-byte identical; D1 adds 0007 and rewrites nothing."""
     for filename, expected_hash in FROZEN_MIGRATIONS:
-        actual = hashlib.sha256((VERSIONS / filename).read_bytes()).hexdigest()
-        assert actual == expected_hash, filename
+        assert frozen_digest(VERSIONS / filename) == expected_hash, filename
 
 
 def test_the_d1_upgrade_creates_the_four_tables_and_extends_three(
