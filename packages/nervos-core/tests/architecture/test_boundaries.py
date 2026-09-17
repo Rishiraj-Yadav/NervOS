@@ -663,3 +663,97 @@ def test_c7_adds_only_the_reviewed_observability_surface() -> None:
         text = path.read_text(encoding="utf-8")
         for forbidden in ("/attempts", "worker_health", "/workers"):
             assert forbidden not in text, (path, forbidden)
+
+
+# --------------------------------------------------------------------------------------------------
+# D3 -- the tool layer. These guard the shape of the milestone, not its behaviour: the canonical
+# validator is NervOS-owned, a built-in reaches no privileged resource, the registry does no
+# execution work, and none of D4/D5 has leaked in.
+# --------------------------------------------------------------------------------------------------
+
+D3_DOMAIN_TOOLS = CORE_SOURCE / "domain" / "tools.py"
+D3_TOOL_SCHEMA = CORE_APPLICATION / "tool_schema.py"
+D3_TOOL_REGISTRY = CORE_APPLICATION / "tool_registry.py"
+D3_BUILTIN_TOOLS = CORE_APPLICATION / "builtin_tools.py"
+
+
+def test_the_canonical_validator_is_nervos_owned_not_a_general_purpose_library() -> None:
+    """ADR 0015: the subset definition and its enforcement must not drift apart.
+
+    A general-purpose validator would let the subset be defined in one place and enforced in
+    another, and could be induced to resolve a reference. The prohibition is on the library, so it
+    is asserted by name rather than by behaviour.
+    """
+    forbidden = ("jsonschema", "fastjsonschema", "referencing", "json_schema", "pydantic")
+    for path in (D3_DOMAIN_TOOLS, D3_TOOL_SCHEMA):
+        imports = imported_modules(path)
+        for library in forbidden:
+            assert not any(module.startswith(library) for module in imports), (path, library)
+
+
+def test_no_mcp_sdk_import_reaches_core() -> None:
+    """ADR 0016: the SDK lives in `packages/nervos-mcp`; only a composition root may reach it."""
+    imports = {module for path in python_files(CORE_SOURCE) for module in imported_modules(path)}
+    assert not any(module == "mcp" or module.startswith("mcp.") for module in imports)
+
+
+def test_a_built_in_tool_reaches_no_privileged_resource() -> None:
+    """No filesystem, subprocess, shell, network, credential store or database.
+
+    Every one of these would either need Stage H's isolation to be safe, or would smuggle Stage H
+    work into the first demo. `os` and `pathlib` are on the list because either would be enough to
+    read the environment or the disk.
+    """
+    privileged = (
+        "subprocess",
+        "socket",
+        "shutil",
+        "http",
+        "urllib",
+        "requests",
+        "httpx",
+        "ctypes",
+        "multiprocessing",
+        "os",
+        "pathlib",
+        "sqlite3",
+        "tempfile",
+    )
+    imports = imported_modules(D3_BUILTIN_TOOLS)
+    for module in privileged:
+        assert not any(
+            candidate == module or candidate.startswith(f"{module}.") for candidate in imports
+        ), module
+
+
+def test_the_tool_registry_performs_no_execution_or_permission_work() -> None:
+    """The registry registers and resolves. Catalog assembly, permission and the loop are not
+    here."""
+    text = D3_TOOL_REGISTRY.read_text(encoding="utf-8")
+    for forbidden in ("check_permission", "ModelCompletion", "ToolInvocation", "tool_invocations"):
+        assert forbidden not in text, forbidden
+
+
+def test_the_tool_layer_is_not_reachable_from_the_model_port() -> None:
+    """D3 describes tools; it does not let a model ask for one. That is D4, and it has not
+    started."""
+    text = (CORE_APPLICATION / "model_completion.py").read_text(encoding="utf-8")
+    for forbidden in ("ToolCall", "tool_calls", "TOOL_USE", "tool_use", "ToolDescriptor"):
+        assert forbidden not in text, forbidden
+
+
+def test_the_built_in_definitions_are_not_wired_into_a_composition_root() -> None:
+    """D3 has no tool execution path, so nothing may reconcile definitions at startup.
+
+    D4 wires the finished service; wiring it earlier would add a database write to Worker startup
+    for a capability no user can reach yet.
+    """
+    for root in (API_SOURCE, WORKER_SOURCE):
+        for path in python_files(root):
+            text = path.read_text(encoding="utf-8")
+            for forbidden in (
+                "reconcile_builtin_definitions",
+                "create_builtin_tool_registry",
+                "BuiltinToolExecutor",
+            ):
+                assert forbidden not in text, (path, forbidden)
