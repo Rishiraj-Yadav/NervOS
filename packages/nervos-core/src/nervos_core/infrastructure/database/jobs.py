@@ -63,6 +63,7 @@ from nervos_core.application.model_completion import (
 )
 from nervos_core.application.queue_policy import PRODUCTION_QUEUE_POLICY, QueuePolicy
 from nervos_core.application.retry_policy import RetryPolicy, retry_due_at
+from nervos_core.application.tool_invocations import DISPATCHED_STATUSES, ClaimHandle
 from nervos_core.domain.agents import AgentDefinitionId
 from nervos_core.domain.jobs import (
     AttemptStatus,
@@ -82,11 +83,13 @@ from nervos_core.domain.runs import (
 )
 from nervos_core.infrastructure.database.models import (
     AgentInstanceRecord,
+    AgentToolGrantRecord,
     JobAttemptRecord,
     JobRecord,
     QueuePartitionRecord,
     RunEventRecord,
     RunRecord,
+    ToolInvocationRecord,
     WorkerRecord,
 )
 
@@ -162,6 +165,10 @@ def run_from_record(
         record.provider_timeout_ms,
         record.max_output_tokens,
         record.max_model_calls,
+        record.max_tool_calls,
+        record.tool_timeout_ms,
+        record.tool_result_max_bytes,
+        record.max_consecutive_tool_failures,
     )
     return Run(
         record.id,
@@ -184,6 +191,7 @@ def run_from_record(
         record.elapsed_ms,
         execution_phase,
         retry_available_at,
+        record.tool_grant_cutoff_id,
     )
 
 
@@ -499,6 +507,9 @@ class SqlAlchemyJobPersistence:
         if provider_pending >= provider_capacity:
             raise QueueCapacityExceeded
 
+        tool_grant_cutoff_id = self._grant_cutoff_on_connection(
+            connection, agent_instance_id, limits
+        )
         run_result = connection.execute(
             insert(RunRecord).values(
                 agent_instance_id=agent_instance_id,
@@ -515,6 +526,11 @@ class SqlAlchemyJobPersistence:
                 provider_timeout_ms=limits.provider_timeout_ms,
                 max_output_tokens=limits.max_output_tokens,
                 max_model_calls=limits.max_model_calls,
+                max_tool_calls=limits.max_tool_calls,
+                tool_timeout_ms=limits.tool_timeout_ms,
+                tool_result_max_bytes=limits.tool_result_max_bytes,
+                max_consecutive_tool_failures=limits.max_consecutive_tool_failures,
+                tool_grant_cutoff_id=tool_grant_cutoff_id,
                 created_at=now,
             )
         )
@@ -571,7 +587,29 @@ class SqlAlchemyJobPersistence:
             RunStatus.CREATED,
             now,
             execution_phase=JobStatus.QUEUED,
+            tool_grant_cutoff_id=tool_grant_cutoff_id,
         )
+
+    @staticmethod
+    def _grant_cutoff_on_connection(
+        connection: Connection, agent_instance_id: int, limits: RunLimits
+    ) -> int:
+        """Snapshot the highest grant id this Run may ever honour.
+
+        Read inside the same serialized submission transaction that inserts the Run, so a grant
+        committed a moment later is ordered *after* this Run rather than racing it. A tool-free Run
+        snapshots nothing: its budget of zero tools means no capability is reachable at all, which
+        is exactly the `0` D2's evaluator already refuses everything against. That is why chat@1
+        needs no special case and keeps the durable values it has always had.
+        """
+        if limits.max_tool_calls == 0:
+            return 0
+        highest = connection.execute(
+            select(func.coalesce(func.max(AgentToolGrantRecord.id), 0)).where(
+                AgentToolGrantRecord.agent_instance_id == agent_instance_id
+            )
+        ).scalar_one()
+        return int(highest)
 
     def _reconcile_submission(self, run_id: int) -> Run | None:
         """Read back an unobserved submission outcome instead of blindly replaying it.
@@ -1614,6 +1652,13 @@ class SqlAlchemyJobExecutionPersistence:
         ):
             raise _Fenced
         budget_remaining = int(job["attempt_count"]) < int(job["max_attempts"])
+        # ADR 0017's second layer: an Attempt that dispatched a tool call is never replayed whole.
+        # The disposition of the *model* failure cannot license re-running a call whose effect may
+        # already have landed, so a dispatched invocation forces the terminal branch regardless of
+        # how safe the model failure itself would otherwise have been to replay. `dispatched` is the
+        # schema's own definition, not a second one invented here.
+        if retryable and self._dispatched_tool_call(connection, claim.attempt_id):
+            retryable = False
         if not retryable or not budget_remaining:
             self._close_terminal_on_connection(
                 connection,
@@ -1836,6 +1881,80 @@ class SqlAlchemyJobExecutionPersistence:
             return self._runner.run(operation)
         except _Fenced:
             return False
+
+    @staticmethod
+    def _dispatched_tool_call(connection: Connection, attempt_id: int) -> bool:
+        """Return whether this Attempt ever crossed a tool call's ambiguity boundary.
+
+        `requested`, `denied` and `cancelled` invocations are deliberately absent: a call that was
+        never dispatched provably produced no effect, so it is not a reason to refuse a retry. The
+        lookup is served by the existing `(attempt_id, tool_sequence)` unique index as a bounded
+        search rather than a scan.
+        """
+        dispatched = tuple(status.value for status in DISPATCHED_STATUSES)
+        return (
+            connection.execute(
+                select(ToolInvocationRecord.id)
+                .where(
+                    ToolInvocationRecord.attempt_id == attempt_id,
+                    ToolInvocationRecord.status.in_(dispatched),
+                )
+                .limit(1)
+            ).first()
+            is not None
+        )
+
+    def persist_attempt_usage(
+        self, claim: ClaimHandle, *, usage: ModelUsage, now: datetime
+    ) -> bool:
+        """Durably record the aggregate usage of a multi-turn Attempt.
+
+        ADR 0017 requires a model turn's reported cost to survive a crash that follows it, so this
+        is written after every turn and before anything the next turn depends on. It updates only
+        the Attempt's own aggregate columns: the Run's usage keeps its Stage C meaning and is still
+        written exactly once, at terminalization.
+        """
+        if any(value is not None and value < 0 for value in usage.values()):
+            raise ValueError("usage must be nonnegative")
+
+        def operation(connection: Connection) -> bool:
+            # The Job's *current* claim is checked as well as the Attempt's recorded one: a reclaim
+            # replaces the former and appends a new Attempt, so a Worker that lost its Job must not
+            # be able to keep writing to the Attempt it used to own.
+            current = connection.execute(
+                select(JobRecord.id)
+                .join(JobAttemptRecord, JobAttemptRecord.job_id == JobRecord.id)
+                .where(
+                    JobAttemptRecord.id == claim.attempt_id,
+                    JobRecord.id == claim.job_id,
+                    JobRecord.status == JobStatus.RUNNING.value,
+                    JobRecord.claimed_by == claim.worker_id,
+                    JobRecord.claim_token == claim.claim_token,
+                )
+            ).first()
+            if current is None:
+                raise _Fenced
+            updated = connection.execute(
+                update(JobAttemptRecord)
+                .where(
+                    JobAttemptRecord.id == claim.attempt_id,
+                    JobAttemptRecord.job_id == claim.job_id,
+                    JobAttemptRecord.worker_id == claim.worker_id,
+                    JobAttemptRecord.claim_token == claim.claim_token,
+                    JobAttemptRecord.status == AttemptStatus.RUNNING.value,
+                    JobAttemptRecord.lease_expires_at > now,
+                )
+                .values(
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    total_tokens=usage.total_tokens,
+                )
+            )
+            if _rowcount(updated) != 1:
+                raise _Fenced
+            return True
+
+        return self._run_fenced(operation)
 
     # -- legacy closeout ---------------------------------------------------------------
 

@@ -6,7 +6,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query, status
 from nervos_core.application.model_providers import ModelProviderCatalog, UnknownModelProvider
-from nervos_core.application.trusted_chat import CHAT_DEFINITION_ID
+from nervos_core.application.trusted_chat import CHAT_DEFINITION_ID, CHAT_TOOL_DEFINITION_ID
 from nervos_core.domain.agents import AgentDefinitionId, validate_model_provider
 
 from nervos_api.api.dependencies import (
@@ -30,16 +30,23 @@ PageLimit = Annotated[int, Query(ge=1, le=50)]
 BeforeId = Annotated[int | None, Query(gt=0)]
 
 
+# The exact trusted definition identities this milestone exposes. It is an allow-list of exact
+# identities, never a version range and never "anything the resolver happens to know": a definition
+# registered by a later milestone does not become creatable here by being registered. D4 admits the
+# tool-enabled Chat definition beside the unchanged tool-free one.
+TRUSTED_DEFINITION_IDS = frozenset({CHAT_DEFINITION_ID, CHAT_TOOL_DEFINITION_ID})
+
+
 def require_trusted_definition(agent_key: str, agent_definition_version: str) -> AgentDefinitionId:
     """Return the exact trusted definition identity, or fail closed.
 
     A malformed identity raises `InvalidAgentDefinitionId`, which maps to a safe 422. A
-    structurally valid identity outside this milestone's single trusted definition is rejected
-    with `UnsupportedB3AgentDefinition`, so a definition registered by a later milestone can
-    never become creatable here simply because the resolver knows about it.
+    structurally valid identity outside this milestone's trusted set is rejected with
+    `UnsupportedB3AgentDefinition`, so a definition registered by a later milestone can never
+    become creatable here simply because the resolver knows about it.
     """
     requested = AgentDefinitionId(agent_key, agent_definition_version)
-    if requested != CHAT_DEFINITION_ID:
+    if requested not in TRUSTED_DEFINITION_IDS:
         raise UnsupportedB3AgentDefinition
     return requested
 

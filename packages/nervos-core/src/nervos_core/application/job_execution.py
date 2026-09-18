@@ -246,6 +246,17 @@ class JobExecutionPersistence(Protocol):
         now: datetime,
     ) -> FailureOutcome: ...
 
+    def persist_attempt_usage(
+        self, claim: ClaimedAttempt, *, usage: ModelUsage, now: datetime
+    ) -> bool:
+        """Record the aggregate usage of a multi-turn Attempt.
+
+        It is on this protocol because it is a durable write the Worker performs against the same
+        Job/Attempt rows, fenced the same way. It is *not* the Run's usage: a Run still reports the
+        usage of its Attempt at terminalization, exactly as Stage C defined.
+        """
+        ...
+
 
 class JobExecutionService:
     """Execute one claimed Job end to end without ever re-invoking a model."""
@@ -337,7 +348,7 @@ class JobExecutionService:
             # Job for it. This is unreachable while claim eligibility filters on the same
             # configured provider set, so it is a defensive strand rather than a policy.
             return None
-        execution = asyncio.create_task(self._executor.execute(run, completion))
+        execution = asyncio.create_task(self._executor.execute(run, completion, claim))
         watch = asyncio.create_task(lost.wait())
         # The clock starts here, immediately around the provider invocation and after the
         # durable execution-start commit, so queue time, claim time, a scheduled retry wait,

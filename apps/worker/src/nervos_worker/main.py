@@ -21,6 +21,7 @@ from nervos_worker.app import (
     SchemaRevisionMismatch,
     close_worker,
     create_worker,
+    reconcile_tool_definitions,
     require_schema_revision,
     utc_now,
     write_ready_marker,
@@ -106,6 +107,9 @@ async def run_worker(settings: WorkerSettings) -> int:
     installed = install_stop_handlers(asyncio.get_running_loop(), stop)
     try:
         revision = require_schema_revision(composition.engine)
+        # The built-in tool definitions become durable only after the schema has been validated, so
+        # a Worker that refuses to start cannot have written first.
+        reconcile_tool_definitions(composition.engine)
         providers = composition.worker.provider_ids
         logger.info(
             "worker_started worker_id=%s schema_revision=%s concurrency=%s max_active=%s",

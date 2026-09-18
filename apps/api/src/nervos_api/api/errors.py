@@ -76,7 +76,7 @@ AGENT_ERROR_MAP: dict[type[Exception], tuple[int, str, str]] = {
     UnsupportedB3AgentDefinition: (
         422,
         "unsupported_agent_definition",
-        "This NervOS milestone only supports the trusted nervos.chat version 1 definition.",
+        "This NervOS milestone only supports the trusted nervos.chat versions 1 and 2.",
     ),
     UnknownAgentDefinition: (
         422,

@@ -473,94 +473,109 @@ class SqlAlchemyToolPermissionEvaluator:
         durable rows. Fail-closed: deny unless ALL checks pass.
         """
         with self._engine.connect() as conn:
-            # Check 1: Run exists and derive Agent Instance + cutoff from it
-            run = conn.execute(
-                select(
-                    RunRecord.agent_instance_id,
-                    RunRecord.tool_grant_cutoff_id,
-                ).where(RunRecord.id == run_id)
-            ).one_or_none()
+            return evaluate_permission_on_connection(
+                conn, run_id=run_id, tool_definition_id=tool_definition_id
+            )
 
-            if run is None:
-                return PermissionDecision(allowed=False, reason=PermissionDenialReason.NOT_GRANTED)
 
-            agent_instance_id = run.agent_instance_id
-            run_tool_grant_cutoff_id = run.tool_grant_cutoff_id
+def evaluate_permission_on_connection(
+    conn: Connection,
+    *,
+    run_id: int,
+    tool_definition_id: int,
+) -> PermissionDecision:
+    """Evaluate the fail-closed permission predicate against an already-open connection.
 
-            # Check 2: Grant exists for (run's agent, tool)
-            grant = conn.execute(
-                select(
-                    AgentToolGrantRecord.id,
-                    AgentToolGrantRecord.reviewed_fingerprint,
-                ).where(
-                    AgentToolGrantRecord.agent_instance_id == agent_instance_id,
-                    AgentToolGrantRecord.tool_definition_id == tool_definition_id,
-                )
-            ).one_or_none()
+    This is the one implementation of the D2 call-time decision. It is exposed as a
+    connection-scoped function rather than duplicated because Stage D's start boundary must
+    re-evaluate the *live* predicate inside the same transaction that commits `started` -- and a
+    second copy of these seven checks would be a second authority, free to drift from this one.
 
-            if grant is None:
-                return PermissionDecision(allowed=False, reason=PermissionDenialReason.NOT_GRANTED)
+    It reads only, writes nothing, and takes no lock of its own; the caller supplies the
+    connection and therefore decides the transaction it participates in.
+    """
+    # Check 1: Run exists and derive Agent Instance + cutoff from it
+    run = conn.execute(
+        select(
+            RunRecord.agent_instance_id,
+            RunRecord.tool_grant_cutoff_id,
+        ).where(RunRecord.id == run_id)
+    ).one_or_none()
 
-            # Check 3: Grant id <= run's durable cutoff
-            if grant.id > run_tool_grant_cutoff_id:
-                return PermissionDecision(
-                    allowed=False, reason=PermissionDenialReason.GRANT_AFTER_RUN_CUTOFF
-                )
+    if run is None:
+        return PermissionDecision(allowed=False, reason=PermissionDenialReason.NOT_GRANTED)
 
-            # Check 4: Definition exists and load current fingerprint from DB
-            definition = conn.execute(
-                select(
-                    ToolDefinitionRecord.source_kind,
-                    ToolDefinitionRecord.source_id,
-                    ToolDefinitionRecord.status,
-                    ToolDefinitionRecord.fingerprint,
-                ).where(ToolDefinitionRecord.id == tool_definition_id)
-            ).one_or_none()
+    agent_instance_id = run.agent_instance_id
+    run_tool_grant_cutoff_id = run.tool_grant_cutoff_id
 
-            if definition is None or definition.status != "available":
-                return PermissionDecision(
-                    allowed=False, reason=PermissionDenialReason.DEFINITION_UNAVAILABLE
-                )
+    # Check 2: Grant exists for (run's agent, tool)
+    grant = conn.execute(
+        select(
+            AgentToolGrantRecord.id,
+            AgentToolGrantRecord.reviewed_fingerprint,
+        ).where(
+            AgentToolGrantRecord.agent_instance_id == agent_instance_id,
+            AgentToolGrantRecord.tool_definition_id == tool_definition_id,
+        )
+    ).one_or_none()
 
-            # Check 5: Fingerprint matches (both from durable rows)
-            if grant.reviewed_fingerprint != definition.fingerprint:
-                return PermissionDecision(
-                    allowed=False, reason=PermissionDenialReason.DEFINITION_CHANGED
-                )
+    if grant is None:
+        return PermissionDecision(allowed=False, reason=PermissionDenialReason.NOT_GRANTED)
 
-            # Check 6: For MCP, connection exists and enabled
-            if definition.source_kind == "mcp":
-                if definition.source_id is None:
-                    return PermissionDecision(
-                        allowed=False, reason=PermissionDenialReason.DEFINITION_UNAVAILABLE
-                    )
-                connection = conn.execute(
-                    select(McpConnectionRecord.enabled, McpConnectionRecord.owner_user_id).where(
-                        McpConnectionRecord.id == definition.source_id
-                    )
-                ).one_or_none()
+    # Check 3: Grant id <= run's durable cutoff
+    if grant.id > run_tool_grant_cutoff_id:
+        return PermissionDecision(
+            allowed=False, reason=PermissionDenialReason.GRANT_AFTER_RUN_CUTOFF
+        )
 
-                if connection is None or not connection.enabled:
-                    return PermissionDecision(
-                        allowed=False, reason=PermissionDenialReason.CONNECTION_DISABLED
-                    )
+    # Check 4: Definition exists and load current fingerprint from DB
+    definition = conn.execute(
+        select(
+            ToolDefinitionRecord.source_kind,
+            ToolDefinitionRecord.source_id,
+            ToolDefinitionRecord.status,
+            ToolDefinitionRecord.fingerprint,
+        ).where(ToolDefinitionRecord.id == tool_definition_id)
+    ).one_or_none()
 
-                # Check 7: MCP connection owner matches Agent Instance owner
-                agent = conn.execute(
-                    select(AgentInstanceRecord.owner_user_id).where(
-                        AgentInstanceRecord.id == agent_instance_id
-                    )
-                ).one_or_none()
+    if definition is None or definition.status != "available":
+        return PermissionDecision(
+            allowed=False, reason=PermissionDenialReason.DEFINITION_UNAVAILABLE
+        )
 
-                if agent is None:
-                    return PermissionDecision(
-                        allowed=False, reason=PermissionDenialReason.NOT_GRANTED
-                    )
+    # Check 5: Fingerprint matches (both from durable rows)
+    if grant.reviewed_fingerprint != definition.fingerprint:
+        return PermissionDecision(allowed=False, reason=PermissionDenialReason.DEFINITION_CHANGED)
 
-                if connection.owner_user_id != agent.owner_user_id:
-                    return PermissionDecision(
-                        allowed=False, reason=PermissionDenialReason.OWNER_MISMATCH
-                    )
+    # Check 6: For MCP, connection exists and enabled
+    if definition.source_kind == "mcp":
+        if definition.source_id is None:
+            return PermissionDecision(
+                allowed=False, reason=PermissionDenialReason.DEFINITION_UNAVAILABLE
+            )
+        connection_record = conn.execute(
+            select(McpConnectionRecord.enabled, McpConnectionRecord.owner_user_id).where(
+                McpConnectionRecord.id == definition.source_id
+            )
+        ).one_or_none()
 
-            # All checks passed
-            return PermissionDecision(allowed=True)
+        if connection_record is None or not connection_record.enabled:
+            return PermissionDecision(
+                allowed=False, reason=PermissionDenialReason.CONNECTION_DISABLED
+            )
+
+        # Check 7: MCP connection owner matches Agent Instance owner
+        agent = conn.execute(
+            select(AgentInstanceRecord.owner_user_id).where(
+                AgentInstanceRecord.id == agent_instance_id
+            )
+        ).one_or_none()
+
+        if agent is None:
+            return PermissionDecision(allowed=False, reason=PermissionDenialReason.NOT_GRANTED)
+
+        if connection_record.owner_user_id != agent.owner_user_id:
+            return PermissionDecision(allowed=False, reason=PermissionDenialReason.OWNER_MISMATCH)
+
+    # All checks passed
+    return PermissionDecision(allowed=True)
