@@ -64,6 +64,18 @@ class RunStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+# Frozen Stage D execution bounds. The database enforces the same ranges (D1's `runs` CHECK), but
+# they are stated here too so a Run with an out-of-range limit is refused at construction rather
+# than surfacing later as an `IntegrityError`. `max_consecutive_tool_failures` is a fixed system
+# constant rather than a range: it is the point at which a model repeatedly asking for tools it
+# cannot use stops being a conversation and becomes a loop, and nothing configures it.
+MAX_MODEL_CALLS_BOUNDS = (1, 16)
+MAX_TOOL_CALLS_BOUNDS = (0, 16)
+TOOL_TIMEOUT_MS_BOUNDS = (1000, 300_000)
+TOOL_RESULT_MAX_BYTES_BOUNDS = (1024, 1_048_576)
+MAX_CONSECUTIVE_TOOL_FAILURES = 3
+
+
 @dataclass(frozen=True, slots=True)
 class RunLimits:
     input_max_bytes: int = 8000
@@ -73,12 +85,34 @@ class RunLimits:
     provider_timeout_ms: int = 60000
     max_output_tokens: int = 1024
     max_model_calls: int = 1
+    # Tool budgets. `max_tool_calls = 0` is the tool-free Run: it is not a budget of zero tools but
+    # the absence of the tool loop, so no catalog is assembled, no cutoff is snapshotted, and every
+    # Stage C path is byte-for-byte unchanged.
+    max_tool_calls: int = 0
+    tool_timeout_ms: int = 30_000
+    tool_result_max_bytes: int = 65_536
+    max_consecutive_tool_failures: int = MAX_CONSECUTIVE_TOOL_FAILURES
 
     def __post_init__(self) -> None:
         if any(value <= 0 for value in self.values()):
             raise InvalidRun("execution limits must be positive")
+        for name, (low, high) in (
+            ("max_model_calls", MAX_MODEL_CALLS_BOUNDS),
+            ("max_tool_calls", MAX_TOOL_CALLS_BOUNDS),
+            ("tool_timeout_ms", TOOL_TIMEOUT_MS_BOUNDS),
+            ("tool_result_max_bytes", TOOL_RESULT_MAX_BYTES_BOUNDS),
+        ):
+            if not low <= getattr(self, name) <= high:
+                raise InvalidRun(f"{name} is outside its frozen bounds")
+        if self.max_consecutive_tool_failures != MAX_CONSECUTIVE_TOOL_FAILURES:
+            raise InvalidRun("max_consecutive_tool_failures is a frozen constant")
 
     def values(self) -> tuple[int, ...]:
+        """Return the limits that must all be strictly positive.
+
+        `max_tool_calls` is deliberately absent: zero is not a too-small budget, it is the absence
+        of the tool loop, so it is a legal value rather than a boundary case of this check.
+        """
         return (
             self.input_max_bytes,
             self.input_max_code_points,
@@ -87,10 +121,17 @@ class RunLimits:
             self.provider_timeout_ms,
             self.max_output_tokens,
             self.max_model_calls,
+            self.tool_timeout_ms,
+            self.tool_result_max_bytes,
+            self.max_consecutive_tool_failures,
         )
 
 
 STAGE_B_LIMITS = RunLimits()
+# The tool-enabled Stage D limits. `max_model_calls` stays inside the frozen domain bounds rather
+# than carrying hidden retry headroom: the in-Attempt rate-limit retries spend this same budget, so
+# raising the snapshot would be a second, silent retry allowance.
+TOOL_ENABLED_LIMITS = RunLimits(max_model_calls=8, max_tool_calls=8)
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,10 +214,19 @@ class Run:
     # value, which is the whole reason the phase is exposed at all.
     execution_phase: JobStatus | None = None
     retry_available_at: datetime | None = None
+    # The highest grant id this Run may ever honour, snapshotted once at submission. A capability
+    # granted after the Run was submitted has a higher id and can never be acquired by it. It is
+    # `0` for a tool-free Run, which is why no definition needs a special case: a budget of zero
+    # tools snapshots nothing, and D2's evaluator then denies every tool against the default `0`.
+    tool_grant_cutoff_id: int = 0
 
     def __post_init__(self) -> None:
         if self.id <= 0 or self.agent_instance_id <= 0:
             raise InvalidRun
+        if self.tool_grant_cutoff_id < 0:
+            raise InvalidRun("invalid grant cutoff")
+        if self.limits.max_tool_calls == 0 and self.tool_grant_cutoff_id != 0:
+            raise InvalidRun("a tool-free run cannot carry a grant cutoff")
         validate_input_text(self.input_text, self.limits)
         created = _utc(self.created_at)
         started = _utc(self.started_at) if self.started_at else None

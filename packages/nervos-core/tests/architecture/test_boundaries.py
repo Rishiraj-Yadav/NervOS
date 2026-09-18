@@ -734,26 +734,104 @@ def test_the_tool_registry_performs_no_execution_or_permission_work() -> None:
         assert forbidden not in text, forbidden
 
 
-def test_the_tool_layer_is_not_reachable_from_the_model_port() -> None:
-    """D3 describes tools; it does not let a model ask for one. That is D4, and it has not
-    started."""
+def test_the_tool_layer_is_not_executed_from_the_model_port() -> None:
+    """The model port carries tool calls; it never acts on them.
+
+    D3 asserted that no tool vocabulary appeared here at all. D4 legitimately introduces the
+    provider-neutral carriers, so the guard moves to what must stay true afterwards: the port
+    describes what a model asked for and knows nothing about descriptors, grants, executors,
+    registries, or durable invocation state. Deciding and doing belong to the loop.
+    """
     text = (CORE_APPLICATION / "model_completion.py").read_text(encoding="utf-8")
-    for forbidden in ("ToolCall", "tool_calls", "TOOL_USE", "tool_use", "ToolDescriptor"):
+    for forbidden in (
+        "ToolDescriptor",
+        "ToolExecutor",
+        "ToolRegistry",
+        "ToolSource",
+        "check_permission",
+        "tool_invocations",
+        "ToolDefinition",
+    ):
         assert forbidden not in text, forbidden
 
 
-def test_the_built_in_definitions_are_not_wired_into_a_composition_root() -> None:
-    """D3 has no tool execution path, so nothing may reconcile definitions at startup.
+def test_the_built_in_reconciliation_is_wired_only_into_the_worker() -> None:
+    """D4 wires the finished D3 registration service, and only where execution lives.
 
-    D4 wires the finished service; wiring it earlier would add a database write to Worker startup
-    for a capability no user can reach yet.
+    The control plane still cannot reconcile definitions: doing so would add a database write to
+    API startup for a capability the API does not execute, and would let a request path reach into
+    the execution plane's configuration.
     """
-    for root in (API_SOURCE, WORKER_SOURCE):
-        for path in python_files(root):
-            text = path.read_text(encoding="utf-8")
-            for forbidden in (
-                "reconcile_builtin_definitions",
-                "create_builtin_tool_registry",
-                "BuiltinToolExecutor",
-            ):
-                assert forbidden not in text, (path, forbidden)
+    for path in python_files(API_SOURCE):
+        text = path.read_text(encoding="utf-8")
+        for forbidden in (
+            "reconcile_builtin_definitions",
+            "create_builtin_tool_registry",
+            "BuiltinToolExecutor",
+            "ToolLoop",
+            "tool_invocations",
+        ):
+            assert forbidden not in text, (path, forbidden)
+
+
+def test_the_tool_loop_never_opens_a_transaction_across_an_await() -> None:
+    """A tool call, a model call, and a retry wait are all outside any database transaction.
+
+    Holding a connection across a provider await would pin the single SQLite writer for the whole
+    duration of a network call, and would make a crash mid-await indistinguishable from a crash
+    mid-write. D1's durable record of intent exists precisely so no transaction has to span it.
+    """
+    text = (CORE_APPLICATION / "tool_loop.py").read_text(encoding="utf-8")
+    for forbidden in ("BEGIN IMMEDIATE", "begin_immediate", "session", "Session", "Engine"):
+        assert forbidden not in text, forbidden
+    # The loop's only durable writes go through injected ports, never through SQLAlchemy directly.
+    assert "sqlalchemy" not in text
+
+
+def test_the_tool_loop_module_imports_no_dangerous_or_provider_specific_module() -> None:
+    """The loop orchestrates; it does not reach for the operating system or a provider SDK."""
+    forbidden = (
+        "subprocess",
+        "socket",
+        "shutil",
+        "urllib",
+        "httpx",
+        "requests",
+        "ctypes",
+        "multiprocessing",
+        "pathlib",
+        "openai",
+        "anthropic",
+        "mcp",
+    )
+    for name in ("tool_loop.py", "tool_catalog.py", "tool_invocations.py"):
+        imported = imported_modules(CORE_APPLICATION / name)
+        for module in forbidden:
+            assert module not in imported, (name, module)
+
+
+def test_the_tool_catalog_is_grant_filtered_and_never_a_permission_shortcut() -> None:
+    """Catalog membership is presentation, never authority.
+
+    The catalog must consult the D2 evaluator for every candidate, and the loop must still
+    re-authorize each call before dispatch. A catalog that trusted itself, or a loop that trusted
+    the catalog, would be a second authority for the same decision.
+    """
+    catalog = (CORE_APPLICATION / "tool_catalog.py").read_text(encoding="utf-8")
+    loop = (CORE_APPLICATION / "tool_loop.py").read_text(encoding="utf-8")
+    assert "check_permission" in catalog
+    assert "check_permission" in loop
+    for forbidden in ("grant_tool", "revoke_tool", "INSERT", "insert("):
+        assert forbidden not in catalog, forbidden
+
+
+def test_the_tool_loop_emits_no_run_event() -> None:
+    """D4 keeps the public Run timeline free of tool facts.
+
+    `RunEventResponse` projects `event_type` and `message` with no type filter, so emitting a tool
+    event here would publish it through the already accepted C7 endpoint before D6 designs that
+    surface. `tool_invocations` is D4's durable tool record instead.
+    """
+    loop = (CORE_APPLICATION / "tool_loop.py").read_text(encoding="utf-8")
+    for forbidden in ("RunEventType", "run_event", "_append_event", "RunEvent"):
+        assert forbidden not in loop, forbidden

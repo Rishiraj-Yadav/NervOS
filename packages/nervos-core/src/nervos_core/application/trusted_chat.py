@@ -34,12 +34,68 @@ _STOP_FAILURE_CODES: dict[StopOutcome, str] = {
 }
 
 CHAT_DEFINITION_ID = AgentDefinitionId("nervos.chat", "1")
+# The tool-enabled version of the same agent. It is a new exact identity rather than a mutation of
+# chat@1, because "this agent may now call tools" is a behaviourally meaningful change to what a Run
+# of this definition can do, and a version is how Stage B already freezes such a change.
+CHAT_TOOL_DEFINITION_ID = AgentDefinitionId("nervos.chat", "2")
 
 # Fixed version-1 behavior. Any behaviorally meaningful change requires a new definition
 # version rather than silently mutating this text.
 NERVOS_CHAT_SYSTEM_INSTRUCTION = (
     "You are a helpful assistant. Answer the user's request directly and accurately."
 )
+# Fixed version-2 behavior, reviewed as part of the D4 authorization.
+NERVOS_TOOL_CHAT_SYSTEM_INSTRUCTION = (
+    "You are a helpful assistant. You may call provided tools to answer accurately. "
+    "Use a tool only when it is needed, and answer in your own words once you have what you need."
+)
+
+
+def verified_identity(response: ModelResponse, run: Run) -> None:
+    """Fail closed unless the response came from the provider and model this Run snapshotted."""
+    if response.model_provider != run.model_provider:
+        raise ModelResponseInvalidError
+    if is_blank_text(response.model_name):
+        raise ModelResponseInvalidError
+
+
+def validated_final_output(text: str, run: Run) -> str:
+    """Return the accepted final answer, or fail closed.
+
+    Shared by both trusted Chat definitions: a final answer is a final answer whether or not the
+    Run was allowed to use tools.
+    """
+    if is_blank_text(text) or "\x00" in text:
+        raise ModelResponseInvalidError
+    limits = run.limits
+    if len(text) > limits.output_max_code_points or len(text.encode("utf-8")) > (
+        limits.output_max_bytes
+    ):
+        raise ModelOutputTooLargeError
+    return text
+
+
+def final_chat_outcome(response: ModelResponse, run: Run, usage: ModelUsage | None) -> ChatOutcome:
+    """Validate one concluding model turn into the Run's final answer, or fail closed.
+
+    The single place that decides what a final turn may be: the provider and model must match the
+    Run's snapshot, the turn must carry no tool calls, and its termination must be a real
+    conclusion. Every other normalized termination becomes a stable safe failure with no output.
+    """
+    verified_identity(response, run)
+    if response.tool_calls:
+        raise ModelResponseInvalidError
+    if response.finish_reason is None:
+        raise ModelResponseInvalidError
+    failure_code = _STOP_FAILURE_CODES.get(response.finish_reason)
+    if failure_code is not None:
+        raise ModelProviderError(failure_code, usage=usage)
+    finish_reason = _STOP_OUTCOMES.get(response.finish_reason)
+    if finish_reason is None:
+        raise ModelResponseInvalidError
+    return ChatOutcome(
+        validated_final_output(response.text, run), finish_reason, usage or ModelUsage()
+    )
 
 
 class UnknownAgentHandler(LookupError):
@@ -84,35 +140,7 @@ class NervosChatHandler:
             run.limits.provider_timeout_ms,
         )
         response = await completion.complete(request)
-        self._verify_identity(response, run)
-        if response.finish_reason is None:
-            raise ModelResponseInvalidError
-        failure_code = _STOP_FAILURE_CODES.get(response.finish_reason)
-        if failure_code is not None:
-            raise ModelProviderError(failure_code, usage=response.usage)
-        finish_reason = _STOP_OUTCOMES.get(response.finish_reason)
-        if finish_reason is None:
-            raise ModelResponseInvalidError
-        output_text = self._validated_output(response.text, run)
-        return ChatOutcome(output_text, finish_reason, response.usage or ModelUsage())
-
-    @staticmethod
-    def _verify_identity(response: ModelResponse, run: Run) -> None:
-        if response.model_provider != run.model_provider:
-            raise ModelResponseInvalidError
-        if is_blank_text(response.model_name):
-            raise ModelResponseInvalidError
-
-    @staticmethod
-    def _validated_output(text: str, run: Run) -> str:
-        if is_blank_text(text) or "\x00" in text:
-            raise ModelResponseInvalidError
-        limits = run.limits
-        if len(text) > limits.output_max_code_points or len(text.encode("utf-8")) > (
-            limits.output_max_bytes
-        ):
-            raise ModelOutputTooLargeError
-        return text
+        return final_chat_outcome(response, run, response.usage)
 
 
 class BuiltInTrustedAgentHandlerRegistry:

@@ -24,6 +24,7 @@ from nervos_core.domain.agents import (
 )
 from nervos_core.domain.runs import (
     STAGE_B_LIMITS,
+    TOOL_ENABLED_LIMITS,
     InvalidRun,
     ModelUsage,
     Run,
@@ -70,9 +71,47 @@ def test_builtin_definition_requires_exact_version_and_has_b0_limits() -> None:
     registry = create_builtin_definition_registry()
     definition = registry.resolve(AgentDefinitionId("nervos.chat", "1"))
     assert definition.limits == STAGE_B_LIMITS
-    assert STAGE_B_LIMITS.values() == (8000, 4000, 32000, 16000, 60000, 1024, 1)
+    # The tool-free Chat definition keeps every Stage B limit unchanged, including the zero tool
+    # budget that makes it tool-free in the first place.
+    assert STAGE_B_LIMITS.values() == (
+        8000,
+        4000,
+        32000,
+        16000,
+        60000,
+        1024,
+        1,
+        30000,
+        65536,
+        3,
+    )
+    assert STAGE_B_LIMITS.max_tool_calls == 0
+
+
+def test_the_tool_enabled_definition_has_the_frozen_stage_d_limits() -> None:
+    """`nervos.chat@2` is a new exact identity, not a mutated `nervos.chat@1`.
+
+    `max_model_calls` stays inside the frozen 1..16 domain bound rather than carrying headroom for
+    the in-Attempt retries: those retries spend this same budget, so a larger snapshot would be a
+    second, silent retry allowance.
+    """
+    registry = create_builtin_definition_registry()
+    definition = registry.resolve(AgentDefinitionId("nervos.chat", "2"))
+    assert definition.limits == TOOL_ENABLED_LIMITS
+    assert definition.limits.max_model_calls == 8
+    assert definition.limits.max_tool_calls == 8
+    assert definition.limits.tool_timeout_ms == 30000
+    assert definition.limits.tool_result_max_bytes == 65536
+    assert definition.limits.max_consecutive_tool_failures == 3
+
+
+def test_an_unknown_definition_version_is_still_rejected() -> None:
+    """Widening the trusted set by one exact identity must not widen it by a version range."""
+    registry = create_builtin_definition_registry()
     with pytest.raises(UnknownAgentDefinition):
-        registry.resolve(AgentDefinitionId("nervos.chat", "2"))
+        registry.resolve(AgentDefinitionId("nervos.chat", "3"))
+    with pytest.raises(UnknownAgentDefinition):
+        registry.resolve(AgentDefinitionId("nervos.other", "1"))
 
 
 def test_duplicate_definition_is_rejected() -> None:

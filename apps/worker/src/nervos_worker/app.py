@@ -12,14 +12,32 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from nervos_core.application.builtin_tools import (
+    BUILTIN_SOURCE_REF,
+    builtin_tool_specs,
+    create_builtin_tool_registry,
+    reconcile_builtin_definitions,
+)
 from nervos_core.application.job_execution import JobExecutionService
 from nervos_core.application.lease_reclamation import LeaseReclaimer
 from nervos_core.application.model_completion import ModelCompletion
 from nervos_core.application.retry_policy import PRODUCTION_RETRY_POLICY
 from nervos_core.application.run_execution import RunExecutor
-from nervos_core.application.trusted_chat import create_builtin_handler_registry
+from nervos_core.application.tool_loop import ToolLoop
+from nervos_core.application.trusted_chat import (
+    NERVOS_TOOL_CHAT_SYSTEM_INSTRUCTION,
+    create_builtin_handler_registry,
+)
+from nervos_core.domain.tools import ToolDescriptor
 from nervos_core.infrastructure.database import create_session_factory, create_sqlite_engine
 from nervos_core.infrastructure.database.jobs import SqlAlchemyJobExecutionPersistence
+from nervos_core.infrastructure.database.tool_definitions import (
+    SqlAlchemyToolDefinitionPersistence,
+)
+from nervos_core.infrastructure.database.tool_invocations import (
+    SqlAlchemyToolInvocationPersistence,
+)
+from nervos_core.infrastructure.database.tools import SqlAlchemyToolPermissionEvaluator
 from nervos_models import (
     ModelProviderComposition,
     close_model_providers,
@@ -115,9 +133,19 @@ def create_worker(settings: WorkerSettings | None = None) -> WorkerComposition:
     )
     providers = compose_model_providers(anthropic_secret, openai_secret)
     completions = resolve_completions(providers)
+    tool_definitions = SqlAlchemyToolDefinitionPersistence(engine)
+    tool_loop = ToolLoop(
+        registry=create_builtin_tool_registry(tool_definitions, clock=utc_now),
+        source_ref=BUILTIN_SOURCE_REF,
+        authorize=SqlAlchemyToolPermissionEvaluator(engine),
+        invocations=SqlAlchemyToolInvocationPersistence(engine),
+        usage=persistence,
+        system_instruction=NERVOS_TOOL_CHAT_SYSTEM_INSTRUCTION,
+        clock=utc_now,
+    )
     execution = JobExecutionService(
         persistence,
-        RunExecutor(create_builtin_handler_registry()),
+        RunExecutor(create_builtin_handler_registry(), tool_loop=tool_loop),
         completions,
         utc_now,
         # The retry schedule is injected rather than reached for globally, so the Worker's
@@ -157,6 +185,24 @@ async def close_worker(composition: WorkerComposition) -> None:
     """Close owned provider clients and dispose the engine."""
     await close_model_providers(composition.providers)
     composition.engine.dispose()
+
+
+def reconcile_tool_definitions(engine: Engine) -> tuple[ToolDescriptor, ...]:
+    """Make the built-in tool definitions durable, and return their descriptors.
+
+    This runs *after* the schema revision has been validated, never during composition: a Worker
+    pointed at an unrecognized schema must be refused before it writes anything, and composing a
+    Worker must stay free of database writes so it can be built to inspect configuration.
+
+    Reconciling grants nothing. It only ensures the tools D4 can execute have durable rows; a
+    definition becomes usable solely through an explicit grant, and D2's live predicate still
+    decides every call.
+    """
+    return reconcile_builtin_definitions(
+        SqlAlchemyToolDefinitionPersistence(engine),
+        specs=builtin_tool_specs(clock=utc_now),
+        now=utc_now(),
+    )
 
 
 def write_ready_marker(path: Path, *, revision: str, provider_ids: tuple[str, ...]) -> None:

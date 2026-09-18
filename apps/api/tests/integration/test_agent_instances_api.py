@@ -111,7 +111,7 @@ def test_create_returns_a_safe_flattened_instance(owner_client: TestClient) -> N
 @pytest.mark.parametrize(
     ("agent_key", "version"),
     [
-        ("nervos.chat", "2"),
+        ("nervos.chat", "3"),
         ("nervos.chat", "latest"),
         ("other.agent", "1"),
         ("nervos.other", "1"),
@@ -129,6 +129,25 @@ def test_creation_rejects_any_definition_outside_this_milestone(
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "unsupported_agent_definition"
     assert owner_client.get(INSTANCES, headers=ORIGIN).json()["items"] == []
+
+
+def test_creation_accepts_the_exact_tool_enabled_definition(owner_client: TestClient) -> None:
+    """D4 admits one more exact identity -- and only that identity.
+
+    The gate is an allow-list of two exact pairs rather than a version range, so a definition
+    registered by a later milestone still cannot become creatable here by being registered. The
+    neighbouring rejection test proves the other half of that same rule.
+    """
+    response = owner_client.post(
+        INSTANCES,
+        json=instance_body(agent_key="nervos.chat", agent_definition_version="2"),
+        headers=ORIGIN,
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["agent_key"] == "nervos.chat"
+    assert body["agent_definition_version"] == "2"
 
 
 @pytest.mark.parametrize(

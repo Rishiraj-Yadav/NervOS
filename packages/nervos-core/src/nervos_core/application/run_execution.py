@@ -21,6 +21,7 @@ from nervos_core.application.model_completion import (
     ModelCompletion,
     ModelProviderError,
 )
+from nervos_core.application.tool_invocations import ClaimHandle
 from nervos_core.application.trusted_chat import ChatOutcome, TrustedAgentHandlerResolver
 from nervos_core.domain.agents import AgentDefinitionId
 from nervos_core.domain.runs import ModelUsage, Run
@@ -77,6 +78,20 @@ class ExecutionOutcome:
             raise ValueError("failed outcome requires a safe normalized error")
 
 
+class ToolLoopHandler(Protocol):
+    """The tool-enabled execution shape, which needs the claim its durable writes are fenced on.
+
+    Declared as a separate protocol rather than folded into :class:`TrustedAgentHandler` because the
+    tool loop is the only handler that writes durable state, and widening the existing protocol
+    would force every tool-free handler to accept an authority it must never use. The claim is typed
+    structurally so this module depends on no orchestration module.
+    """
+
+    async def run(
+        self, completion: ModelCompletion, run: Run, claim: ClaimHandle, elapsed_ms: int
+    ) -> ChatOutcome: ...
+
+
 class RunExecutor:
     """Execute one trusted Run with exactly one bounded model request."""
 
@@ -84,23 +99,28 @@ class RunExecutor:
         self,
         handlers: TrustedAgentHandlerResolver,
         monotonic: MonotonicClock = system_monotonic_nanoseconds,
+        tool_loop: ToolLoopHandler | None = None,
     ) -> None:
         self._handlers = handlers
         self._monotonic = monotonic
+        self._tool_loop = tool_loop
 
-    async def execute(self, run: Run, completion: ModelCompletion) -> ExecutionOutcome:
+    async def execute(
+        self, run: Run, completion: ModelCompletion, claim: ClaimHandle | None = None
+    ) -> ExecutionOutcome:
         """Run one bounded provider call and normalize its result or failure.
 
         Every normalized provider failure — including the timeout wrapper — becomes a frozen
         `failed` outcome rather than an exception, exactly as the awaited coordinator behaved.
+
+        A Run whose snapshot allows tools is dispatched to the tool loop, which performs its own
+        provider calls under the same outer deadline. A Run whose snapshot allows none takes the
+        unchanged single-call path, so `nervos.chat@1` behaves exactly as it did in Stage B/C.
         """
-        handler = self._handlers.resolve(
-            AgentDefinitionId(run.agent_key, run.agent_definition_version)
-        )
         start = self._monotonic()
         try:
             async with asyncio.timeout(run.limits.provider_timeout_ms / 1000):
-                outcome: ChatOutcome = await handler.run(completion, run, 0)
+                outcome: ChatOutcome = await self._invoke(run, completion, claim)
         except TimeoutError:
             return self._failed(ModelProviderError(MODEL_TIMED_OUT), start)
         except ModelProviderError as error:
@@ -116,6 +136,24 @@ class RunExecutor:
             error_code=None,
             error_message=None,
         )
+
+    async def _invoke(
+        self, run: Run, completion: ModelCompletion, claim: ClaimHandle | None
+    ) -> ChatOutcome:
+        """Resolve the one handler this Run's snapshot selects.
+
+        A tool-enabled Run with no claim is a routing defect, not a provider error, so it fails
+        closed as an internal execution error rather than silently degrading to a single call the
+        Run never authorized.
+        """
+        if run.limits.max_tool_calls <= 0:
+            handler = self._handlers.resolve(
+                AgentDefinitionId(run.agent_key, run.agent_definition_version)
+            )
+            return await handler.run(completion, run, 0)
+        if self._tool_loop is None or claim is None:
+            raise ModelProviderError(INTERNAL_EXECUTION_ERROR)
+        return await self._tool_loop.run(completion, run, claim, 0)
 
     def _failed(self, error: ModelProviderError, start: int) -> ExecutionOutcome:
         return ExecutionOutcome(
