@@ -82,16 +82,30 @@ class Ledger:
                 handle.write(f"{tool}:{entry}\n")
 
 
+async def _hold(gate: asyncio.Event | None) -> None:
+    """Hold a tool call open until the test releases it, when a gate was supplied.
+
+    The failure suites need a *deterministic* long call -- one whose completion the test decides,
+    not one that a wall-clock sleep happens to end. A tool that awaits this gate has provably
+    reached the server (its ledger entry is written first) while its reply is still in flight, so a
+    test can cancel, expire, or time out the caller without racing anything. With no gate the call
+    returns immediately, which is every other test's behaviour.
+    """
+    if gate is not None:
+        await gate.wait()
+
+
 class FakeMcpServer(MCPServer[Any]):
     """The two-tool fake server, advertising canonical schemas over the ordinary SDK surface."""
 
-    def __init__(self, ledger: Ledger | None = None) -> None:
+    def __init__(self, ledger: Ledger | None = None, *, gate: asyncio.Event | None = None) -> None:
         super().__init__(
             name="nervos-fake-mcp",
             version="0.1.0",
             description="Deterministic document tools for the NervOS MCP integration tests.",
         )
         self.ledger = ledger if ledger is not None else Ledger()
+        self.gate = gate
         self._register_tools()
 
     async def list_tools(self) -> list[Tool]:
@@ -111,6 +125,7 @@ class FakeMcpServer(MCPServer[Any]):
 
     def _register_tools(self) -> None:
         ledger = self.ledger
+        gate = self.gate
 
         @self.tool(
             name=READ_DOCUMENT,
@@ -123,9 +138,10 @@ class FakeMcpServer(MCPServer[Any]):
                 open_world_hint=False,
             ),
         )
-        def read_document(path: str) -> str:  # pyright: ignore[reportUnusedFunction]
+        async def read_document(path: str) -> str:  # pyright: ignore[reportUnusedFunction]
             """Return deterministic text for a document path."""
             ledger.record(READ_DOCUMENT, path)
+            await _hold(gate)
             return f"document:{path}"
 
         @self.tool(
@@ -139,18 +155,27 @@ class FakeMcpServer(MCPServer[Any]):
                 open_world_hint=False,
             ),
         )
-        def write_document(path: str, content: str) -> str:  # pyright: ignore[reportUnusedFunction]
+        async def write_document(path: str, content: str) -> str:  # pyright: ignore[reportUnusedFunction]
             """Append content to the document ledger and confirm the write."""
             ledger.record(WRITE_DOCUMENT, f"{path}={content}")
+            await _hold(gate)
             return f"wrote:{path}"
 
 
-def build_server(*, ledger_path: str | None = None) -> FakeMcpServer:
-    """Build the fake server, taking the file ledger path from the argument or the environment."""
+def build_server(
+    *, ledger_path: str | None = None, gate: asyncio.Event | None = None
+) -> FakeMcpServer:
+    """Build the fake server, taking the file ledger path from the argument or the environment.
+
+    ``gate`` is the opt-in release seam the failure suites hold a call open with; it defaults to
+    ``None`` so every existing caller keeps an immediately-returning server.
+    """
     if ledger_path is None:
         raw = os.environ.get(LEDGER_PATH_ENV)
         ledger_path = raw if raw else None
-    return FakeMcpServer(Ledger(path=Path(ledger_path) if ledger_path is not None else None))
+    return FakeMcpServer(
+        Ledger(path=Path(ledger_path) if ledger_path is not None else None), gate=gate
+    )
 
 
 def _free_loopback_port() -> int:

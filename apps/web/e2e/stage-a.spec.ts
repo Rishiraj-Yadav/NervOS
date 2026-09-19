@@ -1,6 +1,6 @@
-import { writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 const username = "Stage-A.Admin";
 const canonicalUsername = "stage-a.admin";
@@ -48,6 +48,67 @@ function cancelPrompt(): string {
     );
   }
   return prompt;
+}
+
+// Stage D: the tool-enabled Agent Instance cannot be created through the UI (no definition-version
+// selector exists), and there is no capability-management UI at all, so the seed is split. The
+// browser creates the instance through the same-origin API; the supervisor then inserts the one
+// grant and acknowledges it here. Both are setup, never the behavior under proof -- the Run itself
+// is submitted through the real form, and only what the timeline renders is asserted.
+function toolPrompt(): string {
+  const prompt = process.env.NERVOS_E2E_TOOL_INPUT;
+  if (prompt === undefined || prompt === "") {
+    throw new Error(
+      "NERVOS_E2E_TOOL_INPUT is required; run the journey through scripts/check.py e2e",
+    );
+  }
+  return prompt;
+}
+
+interface ToolAgentSeed {
+  agentInstanceId: number;
+  displayName: string;
+  toolModelName: string;
+}
+
+async function seedToolEnabledAgent(page: Page): Promise<ToolAgentSeed> {
+  const displayName = "E2E Tool Chat";
+  const created = await page.evaluate(async (name) => {
+    const response = await fetch("/api/v1/agent-instances", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agent_key: "nervos.chat",
+        agent_definition_version: "2",
+        display_name: name,
+        model_provider: "anthropic",
+        model_name: "opaque/e2e-model",
+      }),
+    });
+    const body: unknown = await response.json();
+    return { status: response.status, body };
+  }, displayName);
+  if (created.status !== 201 || typeof created.body !== "object" || created.body === null) {
+    throw new Error(`tool-enabled agent creation failed with status ${created.status}`);
+  }
+  const agentInstanceId = (created.body as { id?: unknown }).id;
+  if (typeof agentInstanceId !== "number") {
+    throw new Error("tool-enabled agent creation returned no numeric id");
+  }
+  const ackPath = process.env.NERVOS_E2E_TOOL_GRANT_ACK;
+  if (ackPath === undefined || ackPath === "") {
+    throw new Error(
+      "NERVOS_E2E_TOOL_GRANT_ACK is required; run the journey through scripts/check.py e2e",
+    );
+  }
+  // The supervisor commits the grant and only then writes the acknowledgment, so observing it
+  // proves the Run submitted next will snapshot a cutoff that admits the grant.
+  await expect.poll(() => existsSync(ackPath), { timeout: ASYNC_TIMEOUT }).toBe(true);
+  const toolModelName = readFileSync(ackPath, "utf-8").trim();
+  if (toolModelName === "") {
+    throw new Error("the supervisor seeded the tool grant without reporting a tool name");
+  }
+  return { agentInstanceId, displayName, toolModelName };
 }
 
 test("completes the Stage A setup and authentication journey", async ({ page }) => {
@@ -123,6 +184,9 @@ test("completes the Stage A setup and authentication journey", async ({ page }) 
 
   await expect(page.getByRole("heading", { name: "E2E Chat" })).toBeVisible();
   await expect(page.getByText(/nervos\.chat v1/)).toBeVisible();
+  // The Stage-D tool scenario later visits a second Agent Instance; the original page is restored
+  // afterwards so the remaining assertions still describe this instance.
+  const chatAgentUrl = page.url();
 
   await page.getByLabel("Message").fill("first question from the browser");
   await page.getByRole("button", { name: /run agent/i }).click();
@@ -255,6 +319,52 @@ test("completes the Stage A setup and authentication journey", async ({ page }) 
     "Cancellation requested",
     "Run cancelled",
   ]);
+
+  // --- Stage D: a tool-enabled Run renders its tool lifecycle and settles ---
+  const toolSeed = await seedToolEnabledAgent(page);
+  await page.goto(`/agents/${toolSeed.agentInstanceId}`);
+  await expect(page.getByRole("heading", { name: toolSeed.displayName })).toBeVisible();
+  await page.getByLabel("Message").fill(toolPrompt());
+  await page.getByRole("button", { name: /run agent/i }).click();
+
+  // The Run settles through the same durable path: the scripted model turn requests the one
+  // granted tool, the tool succeeds, the concluding turn answers, and the browser observes it.
+  const toolCard = page.locator("article.run-item").filter({ hasText: toolPrompt() });
+  await expect(toolCard.getByText(/^Succeeded$/)).toBeVisible({ timeout: ASYNC_TIMEOUT });
+  await expect(toolCard.getByText(/Deterministic Anthropic reply from NervOS\./)).toBeVisible();
+  await toolCard.getByRole("button", { name: /show timeline/i }).click();
+  const toolTimeline = toolCard.locator("ol.run-timeline");
+  await expect(toolTimeline.locator("li")).toHaveCount(8, { timeout: ASYNC_TIMEOUT });
+  await expect(toolTimeline.locator(".run-timeline-headline")).toHaveText([
+    "Run accepted",
+    "Queued for a worker",
+    "A worker claimed this run",
+    "Execution started",
+    "Requested tool",
+    "Ran tool",
+    "Tool succeeded",
+    "Run succeeded",
+  ]);
+  // The lifecycle rows are rendered by event type, and no denied, failed, or unknown-outcome row
+  // exists: the one granted call went through and nothing was fabricated to fill a gap.
+  await expect(toolTimeline.locator(".run-timeline-tool-requested")).toHaveCount(1);
+  await expect(toolTimeline.locator(".run-timeline-tool-started")).toHaveCount(1);
+  await expect(toolTimeline.locator(".run-timeline-tool-succeeded")).toHaveCount(1);
+  await expect(
+    toolTimeline.locator(
+      ".run-timeline-tool-failed, .run-timeline-tool-denied, .run-timeline-tool-ambiguous",
+    ),
+  ).toHaveCount(0);
+  // No raw or internal tool material reaches the page: no detail text at all, and neither the
+  // durable model-facing tool name nor any internal column name is rendered.
+  await expect(toolTimeline.locator(".run-timeline-detail")).toHaveCount(0);
+  const renderedToolTimeline = (await toolTimeline.innerText()).toLowerCase();
+  expect(renderedToolTimeline).not.toContain(toolSeed.toolModelName.toLowerCase());
+  for (const internal of ["tool_invocation", "call_id", "fingerprint", "arguments", "traceback"]) {
+    expect(renderedToolTimeline).not.toContain(internal);
+  }
+  // Return to the original Agent Instance so the disable and logout assertions below are unchanged.
+  await page.goto(chatAgentUrl);
 
   // Disabling the agent blocks new Runs while leaving the existing history readable.
   await page.getByRole("button", { name: /disable agent/i }).click();
