@@ -26,6 +26,8 @@ def test_metadata_contains_exact_application_tables() -> None:
         "tool_definitions",
         "agent_tool_grants",
         "tool_invocations",
+        "trigger_definitions",
+        "trigger_occurrences",
     }
 
 

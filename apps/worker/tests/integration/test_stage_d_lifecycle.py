@@ -67,6 +67,10 @@ from nervos_core.infrastructure.database.jobs import SqlAlchemyJobExecutionPersi
 from nervos_core.infrastructure.database.mcp_connections import (
     SqlAlchemyMcpConnectionPersistence,
 )
+from nervos_core.infrastructure.database.schema_revision import (
+    read_schema_revision,
+    require_schema_revision,
+)
 from nervos_core.infrastructure.database.tool_definitions import (
     SqlAlchemyToolDefinitionPersistence,
 )
@@ -79,9 +83,7 @@ from nervos_worker.app import (
     EXPECTED_SCHEMA_REVISION,
     close_worker,
     create_worker,
-    read_schema_revision,
     reconcile_tool_definitions,
-    require_schema_revision,
 )
 from nervos_worker.config import WorkerSettings
 from nervos_worker.main import run_worker
@@ -767,7 +769,7 @@ async def test_a_fresh_database_boots_through_the_schema_gate_and_shuts_down_cle
     )
     try:
         assert read_schema_revision(engine) == EXPECTED_SCHEMA_REVISION
-        assert require_schema_revision(engine) == EXPECTED_SCHEMA_REVISION
+        assert require_schema_revision(engine, EXPECTED_SCHEMA_REVISION) == EXPECTED_SCHEMA_REVISION
         assert _worker_rows(engine) == 0
 
         captured: list[asyncio.Event] = []

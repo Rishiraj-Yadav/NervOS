@@ -49,8 +49,7 @@ from nervos_models import (
     close_model_providers,
     compose_model_providers,
 )
-from sqlalchemy import Engine, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from nervos_worker.config import WorkerSettings, get_worker_settings
@@ -59,43 +58,13 @@ from nervos_worker.mcp import McpRegistrySynchronizer, build_mcp_gateway
 from nervos_worker.registry import ReclaimLoop, WorkerRegistry
 from nervos_worker.service import Worker
 
-# Bumped only by the milestone that adds a migration. C6 ships migration 0006.
-EXPECTED_SCHEMA_REVISION = "0007_stage_d1_tool_capability_audit"
-
-SCHEMA_MIGRATION_HINT = (
-    "Run `uv run alembic -c apps/api/alembic.ini upgrade head` first. "
-    "The Worker never migrates the database itself."
-)
-
-
-class SchemaRevisionMismatch(RuntimeError):
-    """The database schema is not at the revision this Worker requires."""
+# Bumped only by the milestone that adds a migration. E1 ships migration 0008.
+EXPECTED_SCHEMA_REVISION = "0008_stage_e1_trigger_scheduling"
 
 
 def utc_now() -> datetime:
     """Return the current aware UTC instant."""
     return datetime.now(UTC)
-
-
-def read_schema_revision(engine: Engine) -> str | None:
-    """Read the applied Alembic revision, or None when the database is uninitialized."""
-    try:
-        with engine.connect() as connection:
-            revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
-    except SQLAlchemyError:
-        return None
-    return None if revision is None else str(revision)
-
-
-def require_schema_revision(engine: Engine, expected: str = EXPECTED_SCHEMA_REVISION) -> str:
-    """Fail loudly rather than executing against an unknown schema."""
-    revision = read_schema_revision(engine)
-    if revision is None or revision != expected:
-        raise SchemaRevisionMismatch(
-            f"database schema revision is {revision!r}, expected {expected!r}. "
-            f"{SCHEMA_MIGRATION_HINT}"
-        )
-    return revision
 
 
 def resolve_completions(composition: ModelProviderComposition) -> dict[str, ModelCompletion]:

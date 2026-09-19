@@ -16,13 +16,16 @@ from collections.abc import Sequence
 
 from nervos_core.infrastructure.database import create_sqlite_engine
 from nervos_core.infrastructure.database.jobs import SqlAlchemyJobExecutionPersistence
+from nervos_core.infrastructure.database.schema_revision import (
+    SchemaRevisionMismatch,
+    require_schema_revision,
+)
 
 from nervos_worker.app import (
-    SchemaRevisionMismatch,
+    EXPECTED_SCHEMA_REVISION,
     close_worker,
     create_worker,
     reconcile_tool_definitions,
-    require_schema_revision,
     utc_now,
     write_ready_marker,
 )
@@ -66,7 +69,7 @@ def reconcile_legacy_runs(settings: WorkerSettings) -> int:
     """
     engine = create_sqlite_engine(settings.database_path)
     try:
-        require_schema_revision(engine)
+        require_schema_revision(engine, EXPECTED_SCHEMA_REVISION)
         persistence = SqlAlchemyJobExecutionPersistence(engine)
         closed = persistence.close_legacy_nonterminal_runs(now=utc_now())
         logger.info("legacy_closeout_complete closed=%s", closed)
@@ -106,7 +109,7 @@ async def run_worker(settings: WorkerSettings) -> int:
     stop = asyncio.Event()
     installed = install_stop_handlers(asyncio.get_running_loop(), stop)
     try:
-        revision = require_schema_revision(composition.engine)
+        revision = require_schema_revision(composition.engine, EXPECTED_SCHEMA_REVISION)
         # The built-in tool definitions become durable only after the schema has been validated, so
         # a Worker that refuses to start cannot have written first.
         reconcile_tool_definitions(composition.engine)

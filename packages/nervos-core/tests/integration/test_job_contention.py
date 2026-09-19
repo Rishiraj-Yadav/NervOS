@@ -10,6 +10,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from execution_support import NOW, counts, event_types, migrate
@@ -17,6 +18,7 @@ from nervos_core.application.errors import PersistenceUnavailable
 from nervos_core.application.job_execution import LEASE_DURATION
 from nervos_core.domain.runs import STAGE_B_LIMITS
 from nervos_core.infrastructure.database import jobs as jobs_module
+from nervos_core.infrastructure.database import transaction as transaction_module
 from nervos_core.infrastructure.database.jobs import (
     SqlAlchemyJobExecutionPersistence,
     SqlAlchemyJobPersistence,
@@ -37,7 +39,13 @@ def driver_error(message: str, code: int | None) -> SQLAlchemyError:
 
 
 class FlakySubmit(SqlAlchemyJobPersistence):
-    """Raise on the first operation attempt, then delegate to production behaviour."""
+    """Raise on the first submission attempt, then delegate to production behaviour.
+
+    E1 promoted the Run + Job insertion out of this class into the one module-level helper every
+    caller shares, so the injection point is that helper rather than a method. The failure must be
+    raised *inside* the transaction — that is the whole subject of these tests — so the double
+    patches the helper for the duration of one `submit` call rather than failing before it.
+    """
 
     def __init__(self, engine: Engine, error: SQLAlchemyError, *, fail_times: int = 1) -> None:
         super().__init__(engine, max_pending=100, sleep=lambda _: None)
@@ -45,11 +53,17 @@ class FlakySubmit(SqlAlchemyJobPersistence):
         self.fail_times = fail_times
         self.attempts = 0
 
-    def _submit_once(self, *args: Any, **kwargs: Any) -> Any:
-        self.attempts += 1
-        if self.attempts <= self.fail_times:
-            raise self.error
-        return super()._submit_once(*args, **kwargs)  # pyright: ignore[reportPrivateUsage]
+    def submit(self, **kwargs: Any) -> Any:
+        original = jobs_module.insert_run_and_job_on_connection
+
+        def flaky(connection: Any, **inner: Any) -> Any:
+            self.attempts += 1
+            if self.attempts <= self.fail_times:
+                raise self.error
+            return original(connection, **inner)
+
+        with patch.object(jobs_module, "insert_run_and_job_on_connection", flaky):
+            return super().submit(**kwargs)
 
 
 class FlakyClaim(SqlAlchemyJobExecutionPersistence):
@@ -115,7 +129,7 @@ def test_a_real_sqlite_write_contention_is_classified_as_provably_uncommitted(
         holder.close()
 
     assert getattr(info.value, "sqlite_errorcode", None) == BUSY
-    classify = jobs_module._is_contention  # pyright: ignore[reportPrivateUsage]
+    classify = transaction_module.is_contention
     assert classify(OperationalError("BEGIN IMMEDIATE", {}, info.value))
     # A non-contention driver failure is never treated as replayable.
     assert not classify(driver_error("disk I/O error", IOERR))

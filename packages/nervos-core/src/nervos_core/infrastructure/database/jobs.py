@@ -22,18 +22,16 @@ the write lock.
 
 from __future__ import annotations
 
-import contextlib
 import os
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, TypeVar
+from typing import Any
 
 from sqlalchemy import ColumnElement, Connection, Engine, and_, func, insert, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import RowMapping
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from nervos_core.application.agents import DurableSubmissionRejected
@@ -102,16 +100,7 @@ from nervos_core.infrastructure.database.run_events import (
     append_event_on_connection,
     sequence_base,
 )
-
-# SQLite primary result codes. Classification uses the driver's own numeric code rather than
-# matching on error strings, so a locale or driver change cannot silently reclassify a fault.
-_SQLITE_BUSY = 5
-_SQLITE_LOCKED = 6
-_PRIMARY_RESULT_CODE_MASK = 0xFF
-
-# Bounded retry for a bus/locked transaction that provably committed nothing.
-_TRANSACTION_ATTEMPTS = 3
-_RETRY_BACKOFF_SECONDS = (0.05, 0.1)
+from nervos_core.infrastructure.database.transaction import TransactionRunner
 
 # Job states that occupy durable queue capacity. C2 reserved `retry_wait` here before anything
 # wrote it, so C4 activating that state cannot raise the pending ceiling by accident.
@@ -140,14 +129,11 @@ _MIN_PENDING_CAP = 1
 _MAX_PENDING_CAP = 100_000
 
 
-def _validate_pending_cap(value: int, name: str) -> int:
+def validate_pending_cap(value: int, name: str) -> int:
     """Reject a pending cap outside the accepted bound, naming the offending dimension."""
     if not _MIN_PENDING_CAP <= value <= _MAX_PENDING_CAP:
         raise ValueError(f"{name} must be between {_MIN_PENDING_CAP} and {_MAX_PENDING_CAP}")
     return value
-
-
-_T = TypeVar("_T")
 
 
 class _Fenced(RuntimeError):
@@ -235,19 +221,6 @@ def read_run_record(engine: Engine, run_id: int) -> RunRecord | None:
     """
     with Session(engine) as session:
         return session.scalar(select(RunRecord).where(RunRecord.id == run_id))
-
-
-def _is_contention(error: SQLAlchemyError) -> bool:
-    """Return whether the driver proved this failure committed nothing.
-
-    Only `SQLITE_BUSY` and `SQLITE_LOCKED` qualify: a busy `BEGIN IMMEDIATE` never opened a
-    transaction, and a busy statement or `COMMIT` leaves the transaction open with nothing
-    committed. Any other failure is uncertain and is never replayed automatically.
-    """
-    code = getattr(getattr(error, "orig", None), "sqlite_errorcode", None)
-    if not isinstance(code, int):
-        return False
-    return code & _PRIMARY_RESULT_CODE_MASK in (_SQLITE_BUSY, _SQLITE_LOCKED)
 
 
 def _sequence_base(connection: Connection, run_id: int) -> int:
@@ -376,56 +349,196 @@ def _reconcile_abandoned_tool_invocations(
     return tuple(ambiguous)
 
 
-class _TransactionRunner:
-    """One short `BEGIN IMMEDIATE` transaction per operation, with proven-safe retry only."""
-
-    def __init__(self, engine: Engine, sleep: Callable[[float], None]) -> None:
-        self._engine = engine
-        self._sleep = sleep
-
-    def run(
-        self,
-        operation: Callable[[Connection], _T],
-        *,
-        attempts: int = _TRANSACTION_ATTEMPTS,
-    ) -> _T:
-        last_error: SQLAlchemyError | None = None
-        for index in range(attempts):
-            connection = self._engine.connect()
-            try:
-                connection.exec_driver_sql("BEGIN IMMEDIATE")
-                result = operation(connection)
-                connection.commit()
-                return result
-            except SQLAlchemyError as error:
-                with contextlib.suppress(SQLAlchemyError):
-                    connection.rollback()
-                if not _is_contention(error):
-                    raise PersistenceUnavailable from error
-                last_error = error
-            except BaseException:
-                with contextlib.suppress(SQLAlchemyError):
-                    connection.rollback()
-                raise
-            finally:
-                # `close()` is the load-bearing step, not `rollback()`. After a failed COMMIT
-                # SQLAlchemy no longer believes a transaction is open, so `rollback()` is a
-                # no-op while SQLite still holds the lock; returning the connection to the
-                # pool performs the real driver-level rollback and releases it. Leaving it
-                # open would block every other reader on this database.
-                connection.close()
-            if index + 1 < attempts:
-                self._sleep(_RETRY_BACKOFF_SECONDS[min(index, len(_RETRY_BACKOFF_SECONDS) - 1)])
-        # The retry budget is spent and every failure was a busy/locked contention, which
-        # proves nothing committed. This is the one failure class a caller may replay.
-        raise PersistenceContention from last_error
-
-
 @dataclass
 class _SubmissionProgress:
     """What the submission transaction had already done when it failed."""
 
     run_id: int | None = None
+
+
+# --- The one canonical Run + Job insertion, shared by every caller -------------------
+#
+# Manual submission and trigger materialization both call this, on a connection they already
+# hold, inside a transaction they already opened. It duplicates no SQL and owns no transaction:
+# it reads authority, admission capacity and the grant cutoff on the caller's connection, so
+# every guarantee holds for whichever caller opened it.
+def insert_run_and_job_on_connection(
+    connection: Connection,
+    *,
+    owner_user_id: int,
+    agent_instance_id: int,
+    input_text: str,
+    limits: RunLimits,
+    definition_id: AgentDefinitionId | None,
+    now: datetime,
+    max_attempts: int,
+    capacity: int,
+    agent_capacity: int,
+    provider_capacity: int,
+    progress: _SubmissionProgress | None = None,
+) -> Run:
+    """Insert one Run, its Job, and the two opening events, on the caller's connection.
+
+    This is the *only* implementation of that insertion. It owns no transaction: the caller has
+    already opened one and this runs inside it, which is what lets a trigger materialization commit
+    an occurrence, a Run, a Job and their events atomically while a manual submission commits the
+    Run and its Job.
+
+    Everything it needs to be safe is read here, on the caller's connection, so it holds for either
+    caller: ownership and enabled state, all three admission dimensions, and the grant cutoff. A
+    caller may pass a `progress` record to have the Run identifier reported back if a later step in
+    its own transaction fails; a caller with nothing to reconcile may omit it.
+    """
+    predicates = [
+        AgentInstanceRecord.id == agent_instance_id,
+        AgentInstanceRecord.owner_user_id == owner_user_id,
+        AgentInstanceRecord.enabled.is_(True),
+    ]
+    if definition_id is not None:
+        predicates.extend(
+            [
+                AgentInstanceRecord.agent_key == definition_id.agent_key,
+                AgentInstanceRecord.agent_definition_version
+                == definition_id.agent_definition_version,
+            ]
+        )
+    instance = (
+        connection.execute(select(AgentInstanceRecord).where(*predicates)).mappings().one_or_none()
+    )
+    if instance is None:
+        raise DurableSubmissionRejected
+
+    # All three admission dimensions are counted inside the same `BEGIN IMMEDIATE`
+    # transaction that inserts the Job, so two concurrent submissions serialize on the write
+    # lock: the second reads the first's committed Job rather than racing it. One grouped
+    # read produces every dimension at one consistent database state, so the three checks
+    # cannot disagree with each other and nothing is counted twice.
+    occupying = connection.execute(
+        select(
+            JobRecord.agent_instance_id,
+            JobRecord.model_provider,
+            func.count(),
+        )
+        .where(JobRecord.status.in_(_OCCUPYING_STATUSES))
+        .group_by(JobRecord.agent_instance_id, JobRecord.model_provider)
+    ).all()
+    pending = sum(int(count) for _agent, _provider, count in occupying)
+    if pending >= capacity:
+        raise QueueCapacityExceeded
+    provider_id = str(instance["model_provider"])
+    agent_pending = sum(
+        int(count) for owner, _provider, count in occupying if int(owner) == agent_instance_id
+    )
+    if agent_pending >= agent_capacity:
+        raise QueueCapacityExceeded
+    provider_pending = sum(
+        int(count) for _owner, provider, count in occupying if str(provider) == provider_id
+    )
+    if provider_pending >= provider_capacity:
+        raise QueueCapacityExceeded
+
+    tool_grant_cutoff_id = grant_cutoff_on_connection(connection, agent_instance_id, limits)
+    run_result = connection.execute(
+        insert(RunRecord).values(
+            agent_instance_id=agent_instance_id,
+            status=RunStatus.CREATED.value,
+            agent_key=instance["agent_key"],
+            agent_definition_version=instance["agent_definition_version"],
+            model_provider=instance["model_provider"],
+            model_name=instance["model_name"],
+            input_text=input_text,
+            input_max_bytes=limits.input_max_bytes,
+            input_max_code_points=limits.input_max_code_points,
+            output_max_bytes=limits.output_max_bytes,
+            output_max_code_points=limits.output_max_code_points,
+            provider_timeout_ms=limits.provider_timeout_ms,
+            max_output_tokens=limits.max_output_tokens,
+            max_model_calls=limits.max_model_calls,
+            max_tool_calls=limits.max_tool_calls,
+            tool_timeout_ms=limits.tool_timeout_ms,
+            tool_result_max_bytes=limits.tool_result_max_bytes,
+            max_consecutive_tool_failures=limits.max_consecutive_tool_failures,
+            tool_grant_cutoff_id=tool_grant_cutoff_id,
+            created_at=now,
+        )
+    )
+    run_pk = run_result.inserted_primary_key
+    if run_pk is None or run_pk[0] is None:
+        raise PersistenceUnavailable
+    run_id = int(run_pk[0])
+    if progress is not None:
+        progress.run_id = run_id
+
+    job_result = connection.execute(
+        insert(JobRecord).values(
+            run_id=run_id,
+            agent_instance_id=agent_instance_id,
+            model_provider=instance["model_provider"],
+            status=JobStatus.QUEUED.value,
+            available_at=now,
+            attempt_count=0,
+            max_attempts=max_attempts,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    job_pk = job_result.inserted_primary_key
+    if job_pk is None or job_pk[0] is None:
+        raise PersistenceUnavailable
+    job_id = int(job_pk[0])
+
+    _append_event_on_connection(
+        connection,
+        run_id=run_id,
+        job_id=job_id,
+        sequence=1,
+        event_type=RunEventType.RUN_CREATED,
+        created_at=now,
+    )
+    _append_event_on_connection(
+        connection,
+        run_id=run_id,
+        job_id=job_id,
+        sequence=2,
+        event_type=RunEventType.RUN_QUEUED,
+        created_at=now,
+        available_at=now,
+    )
+    return Run(
+        run_id,
+        agent_instance_id,
+        instance["agent_key"],
+        instance["agent_definition_version"],
+        instance["model_provider"],
+        instance["model_name"],
+        input_text,
+        limits,
+        RunStatus.CREATED,
+        now,
+        execution_phase=JobStatus.QUEUED,
+        tool_grant_cutoff_id=tool_grant_cutoff_id,
+    )
+
+
+def grant_cutoff_on_connection(
+    connection: Connection, agent_instance_id: int, limits: RunLimits
+) -> int:
+    """Snapshot the highest grant id this Run may ever honour.
+
+    Read inside the same serialized submission transaction that inserts the Run, so a grant
+    committed a moment later is ordered *after* this Run rather than racing it. A tool-free Run
+    snapshots nothing: its budget of zero tools means no capability is reachable at all, which
+    is exactly the `0` D2's evaluator already refuses everything against. That is why chat@1
+    needs no special case and keeps the durable values it has always had.
+    """
+    if limits.max_tool_calls == 0:
+        return 0
+    highest = connection.execute(
+        select(func.coalesce(func.max(AgentToolGrantRecord.id), 0)).where(
+            AgentToolGrantRecord.agent_instance_id == agent_instance_id
+        )
+    ).scalar_one()
+    return int(highest)
 
 
 class SqlAlchemyJobPersistence:
@@ -447,16 +560,16 @@ class SqlAlchemyJobPersistence:
         adds the dimension without refusing a Run that C2 would have admitted.
         """
         self._engine = engine
-        self._max_pending = _validate_pending_cap(max_pending, "max_pending")
-        self._max_pending_per_agent = _validate_pending_cap(
+        self._max_pending = validate_pending_cap(max_pending, "max_pending")
+        self._max_pending_per_agent = validate_pending_cap(
             self._max_pending if max_pending_per_agent is None else max_pending_per_agent,
             "max_pending_per_agent",
         )
-        self._max_pending_per_provider = _validate_pending_cap(
+        self._max_pending_per_provider = validate_pending_cap(
             self._max_pending if max_pending_per_provider is None else max_pending_per_provider,
             "max_pending_per_provider",
         )
-        self._runner = _TransactionRunner(engine, sleep)
+        self._runner = TransactionRunner(engine, sleep)
 
     def submit(
         self,
@@ -476,14 +589,14 @@ class SqlAlchemyJobPersistence:
         validate_input_text(input_text, limits)
         if not 1 <= max_attempts <= 10:
             raise ValueError("max_attempts must be between 1 and 10")
-        capacity = _validate_pending_cap(
+        capacity = validate_pending_cap(
             self._max_pending if max_pending is None else max_pending, "max_pending"
         )
-        agent_capacity = _validate_pending_cap(
+        agent_capacity = validate_pending_cap(
             self._max_pending_per_agent if max_pending_per_agent is None else max_pending_per_agent,
             "max_pending_per_agent",
         )
-        provider_capacity = _validate_pending_cap(
+        provider_capacity = validate_pending_cap(
             self._max_pending_per_provider
             if max_pending_per_provider is None
             else max_pending_per_provider,
@@ -493,7 +606,7 @@ class SqlAlchemyJobPersistence:
         progress = _SubmissionProgress()
         try:
             return self._runner.run(
-                lambda connection: self._submit_once(
+                lambda connection: insert_run_and_job_on_connection(
                     connection,
                     owner_user_id=owner_user_id,
                     agent_instance_id=agent_instance_id,
@@ -518,176 +631,6 @@ class SqlAlchemyJobPersistence:
             # A proven contention is normalized to the base class: the control plane must
             # never surface a "safe to replay" signal, because it does not replay.
             raise PersistenceUnavailable from error
-
-    def _submit_once(
-        self,
-        connection: Connection,
-        *,
-        owner_user_id: int,
-        agent_instance_id: int,
-        input_text: str,
-        limits: RunLimits,
-        definition_id: AgentDefinitionId | None,
-        now: datetime,
-        max_attempts: int,
-        capacity: int,
-        agent_capacity: int,
-        provider_capacity: int,
-        progress: _SubmissionProgress,
-    ) -> Run:
-        predicates = [
-            AgentInstanceRecord.id == agent_instance_id,
-            AgentInstanceRecord.owner_user_id == owner_user_id,
-            AgentInstanceRecord.enabled.is_(True),
-        ]
-        if definition_id is not None:
-            predicates.extend(
-                [
-                    AgentInstanceRecord.agent_key == definition_id.agent_key,
-                    AgentInstanceRecord.agent_definition_version
-                    == definition_id.agent_definition_version,
-                ]
-            )
-        instance = (
-            connection.execute(select(AgentInstanceRecord).where(*predicates))
-            .mappings()
-            .one_or_none()
-        )
-        if instance is None:
-            raise DurableSubmissionRejected
-
-        # All three admission dimensions are counted inside the same `BEGIN IMMEDIATE`
-        # transaction that inserts the Job, so two concurrent submissions serialize on the write
-        # lock: the second reads the first's committed Job rather than racing it. One grouped
-        # read produces every dimension at one consistent database state, so the three checks
-        # cannot disagree with each other and nothing is counted twice.
-        occupying = connection.execute(
-            select(
-                JobRecord.agent_instance_id,
-                JobRecord.model_provider,
-                func.count(),
-            )
-            .where(JobRecord.status.in_(_OCCUPYING_STATUSES))
-            .group_by(JobRecord.agent_instance_id, JobRecord.model_provider)
-        ).all()
-        pending = sum(int(count) for _agent, _provider, count in occupying)
-        if pending >= capacity:
-            raise QueueCapacityExceeded
-        provider_id = str(instance["model_provider"])
-        agent_pending = sum(
-            int(count) for owner, _provider, count in occupying if int(owner) == agent_instance_id
-        )
-        if agent_pending >= agent_capacity:
-            raise QueueCapacityExceeded
-        provider_pending = sum(
-            int(count) for _owner, provider, count in occupying if str(provider) == provider_id
-        )
-        if provider_pending >= provider_capacity:
-            raise QueueCapacityExceeded
-
-        tool_grant_cutoff_id = self._grant_cutoff_on_connection(
-            connection, agent_instance_id, limits
-        )
-        run_result = connection.execute(
-            insert(RunRecord).values(
-                agent_instance_id=agent_instance_id,
-                status=RunStatus.CREATED.value,
-                agent_key=instance["agent_key"],
-                agent_definition_version=instance["agent_definition_version"],
-                model_provider=instance["model_provider"],
-                model_name=instance["model_name"],
-                input_text=input_text,
-                input_max_bytes=limits.input_max_bytes,
-                input_max_code_points=limits.input_max_code_points,
-                output_max_bytes=limits.output_max_bytes,
-                output_max_code_points=limits.output_max_code_points,
-                provider_timeout_ms=limits.provider_timeout_ms,
-                max_output_tokens=limits.max_output_tokens,
-                max_model_calls=limits.max_model_calls,
-                max_tool_calls=limits.max_tool_calls,
-                tool_timeout_ms=limits.tool_timeout_ms,
-                tool_result_max_bytes=limits.tool_result_max_bytes,
-                max_consecutive_tool_failures=limits.max_consecutive_tool_failures,
-                tool_grant_cutoff_id=tool_grant_cutoff_id,
-                created_at=now,
-            )
-        )
-        run_pk = run_result.inserted_primary_key
-        if run_pk is None or run_pk[0] is None:
-            raise PersistenceUnavailable
-        run_id = int(run_pk[0])
-        progress.run_id = run_id
-
-        job_result = connection.execute(
-            insert(JobRecord).values(
-                run_id=run_id,
-                agent_instance_id=agent_instance_id,
-                model_provider=instance["model_provider"],
-                status=JobStatus.QUEUED.value,
-                available_at=now,
-                attempt_count=0,
-                max_attempts=max_attempts,
-                created_at=now,
-                updated_at=now,
-            )
-        )
-        job_pk = job_result.inserted_primary_key
-        if job_pk is None or job_pk[0] is None:
-            raise PersistenceUnavailable
-        job_id = int(job_pk[0])
-
-        _append_event_on_connection(
-            connection,
-            run_id=run_id,
-            job_id=job_id,
-            sequence=1,
-            event_type=RunEventType.RUN_CREATED,
-            created_at=now,
-        )
-        _append_event_on_connection(
-            connection,
-            run_id=run_id,
-            job_id=job_id,
-            sequence=2,
-            event_type=RunEventType.RUN_QUEUED,
-            created_at=now,
-            available_at=now,
-        )
-        return Run(
-            run_id,
-            agent_instance_id,
-            instance["agent_key"],
-            instance["agent_definition_version"],
-            instance["model_provider"],
-            instance["model_name"],
-            input_text,
-            limits,
-            RunStatus.CREATED,
-            now,
-            execution_phase=JobStatus.QUEUED,
-            tool_grant_cutoff_id=tool_grant_cutoff_id,
-        )
-
-    @staticmethod
-    def _grant_cutoff_on_connection(
-        connection: Connection, agent_instance_id: int, limits: RunLimits
-    ) -> int:
-        """Snapshot the highest grant id this Run may ever honour.
-
-        Read inside the same serialized submission transaction that inserts the Run, so a grant
-        committed a moment later is ordered *after* this Run rather than racing it. A tool-free Run
-        snapshots nothing: its budget of zero tools means no capability is reachable at all, which
-        is exactly the `0` D2's evaluator already refuses everything against. That is why chat@1
-        needs no special case and keeps the durable values it has always had.
-        """
-        if limits.max_tool_calls == 0:
-            return 0
-        highest = connection.execute(
-            select(func.coalesce(func.max(AgentToolGrantRecord.id), 0)).where(
-                AgentToolGrantRecord.agent_instance_id == agent_instance_id
-            )
-        ).scalar_one()
-        return int(highest)
 
     def _reconcile_submission(self, run_id: int) -> Run | None:
         """Read back an unobserved submission outcome instead of blindly replaying it.
@@ -793,7 +736,7 @@ class SqlAlchemyJobExecutionPersistence:
     ) -> None:
         self._engine = engine
         self._policy = policy
-        self._runner = _TransactionRunner(engine, sleep)
+        self._runner = TransactionRunner(engine, sleep)
 
     # -- claim -------------------------------------------------------------------------
 
@@ -2586,7 +2529,7 @@ class SqlAlchemyRunCancellationPersistence:
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._engine = engine
-        self._runner = _TransactionRunner(engine, sleep)
+        self._runner = TransactionRunner(engine, sleep)
 
     # -- owner cancellation ------------------------------------------------------------
 
