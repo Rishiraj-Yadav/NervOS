@@ -356,7 +356,7 @@ def test_the_d1_upgrade_creates_the_four_tables_and_extends_three(
     finally:
         engine.dispose()
 
-    command.upgrade(config, "head")
+    command.upgrade(config, D1_REVISION)
     engine = create_sqlite_engine(database_path)
     try:
         inspector = inspect(engine)
@@ -810,7 +810,7 @@ def test_a_compatible_downgrade_succeeds_and_restores_the_0006_shape(
     finally:
         engine.dispose()
 
-    command.upgrade(config, "head")
+    command.upgrade(config, D1_REVISION)
     engine = create_sqlite_engine(database_path)
     try:
         with engine.connect() as connection:

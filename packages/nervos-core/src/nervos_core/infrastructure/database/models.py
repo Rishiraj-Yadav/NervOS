@@ -9,6 +9,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     LargeBinary,
@@ -733,6 +734,257 @@ class AgentToolGrantRecord(Base):
     # The fingerprint the user actually reviewed. Immutable for the life of the row, because
     # re-confirming a drifted definition replaces the row rather than editing this value.
     reviewed_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class TriggerDefinitionRecord(Base):
+    """Current owner-scoped TriggerDefinition configuration."""
+
+    __tablename__ = "trigger_definitions"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('one_time','interval','cron','webhook','event')",
+            name="kind_value",
+        ),
+        CheckConstraint(
+            "misfire_policy IN ('coalesce_one')",
+            name="misfire_policy_value",
+        ),
+        CheckConstraint("enabled IN (0, 1)", name="enabled_value"),
+        CheckConstraint("config_revision > 0", name="config_revision_positive"),
+        CheckConstraint(
+            "length(display_name) BETWEEN 1 AND 400 AND instr(display_name, char(0)) = 0",
+            name="display_name_shape",
+        ),
+        CheckConstraint(
+            "length(input_text) BETWEEN 1 AND 4000 AND "
+            "length(CAST(input_text AS BLOB)) <= 8000 AND instr(input_text, char(0)) = 0 AND "
+            f"length(trim(input_text, {NERVOS_BLANK_TEXT_SQL_CHARS})) > 0",
+            name="input_bounds",
+        ),
+        CheckConstraint(
+            "((kind = 'one_time' AND run_at IS NOT NULL AND interval_seconds IS NULL "
+            "AND cron_expression IS NULL AND timezone IS NULL AND public_id IS NULL "
+            "AND secret_digest IS NULL AND secret_created_at IS NULL AND event_type IS NULL) OR "
+            "(kind = 'interval' AND run_at IS NULL AND interval_seconds IS NOT NULL "
+            "AND cron_expression IS NULL AND timezone IS NULL AND public_id IS NULL "
+            "AND secret_digest IS NULL AND secret_created_at IS NULL AND event_type IS NULL) OR "
+            "(kind = 'cron' AND run_at IS NULL AND interval_seconds IS NULL "
+            "AND cron_expression IS NOT NULL AND timezone IS NOT NULL AND public_id IS NULL "
+            "AND secret_digest IS NULL AND secret_created_at IS NULL AND event_type IS NULL) OR "
+            "(kind = 'webhook' AND run_at IS NULL AND interval_seconds IS NULL "
+            "AND cron_expression IS NULL AND timezone IS NULL AND public_id IS NOT NULL "
+            "AND secret_digest IS NOT NULL AND secret_created_at IS NOT NULL AND event_type IS NULL "
+            "AND next_fire_at IS NULL) OR "
+            "(kind = 'event' AND run_at IS NULL AND interval_seconds IS NULL "
+            "AND cron_expression IS NULL AND timezone IS NULL AND public_id IS NULL "
+            "AND secret_digest IS NULL AND secret_created_at IS NULL AND event_type IS NOT NULL "
+            "AND next_fire_at IS NULL))",
+            name="kind_shape",
+        ),
+        CheckConstraint(
+            "((kind IN ('one_time','interval','cron') AND "
+            "((enabled = 1 AND next_fire_at IS NOT NULL) OR "
+            "(enabled = 0 AND next_fire_at IS NULL))) OR "
+            "(kind IN ('webhook','event') AND next_fire_at IS NULL))",
+            name="next_fire_alignment",
+        ),
+        CheckConstraint(
+            "interval_seconds IS NULL OR interval_seconds BETWEEN 60 AND 31536000",
+            name="interval_bounds",
+        ),
+        CheckConstraint(
+            "cron_expression IS NULL OR (length(cron_expression) BETWEEN 1 AND 128 "
+            "AND instr(cron_expression, char(0)) = 0)",
+            name="cron_expression_shape",
+        ),
+        CheckConstraint(
+            "timezone IS NULL OR (length(timezone) BETWEEN 1 AND 64 AND instr(timezone, char(0)) = 0)",
+            name="timezone_shape",
+        ),
+        CheckConstraint(
+            "public_id IS NULL OR (length(public_id) = 22 AND "
+            "public_id NOT GLOB '*[^A-Za-z0-9_-]*' AND public_id GLOB '[A-Za-z0-9_-]*' "
+            "AND instr(public_id, char(0)) = 0)",
+            name="public_id_shape",
+        ),
+        CheckConstraint(
+            "secret_digest IS NULL OR length(secret_digest) = 32",
+            name="secret_digest_shape",
+        ),
+        CheckConstraint(
+            "(secret_digest IS NULL) = (secret_created_at IS NULL)",
+            name="secret_pair",
+        ),
+        CheckConstraint(
+            "event_type IS NULL OR (length(event_type) BETWEEN 1 AND 64 "
+            "AND instr(event_type, char(0)) = 0 AND event_type = lower(event_type) "
+            "AND event_type NOT GLOB '*[^a-z0-9_.]*' AND event_type NOT GLOB '.*' "
+            "AND event_type NOT GLOB '*.' AND event_type NOT GLOB '*..*' "
+            "AND event_type NOT LIKE 'nervos.%' AND event_type GLOB '[a-z]*')",
+            name="event_type_shape",
+        ),
+        CheckConstraint("updated_at >= created_at", name="timestamp_order"),
+        ForeignKeyConstraint(
+            ["owner_user_id"], ["users.id"], name="owner_user_id_users", ondelete="RESTRICT"
+        ),
+        ForeignKeyConstraint(
+            ["agent_instance_id"],
+            ["agent_instances.id"],
+            name="agent_instance_id_agent_instances",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_trigger_definitions_owner_user_id_id", "owner_user_id", "id"),
+        Index("ix_trigger_definitions_agent_instance_id_id", "agent_instance_id", "id"),
+        Index(
+            "ix_trigger_definitions_next_fire_at_id",
+            "next_fire_at",
+            "id",
+            sqlite_where=text("next_fire_at IS NOT NULL"),
+        ),
+        Index(
+            "ix_trigger_definitions_event_lookup",
+            "owner_user_id",
+            "event_type",
+            sqlite_where=text("event_type IS NOT NULL"),
+        ),
+        Index(
+            "ux_trigger_definitions_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=text("public_id IS NOT NULL"),
+        ),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    agent_instance_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(400), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="1")
+    input_text: Mapped[str] = mapped_column(Text, nullable=False)
+    config_revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    misfire_policy: Mapped[str] = mapped_column(String(16), nullable=False)
+    next_fire_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    run_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    interval_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cron_expression: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    timezone: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    public_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    secret_digest: Mapped[bytes | None] = mapped_column(LargeBinary(32), nullable=True)
+    secret_created_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    event_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class TriggerOccurrenceRecord(Base):
+    """Immutable outcome of one trigger delivery or due instant."""
+
+    __tablename__ = "trigger_occurrences"
+    __table_args__ = (
+        CheckConstraint("status IN ('run_created','skipped')", name="status_value"),
+        CheckConstraint("trigger_revision > 0", name="trigger_revision_positive"),
+        CheckConstraint(
+            "((status = 'run_created' AND run_id IS NOT NULL AND skip_code IS NULL "
+            "AND skip_message IS NULL) OR (status = 'skipped' AND run_id IS NULL "
+            "AND skip_code IS NOT NULL AND skip_message IS NOT NULL))",
+            name="status_shape",
+        ),
+        CheckConstraint(
+            "skip_code IS NULL OR (length(skip_code) BETWEEN 1 AND 64 AND "
+            "length(skip_message) BETWEEN 1 AND 512 AND instr(skip_message, char(0)) = 0 "
+            f"AND length(trim(skip_message, {NERVOS_BLANK_TEXT_SQL_CHARS})) > 0)",
+            name="skip_bounds",
+        ),
+        CheckConstraint(
+            "payload_bytes IS NULL OR payload_bytes >= 0", name="payload_bytes_nonnegative"
+        ),
+        CheckConstraint("(payload_digest IS NULL) = (payload_bytes IS NULL)", name="payload_pair"),
+        CheckConstraint(
+            "payload_digest IS NULL OR length(payload_digest) = 32", name="payload_digest_shape"
+        ),
+        CheckConstraint(
+            "event_id IS NULL OR (length(event_id) BETWEEN 1 AND 128 AND instr(event_id, char(0)) = 0)",
+            name="event_id_shape",
+        ),
+        CheckConstraint(
+            "idempotency_key IS NULL OR (length(idempotency_key) BETWEEN 1 AND 128 "
+            "AND instr(idempotency_key, char(0)) = 0)",
+            name="idempotency_key_shape",
+        ),
+        CheckConstraint(
+            "((nominal_at IS NOT NULL AND event_id IS NULL AND idempotency_key IS NULL) OR "
+            "(nominal_at IS NULL AND event_id IS NOT NULL AND idempotency_key IS NULL) OR "
+            "(nominal_at IS NULL AND event_id IS NULL AND idempotency_key IS NOT NULL) OR "
+            "(nominal_at IS NULL AND event_id IS NULL AND idempotency_key IS NULL))",
+            name="identity_shape",
+        ),
+        CheckConstraint("created_at >= occurred_at", name="occurred_order"),
+        ForeignKeyConstraint(
+            ["trigger_definition_id"],
+            ["trigger_definitions.id"],
+            name="trigger_definition_id_trigger_definitions",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["owner_user_id"], ["users.id"], name="owner_user_id_users", ondelete="RESTRICT"
+        ),
+        ForeignKeyConstraint(
+            ["agent_instance_id"],
+            ["agent_instances.id"],
+            name="agent_instance_id_agent_instances",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(["run_id"], ["runs.id"], name="run_id_runs", ondelete="RESTRICT"),
+        Index("ix_trigger_occurrences_trigger_definition_id_id", "trigger_definition_id", "id"),
+        Index("ix_trigger_occurrences_owner_user_id_id", "owner_user_id", "id"),
+        Index(
+            "ux_trigger_occurrences_run_id",
+            "run_id",
+            unique=True,
+            sqlite_where=text("run_id IS NOT NULL"),
+        ),
+        Index(
+            "ux_trigger_occurrences_schedule_identity",
+            "trigger_definition_id",
+            "nominal_at",
+            unique=True,
+            sqlite_where=text("nominal_at IS NOT NULL"),
+        ),
+        Index(
+            "ux_trigger_occurrences_event_identity",
+            "trigger_definition_id",
+            "event_id",
+            unique=True,
+            sqlite_where=text("event_id IS NOT NULL"),
+        ),
+        Index(
+            "ux_trigger_occurrences_idempotency_identity",
+            "trigger_definition_id",
+            "idempotency_key",
+            unique=True,
+            sqlite_where=text("idempotency_key IS NOT NULL"),
+        ),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trigger_definition_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    owner_user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    agent_instance_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    trigger_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    run_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    skip_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    skip_message: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    nominal_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    event_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    payload_digest: Mapped[bytes | None] = mapped_column(LargeBinary(32), nullable=True)
+    payload_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 

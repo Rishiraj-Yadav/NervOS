@@ -37,6 +37,12 @@ EXPECTED_TABLES = {
     "tool_definitions",
     "agent_tool_grants",
     "tool_invocations",
+    # E1 adds the two Stage E durable tables. They are *persistence only*: no scheduler loop, no
+    # webhook ingress, no event publication and no management API exists yet, so nothing in the
+    # repository reads or writes them outside their own persistence module and its tests. The
+    # `schedule`/`cron`/`webhook` route-surface words stay forbidden in `router.py`.
+    "trigger_definitions",
+    "trigger_occurrences",
 }
 FORBIDDEN_SUBSYSTEMS = (
     "conversation",
@@ -200,6 +206,9 @@ def test_b3_route_surface_and_migration_freeze() -> None:
         "0005_stage_c5_run_cancellation.py",
         "0006_stage_c6_queue_partitions.py",
         "0007_stage_d1_tool_capability_audit.py",
+        # E1 adds the two Stage E durable tables. The scheduler, the ingress and the management
+        # API do not exist yet, so this migration adds no route and no execution primitive.
+        "0008_stage_e1_trigger_scheduling.py",
     ]
     # The Worker refuses to run against a schema it does not expect, so the pinned revision and
     # the migration head are one fact in two places. Letting them drift bricks the supervised
@@ -1047,17 +1056,23 @@ def test_the_frontend_gained_only_event_vocabulary() -> None:
         assert forbidden not in timeline, forbidden
 
 
-def test_the_migration_head_is_unchanged_and_no_0008_exists() -> None:
-    """D6 needed no schema change, and this is the assertion that keeps that claim honest.
+def test_the_migration_head_is_exactly_0008_and_no_0009_exists() -> None:
+    """E1 adds the two Stage E durable tables, and nothing beyond that head.
 
-    Every state D6 reconciles was already representable in `0007`: `cancelled` exists as a
-    pre-dispatch terminal status, `ambiguous` exists with an error pair, the six tool event types
-    are in the CHECK, and `run_events.tool_invocation_id` is a nullable foreign key.
+    This replaces the D6-era guard that asserted `0008` did not exist. A guard whose subject is
+    "the next milestone has not landed yet" is retired by the milestone that lands it — so it
+    becomes the assertion that the new head is exact and that no *further* migration has appeared,
+    rather than being deleted and losing the `0009` check with it.
+
+    E1's migration creates two tables and touches no existing one. `0007` in particular stays
+    byte-identical: the tool-event vocabulary guard below reads its DDL as the frozen source of
+    truth for a different stage's schema, so a change to it would break a guard whose subject is
+    not this milestone's to alter.
     """
     versions = ROOT / "apps" / "api" / "alembic" / "versions"
     discovered = sorted(path.name for path in versions.glob("*.py"))
-    assert discovered[-1] == "0007_stage_d1_tool_capability_audit.py"
-    assert not any(name.startswith("0008") for name in discovered), discovered
+    assert discovered[-1] == "0008_stage_e1_trigger_scheduling.py"
+    assert not any(name.startswith("0009") for name in discovered), discovered
 
 
 def test_nervos_mcp_depends_only_on_public_sdk_surfaces() -> None:
@@ -1132,3 +1147,123 @@ def test_only_a_composition_root_may_name_the_concrete_mcp_implementation() -> N
         "apps/worker/src/nervos_worker/app.py",
         "apps/worker/src/nervos_worker/mcp.py",
     }, namers
+
+
+# ------------------------------------------------------------------------------------------------
+# Stage E (E1) -- the durable foundation, and the boundaries it must not cross
+# ------------------------------------------------------------------------------------------------
+
+
+def test_stage_e_application_protocols_carry_no_persistence_or_http_type() -> None:
+    """A port that names a connection has made the persistence technology part of its interface.
+
+    ADR 0020's whole point is that the connection-bound helper stays infrastructure-private, so the
+    application layer keeps saying "materialize this command" rather than "write these rows".
+    """
+    for path in (
+        CORE_SOURCE / "application" / "triggers.py",
+        CORE_SOURCE / "domain" / "triggers.py",
+    ):
+        imports = imported_modules(path)
+        for forbidden in ("sqlalchemy", "fastapi", "starlette", "uvicorn", "croniter", "cronsim"):
+            assert not any(
+                module == forbidden or module.startswith(f"{forbidden}.") for module in imports
+            ), (
+                path,
+                forbidden,
+            )
+        text = path.read_text(encoding="utf-8")
+        for forbidden in ("Connection", "Session", "Engine", "Request", "select(", "insert("):
+            assert forbidden not in text, (path.name, forbidden)
+
+
+def test_there_is_exactly_one_run_and_job_insertion_implementation() -> None:
+    """E1 promoted the insertion to a shared helper; it must stay the only one.
+
+    Manual submission and trigger materialization are two *callers* of one implementation. A second
+    implementation would fork the ownership check, the admission checks and the grant cutoff, which
+    is the failure ADR 0020 exists to prevent.
+    """
+    source = (CORE_INFRASTRUCTURE / "jobs.py").read_text(encoding="utf-8")
+    assert source.count("def insert_run_and_job_on_connection(") == 1
+    assert source.count("insert(RunRecord)") == 1
+    assert source.count("insert(JobRecord)") == 1
+
+    callers = {
+        path.name
+        for path in python_files(CORE_INFRASTRUCTURE)
+        if "insert_run_and_job_on_connection(" in path.read_text(encoding="utf-8")
+    }
+    assert callers == {"jobs.py", "triggers.py"}, callers
+
+
+def test_trigger_provenance_is_never_read_to_decide_execution() -> None:
+    """Reverse provenance is descriptive; a record that decides execution is not descriptive."""
+    execution_modules = (
+        "job_execution.py",
+        "run_execution.py",
+        "tool_loop.py",
+        "run_cancellation.py",
+        "lease_reclamation.py",
+        "retry_policy.py",
+    )
+    for name in execution_modules:
+        text = (CORE_APPLICATION / name).read_text(encoding="utf-8")
+        for forbidden in ("trigger_occurrences", "TriggerOccurrence", "occurrence_for_run"):
+            assert forbidden not in text, (name, forbidden)
+    worker = "\n".join(path.read_text(encoding="utf-8") for path in python_files(WORKER_SOURCE))
+    for forbidden in ("trigger_occurrences", "occurrence_for_run"):
+        assert forbidden not in worker, forbidden
+
+
+def test_stage_e_added_no_column_to_an_existing_table() -> None:
+    """E1 adds two tables and touches no other, so `runs` keeps the shape every C/D guard pins."""
+    models = ORM_MODELS.read_text(encoding="utf-8")
+    runs = models.split('__tablename__ = "runs"', 1)[1].split("class ", 1)[0]
+    for forbidden in ("trigger_occurrence_id", "origin_kind", "trigger_id"):
+        assert forbidden not in runs, forbidden
+
+    migration = (
+        ROOT / "apps" / "api" / "alembic" / "versions" / "0008_stage_e1_trigger_scheduling.py"
+    ).read_text(encoding="utf-8")
+    for forbidden in ("add_column", "alter_column", "rebuild_runs", "batch_alter_table"):
+        assert forbidden not in migration, forbidden
+    assert migration.count("op.create_table(") == 2
+    assert 'down_revision = "0007_stage_d1_tool_capability_audit"' in migration
+
+
+def test_stage_e_adds_no_cron_library_and_no_scheduler_process() -> None:
+    """E1 validates syntax only; evaluation is E2's, and no scheduler process exists yet."""
+    core_text = "\n".join(path.read_text(encoding="utf-8") for path in python_files(CORE_SOURCE))
+    assert "cronsim" not in core_text
+    assert "croniter" not in core_text
+    assert "apscheduler" not in core_text
+    assert not (ROOT / "apps" / "scheduler").exists()
+
+
+def test_the_occurrence_status_vocabulary_matches_the_frozen_schema() -> None:
+    """The enum, the domain branches and the migration CHECK must state the same two values."""
+    migration = (
+        ROOT / "apps" / "api" / "alembic" / "versions" / "0008_stage_e1_trigger_scheduling.py"
+    ).read_text(encoding="utf-8")
+    assert "status IN ('run_created','skipped')" in migration
+    assert (
+        "duplicate" not in migration.split('"trigger_occurrences"', 1)[1].split("def downgrade")[0]
+    )
+    models = ORM_MODELS.read_text(encoding="utf-8")
+    assert "status IN ('run_created','skipped')" in models
+
+
+def test_stage_e_exposes_no_route_and_no_frontend_surface() -> None:
+    """E1 is persistence only; the management API and the Automations surface come later."""
+    router_text = (API_SOURCE / "api" / "router.py").read_text(encoding="utf-8").lower()
+    for forbidden in ("trigger", "schedule", "cron", "webhook", "automation"):
+        assert forbidden not in router_text, forbidden
+    assert not (API_ROUTES / "triggers.py").exists()
+    assert not (ROOT / "apps" / "api" / "src" / "nervos_api" / "hooks").exists()
+    frontend = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in python_files(FRONTEND_SOURCE)
+        if path.suffix == ".py"
+    )
+    assert frontend == ""

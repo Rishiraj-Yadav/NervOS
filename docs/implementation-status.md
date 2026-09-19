@@ -3,13 +3,16 @@
 ## Current phase
 
 **Stage D — the tool and MCP layer — is COMPLETE.** **Stage E — scheduling, events, and triggers —
-has begun with its architecture freeze (E0)**, which is documentation and governance only: it froze
-when a Run may come into existence, who may cause one, and the single acceptance path every Run
-travels, in ADRs 0018–0020.
+has begun**: its **E0 architecture freeze** is complete and externally accepted, and **E1 — the durable
+trigger/occurrence domain and migration `0008` — is complete and accepted.** Stage E decides when a Run
+comes into existence, who may cause one, and the single acceptance path every Run travels, in
+ADRs 0018–0020.
 
-**No Stage E runtime behaviour exists yet.** There is no scheduler process, no trigger table, no
-migration `0008`, no scheduling domain, no webhook or event ingress, and no Automations UI. Nothing
-in Stage E may be described as implemented until its own milestone lands and is accepted.
+**No Stage E runtime behaviour is active yet.** There is no scheduler process, no due scan, no cron
+evaluation, no webhook or event ingress, and no Automations UI. The trigger tables exist and the
+atomic materialization seam exists, but **nothing fires a trigger**: every Run in NervOS today is
+still one a user submitted. Nothing in Stage E may be described as implemented until its own
+milestone lands and is accepted.
 
 Stage C — Persistent execution engine is COMPLETE. The C0 architecture freeze, the C1 durable execution foundation, C2 — asynchronous submission and minimal durable Worker execution — C3 — Worker registry/health, expired-lease reconciliation, and fencing hardening — C4 — the safe execution retry engine — C5 — owner cancellation and Attempt execution-timeout orchestration — C6 — authoritative global/per-Agent/per-provider execution concurrency, durable Agent fairness, and full admission backpressure — C7 — public read-only execution observability, the Run Events API, the execution timeline, and the polling model — and C8 — integrated deterministic Stage C acceptance and closeout — are implemented, externally reviewed, and accepted.
 
@@ -41,7 +44,7 @@ The next milestone is **Stage E — Scheduling, events, and triggers**.
 ## Stage E milestones
 
 - [x] E0 — Architecture, protocol, and safety freeze (documentation/governance only; no schema, no dependency, no runtime code)
-- [ ] E1 — Durable trigger/occurrence domain, migration `0008`, and the shared Run-submission foundation
+- [x] E1 — Durable trigger/occurrence domain, migration `0008`, and the shared Run-submission foundation
 - [ ] E2 — Scheduler: one-time / interval / cron, timezone, misfire, multi-instance, restart
 - [ ] E3 — Webhook ingress, secret authentication and rotation, idempotency
 - [ ] E4 — Internal events, trigger management and occurrence history, minimal Automations surface
@@ -61,6 +64,45 @@ verification; the internal event envelope, its owner scope, exact matching and b
 reverse Run provenance through `trigger_occurrences.run_id` with **no column added to `runs`**. It
 added no migration, no dependency, no API surface, no frontend, and no source change. Its authority is
 **ADR 0018**, **ADR 0019** and **ADR 0020**.
+
+**E1 is complete and externally accepted.** It made a trigger a durable, owner-scoped thing NervOS can
+represent, and it made the *act of turning one into a Run* atomic — while still letting nothing fire
+one. Migration `0008_stage_e1_trigger_scheduling` adds exactly two tables, `trigger_definitions` and
+`trigger_occurrences`, and touches no existing table: all five kinds (one-time, interval, cron, webhook,
+event) share one shape whose per-kind fields are forced absent or present by an exhaustive five-branch
+`kind_shape` CHECK, so a malformed combination is unrepresentable rather than merely rejected in code.
+The occurrence vocabulary is exactly two statuses — `run_created` and `skipped`. There is deliberately
+no `duplicate` status: a second materialization of a deterministic occurrence returns the existing
+occurrence and writes nothing, because recording a duplicate as a durable status would assert a second
+fact about one event. **Run origin is reverse provenance.** `trigger_occurrences.run_id` is a unique
+foreign key into `runs` with `ON DELETE RESTRICT`, so **`runs` gained no column at all** and manual
+origin is simply the absence of an explaining occurrence — which is why the D1/D2/D4 cutoff, retry,
+cancellation and tool-audit code paths needed no change.
+**The seam is shared, not duplicated.** E1 promoted the canonical Run+Job insertion out of the
+submission method into one module-level `insert_run_and_job_on_connection`, and a trigger materialization
+now calls exactly that function: an occurrence, a Run, a Job, the `run.created`/`run.queued` events and
+the trigger's own state transition commit in **one** `BEGIN IMMEDIATE`, so a crash before commit leaves
+none of them and a crash after leaves all of them. There is no trigger queue, no trigger job type, no
+trigger status on `runs`, and no second execution path — a triggered Run is structurally identical to a
+manually submitted one and is executed later by the ordinary Worker through Stages C and D unchanged.
+The command carries no authoritative trigger fields: owner, target, revision and input are re-read from
+the definition inside the transaction, and limits are resolved through the same Agent-Definition resolver
+a manual submission uses, so a retargeted trigger fails closed as a `skipped` occurrence instead of
+running the wrong Agent. An Agent-disabled target is a `skipped` occurrence, while exceeding queue
+capacity rolls the **whole** materialization back — no occurrence, no Run, trigger still due — because
+consuming a nominal occurrence to record "we were busy" would silently destroy scheduled work.
+**Webhook secret primitives were built but not wired.** `generate_public_id` (exactly 22 URL-safe
+characters), `generate_secret` (43), `digest_secret` (SHA-256, 32 bytes) and a fixed dummy digest for
+E3's uniform-comparison path exist in `infrastructure/security/webhook_secrets.py`; plaintext is never
+persisted, the digest is excluded from `repr`, and no HTTP route references any of it. The frozen
+5-field cron dialect is validated by a NervOS-owned validator — not a scheduler library — that rejects
+seconds, `L`, `W`, `#`, and every other extension by name, and IANA timezone names are validated in the
+domain. The schema-revision guard moved into `nervos-core` and is now shared, with each process
+declaring its own expected revision. **E1 added one dependency, `tzdata`**, so the UTC/timezone contract
+behaves identically on Windows and in slim containers rather than depending on the host's zone database;
+the first run of a timezone test failed on Windows without it, which is exactly the asymmetry it closes.
+**E1 added no scheduler, no due scan, no cron evaluation, no next-fire calculation, no REST API and no
+frontend.** Its authority remains ADRs 0018–0020, which it did not amend.
 
 D0 is **architecture frozen and externally accepted**. It fixed: the MCP protocol target
 (`2026-07-28`, modern era only, Streamable HTTP and stdio, official SDK v2 with no custom protocol
@@ -822,7 +864,7 @@ C8 proves that the finished kernel composes. Each of C2–C7 proved its own slic
 
 Taken together, the guarantees NervOS now offers are: **fenced durable authority**, so only a live lease holder may write; **no blind replay of ambiguous execution**, so an unknown outcome is closed as failed rather than repeated; **safe retry only for a positively safe outcome**; and **late stale writes cannot overwrite truth**. NervOS does **not** guarantee exactly-once remote provider execution. Remote provider processing, billing, and side effects may still occur after an ambiguous post-start crash, a running cancellation, or an execution timeout, and these remain outside the local transaction boundary.
 
-D7 is complete and externally accepted, and Stage D — the tool and MCP layer — is **complete**. **E0 is complete and externally accepted**: Stage E — scheduling, events, and triggers — has its architecture frozen in **ADRs 0018–0020**, and it changed no runtime behaviour. The next engineering milestone is **E1 — the durable trigger/occurrence domain, migration `0008`, and the shared Run-submission foundation**.
+D7 is complete and externally accepted, and Stage D — the tool and MCP layer — is **complete**. **E0 is complete and externally accepted**: Stage E — scheduling, events, and triggers — has its architecture frozen in **ADRs 0018–0020**, and it changed no runtime behaviour. **E1 is complete and externally accepted**: the durable trigger/occurrence domain and migration `0008` exist, and the Run-creation seam is shared and atomic. The next engineering milestone is **E2 — the scheduler engine**: one-time, interval and cron evaluation with timezone and DST semantics, the `COALESCE_ONE` misfire policy, multi-instance safety, and restart recovery.
 
 D2 adds the permission layer that will gate every future tool call, and it adds nothing that can call one. A user's Agent Instance holds an explicit ALLOW row per tool; there is no DENY row, so "not granted" and "revoked" are the same observable state and an entire class of precedence bug cannot be expressed. The call-time evaluator derives its authority from durable rows rather than from its caller: it takes only a Run id and a tool definition id, loads the Run to obtain the Agent Instance and the monotonic grant cutoff, loads the grant, and loads the definition to compare `grant.reviewed_fingerprint` against `tool_definitions.fingerprint` directly. No caller can supply an Agent, a cutoff, or a fingerprint, so a stale grant cannot be revived by presenting the fingerprint it was reviewed at. Revocation deletes the row and bites at the very next check; a new grant is invisible to a Run already submitted because its id exceeds that Run's snapshotted cutoff; re-granting and re-confirming both mint a new AUTOINCREMENT id, so the capability reaches only Runs submitted afterwards. Drift fails closed as `DEFINITION_CHANGED`, an unavailable definition as `DEFINITION_UNAVAILABLE`, a disabled MCP connection as `CONNECTION_DISABLED`, and a cross-owner MCP grant as `OWNER_MISMATCH` — the last re-proven at call time against the connection's owner rather than trusted from grant creation, so a grant row inserted directly into the database still fails closed. Annotations remain presentation-only and never grant. The evaluator is a pure read: it writes no `tool_invocations` row, emits no Run Event, and touches no execution state. **D2 added no migration and no dependency**; the migration head remains `0007_stage_d1_tool_capability_audit`. Nothing executes a tool yet: there is still no registry, no canonical schema validator, no built-in tool, no MCP client, no provider tool calling, and no Think → Act → Observe loop.
 
@@ -859,7 +901,7 @@ D7 is integrated deterministic acceptance for Stage D and its closeout, not a fe
 
 **Audit, privacy and the browser.** The tool lifecycle is asserted through the public read path, with monotonic sequences and correct invocation linkage, and with no argument, result, digest, provider error or internal-ambiguity text reachable in any published field. The deterministic supervised browser journey gained **one** seeded tool-enabled Run and asserts only that the Run is visible, the tool lifecycle renders, the final state settles, and no raw or internal material reaches the DOM — all pre-existing Stage A–C5 assertions unchanged.
 
-**D7 added no migration and no dependency**; the migration head remains `0007_stage_d1_tool_capability_audit`, which was byte-identical throughout, and no `0008` exists. **Not included:** the Stage E scheduler, events and triggers; Stage F conversation sessions and memory; the Stage G package system; Stage H approvals, sandboxing and isolation; and any exactly-once remote-effect claim.
+**D7 added no migration and no dependency**; at D7 the migration head was `0007_stage_d1_tool_capability_audit`, byte-identical throughout, and `0008` did not yet exist. (Stage E's E1 later consumed `0008` for the trigger schema.) **Not included:** the Stage E scheduler, events and triggers; Stage F conversation sessions and memory; the Stage G package system; Stage H approvals, sandboxing and isolation; and any exactly-once remote-effect claim.
 
 **Stage D proves capable tool-using agents.** It does not yet provide scheduling, background triggers, persistent conversation memory, installable agent packages, or interactive approvals and isolation — those remain Stages E, F, G and H. NervOS still makes **no exactly-once claim** for remote effects: it prevents known unsafe replay after dispatch and records ambiguity when a remote outcome cannot be proven.
 

@@ -42,6 +42,10 @@ APPLICATION_TABLES = {
     "tool_definitions",
     "agent_tool_grants",
     "tool_invocations",
+    # Stage E (E1): the durable trigger and occurrence tables. Schema only -- no scheduler, no
+    # webhook ingress and no event publication reads or writes them yet.
+    "trigger_definitions",
+    "trigger_occurrences",
 }
 DEFAULT_DATABASE = (Path.home() / ".nervos" / "nervos.db").resolve(strict=False)
 
@@ -103,7 +107,7 @@ def test_upgrade_drift_downgrade_and_reupgrade(
         assert application_tables(engine) == APPLICATION_TABLES
         with engine.connect() as connection:
             current_revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
-            assert current_revision == "0007_stage_d1_tool_capability_audit"
+            assert current_revision == "0008_stage_e1_trigger_scheduling"
             assert connection.scalar(text("PRAGMA foreign_keys")) == 1
             assert connection.scalar(text("PRAGMA busy_timeout")) == 5000
         command.check(config)
@@ -1232,7 +1236,7 @@ def test_the_c5_downgrade_is_clean_when_nothing_needs_cancellation(
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM runs")) == 1
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                "0007_stage_d1_tool_capability_audit"
+                "0008_stage_e1_trigger_scheduling"
             )
     finally:
         engine.dispose()
@@ -1318,7 +1322,7 @@ def test_migration_0006_creates_only_the_fairness_table(
         assert "queue_partitions" in application_tables(engine)
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                "0007_stage_d1_tool_capability_audit"
+                "0008_stage_e1_trigger_scheduling"
             )
             columns = [
                 str(row[1])
@@ -1456,6 +1460,7 @@ REVIEWED_MIGRATIONS = [
     "0005_stage_c5_run_cancellation.py",
     "0006_stage_c6_queue_partitions.py",
     "0007_stage_d1_tool_capability_audit.py",
+    "0008_stage_e1_trigger_scheduling.py",
 ]
 
 
@@ -1468,16 +1473,16 @@ def test_c7_consumed_no_migration_number() -> None:
     columns, so an explicit index would be a duplicate SQLite already maintains -- cost with no
     benefit, and a permanently wider reviewed schema.
 
-    Stage D's D1 later consumed `0007` for the tool, capability and audit schema. That does not
-    weaken this claim, and the claim is not rewritten to accommodate it: exactly one migration
-    follows C6's, it is D1's, and `0008` still does not exist -- so the number C7 could have taken
-    is provably still not C7's.
+    Stage D's D1 later consumed `0007` for the tool, capability and audit schema, and Stage E's E1
+    has since consumed `0008` for the trigger tables. Neither weakens this claim, and the claim is
+    not rewritten to accommodate them: the migrations that follow C6's are exactly D1's and E1's,
+    and the number C7 could have taken is provably still not C7's.
     """
     names = sorted(path.name for path in VERSIONS.glob("*.py"))
 
     assert names == REVIEWED_MIGRATIONS
-    assert names[-1] == "0007_stage_d1_tool_capability_audit.py"
-    assert not any(name.startswith("0008") for name in names)
+    assert names[-1] == "0008_stage_e1_trigger_scheduling.py"
+    assert not any(name.startswith("0009") for name in names)
 
 
 def test_the_run_event_index_set_is_the_same_one_c6_shipped(
@@ -1507,5 +1512,214 @@ def test_the_run_event_index_set_is_the_same_one_c6_shipped(
             )
         # The unique constraint is real, and it is the index the timeline query seeks.
         assert implicit == 1
+    finally:
+        engine.dispose()
+
+
+# ---------------------------------------------------------------------------------------
+# E1 -- the Stage E schema, and the downgrade that refuses to destroy it
+# ---------------------------------------------------------------------------------------
+
+E1_REVISION = "0008_stage_e1_trigger_scheduling"
+# The E1 downgrade lands at D1, not at C6: `0008`'s `down_revision` is `0007`, so downgrading E1
+# exercises exactly one migration's downgrade. Asking for `0006` would additionally run D1's own
+# downgrade, which is D1's contract to prove (see `test_migrations_d1.py`) and not E1's.
+D1_REVISION = "0007_stage_d1_tool_capability_audit"
+
+
+def _seed_stage_e(engine: Engine, *, trigger: bool, occurrence: bool) -> None:
+    """Seed the minimum Stage E state a downgrade must refuse to destroy."""
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO users(username,password_hash,role,is_active,created_at,updated_at)"
+                " VALUES('owner',X'00','admin',1,'2026-09-14 12:00:00','2026-09-14 12:00:00')"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO agent_instances(owner_user_id,agent_key,agent_definition_version,"
+                "display_name,enabled,model_provider,model_name,created_at,updated_at)"
+                " VALUES(1,'nervos.chat','1','Agent',1,'anthropic','opaque/model',"
+                "'2026-09-14 12:00:00','2026-09-14 12:00:00')"
+            )
+        )
+        if trigger:
+            connection.execute(
+                text(
+                    "INSERT INTO trigger_definitions(owner_user_id,agent_instance_id,kind,"
+                    "display_name,enabled,input_text,config_revision,misfire_policy,"
+                    "cron_expression,timezone,next_fire_at,created_at,updated_at)"
+                    " VALUES(1,1,'cron','Nightly',1,'run',1,'coalesce_one','0 3 * * *','UTC',"
+                    "'2026-09-15 12:00:00','2026-09-14 12:00:00','2026-09-14 12:00:00')"
+                )
+            )
+        if occurrence:
+            connection.execute(
+                text(
+                    "INSERT INTO trigger_occurrences(trigger_definition_id,owner_user_id,"
+                    "agent_instance_id,trigger_revision,status,skip_code,skip_message,"
+                    "nominal_at,occurred_at,created_at)"
+                    " VALUES(1,1,1,1,'skipped','agent_disabled','refused',"
+                    "'2026-09-15 12:00:00','2026-09-15 12:00:00','2026-09-15 12:00:00')"
+                )
+            )
+
+
+def test_the_stage_e_downgrade_refuses_while_stage_e_state_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refusal must happen *before* any DDL, so a refused downgrade leaves nothing half-dropped.
+
+    Every row counts, including a disabled trigger and a skipped occurrence: a disabled trigger is
+    still configuration a user authored, and a skip is a fact the user may already have seen.
+    """
+    database_path = tmp_path / "stage-e-downgrade.db"
+    _, engine = migrate_database(database_path, monkeypatch)
+    try:
+        _seed_stage_e(engine, trigger=True, occurrence=True)
+    finally:
+        engine.dispose()
+
+    config = alembic_config(database_path, monkeypatch)
+    with pytest.raises(RuntimeError):
+        command.downgrade(config, D1_REVISION)
+
+    engine = create_sqlite_engine(database_path)
+    try:
+        tables = set(inspect(engine).get_table_names())
+        assert {"trigger_definitions", "trigger_occurrences"} <= tables
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == E1_REVISION
+            assert connection.scalar(text("SELECT count(*) FROM trigger_definitions")) == 1
+            assert connection.scalar(text("SELECT count(*) FROM trigger_occurrences")) == 1
+    finally:
+        engine.dispose()
+
+
+def test_the_stage_e_downgrade_refuses_for_a_trigger_with_no_occurrence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Configuration alone is enough to refuse: a disabled trigger is still authored state."""
+    database_path = tmp_path / "stage-e-trigger-only.db"
+    _, engine = migrate_database(database_path, monkeypatch)
+    try:
+        _seed_stage_e(engine, trigger=True, occurrence=False)
+    finally:
+        engine.dispose()
+
+    config = alembic_config(database_path, monkeypatch)
+    with pytest.raises(RuntimeError):
+        command.downgrade(config, D1_REVISION)
+
+
+def test_an_occurrence_cannot_exist_without_its_trigger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The FK is RESTRICT, so "an occurrence with no definition" is unrepresentable rather than a
+    state the downgrade preflight would have to consider separately.
+    """
+    database_path = tmp_path / "stage-e-orphan.db"
+    _, engine = migrate_database(database_path, monkeypatch)
+    try:
+        _seed_stage_e(engine, trigger=True, occurrence=False)
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO trigger_occurrences(trigger_definition_id,owner_user_id,"
+                    "agent_instance_id,trigger_revision,status,skip_code,skip_message,"
+                    "nominal_at,occurred_at,created_at)"
+                    " VALUES(999,1,1,1,'skipped','agent_disabled','refused',"
+                    "'2026-09-15 12:00:00','2026-09-15 12:00:00','2026-09-15 12:00:00')"
+                )
+            )
+    finally:
+        engine.dispose()
+
+
+def test_the_stage_e_downgrade_is_clean_when_nothing_needs_keeping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Downgrading E1 lands at `0007` and removes only what E1 added.
+
+    `0008`'s `down_revision` is `0007`, so one downgrade step is `0008 -> 0007`. The D1 schema --
+    the four Stage D tables and the columns D1 added to `runs`, `job_attempts` and `run_events` --
+    must come through untouched, because E1 never wrote to it.
+    """
+    database_path = tmp_path / "stage-e-clean-down.db"
+    config, engine = migrate_database(database_path, monkeypatch)
+    try:
+        inspector = inspect(engine)
+        before_runs = {column["name"] for column in inspector.get_columns("runs")}
+        before_events = {column["name"] for column in inspector.get_columns("run_events")}
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, D1_REVISION)
+    engine = create_sqlite_engine(database_path)
+    try:
+        inspector = inspect(engine)
+        tables = set(inspector.get_table_names())
+        assert "trigger_definitions" not in tables
+        assert "trigger_occurrences" not in tables
+        # Every E1 index went with its table, so nothing dangles in sqlite_master.
+        remaining_indexes: set[str] = set()
+        for table in tables:
+            remaining_indexes |= {
+                str(item["name"]) for item in inspector.get_indexes(table) if item["name"]
+            }
+        assert not any(
+            name.startswith(("ix_trigger_", "ux_trigger_")) for name in remaining_indexes
+        )
+        # The 0007 schema is intact: D1's tables and every column D1 added are still there.
+        assert {"mcp_connections", "tool_definitions", "agent_tool_grants", "tool_invocations"} <= (
+            tables
+        )
+        assert "tool_grant_cutoff_id" in {c["name"] for c in inspector.get_columns("runs")}
+        assert {c["name"] for c in inspector.get_columns("runs")} == before_runs
+        assert {c["name"] for c in inspector.get_columns("run_events")} == before_events
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+                D1_REVISION
+            )
+            assert connection.exec_driver_sql("PRAGMA integrity_check").scalar() == "ok"
+            assert connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_sqlite_engine(database_path)
+    try:
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == E1_REVISION
+    finally:
+        engine.dispose()
+
+
+def test_the_stage_e_tables_are_empty_and_indexed_after_a_fresh_upgrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / "stage-e-fresh.db"
+    _, engine = migrate_database(database_path, monkeypatch)
+    try:
+        inspector = inspect(engine)
+        assert {item["name"] for item in inspector.get_indexes("trigger_definitions")} == {
+            "ix_trigger_definitions_owner_user_id_id",
+            "ix_trigger_definitions_agent_instance_id_id",
+            "ix_trigger_definitions_next_fire_at_id",
+            "ix_trigger_definitions_event_lookup",
+            "ux_trigger_definitions_public_id",
+        }
+        assert {item["name"] for item in inspector.get_indexes("trigger_occurrences")} == {
+            "ix_trigger_occurrences_trigger_definition_id_id",
+            "ix_trigger_occurrences_owner_user_id_id",
+            "ux_trigger_occurrences_run_id",
+            "ux_trigger_occurrences_schedule_identity",
+            "ux_trigger_occurrences_event_identity",
+            "ux_trigger_occurrences_idempotency_identity",
+        }
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT count(*) FROM trigger_definitions")) == 0
+            assert connection.scalar(text("SELECT count(*) FROM trigger_occurrences")) == 0
     finally:
         engine.dispose()

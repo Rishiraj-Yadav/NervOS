@@ -32,6 +32,7 @@ from nervos_core.application.trusted_chat import (
 )
 from nervos_core.infrastructure.database import create_sqlite_engine
 from nervos_core.infrastructure.database.jobs import SqlAlchemyJobExecutionPersistence
+from nervos_core.infrastructure.database.schema_revision import require_schema_revision
 from nervos_core.infrastructure.database.tool_definitions import (
     SqlAlchemyToolDefinitionPersistence,
 )
@@ -42,8 +43,8 @@ from nervos_core.infrastructure.database.tools import SqlAlchemyToolPermissionEv
 
 # The Worker application itself is production code; only the provider mapping is a double.
 from nervos_worker.app import (
+    EXPECTED_SCHEMA_REVISION,
     reconcile_tool_definitions,
-    require_schema_revision,
     write_ready_marker,
 )
 from nervos_worker.config import WorkerSettings
@@ -217,7 +218,7 @@ async def run() -> int:
     )
     engine = create_sqlite_engine(settings.database_path)
     try:
-        revision = require_schema_revision(engine)
+        revision = require_schema_revision(engine, EXPECTED_SCHEMA_REVISION)
         gate = os.environ.get(CLAIM_GATE_VARIABLE, "").strip()
         persistence = (
             GatedJobPersistence(engine, Path(gate))
