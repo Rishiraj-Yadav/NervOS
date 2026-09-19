@@ -49,9 +49,19 @@ def test_the_api_settings_cannot_represent_a_provider_credential(
         "max_pending_jobs",
         "max_pending_jobs_per_agent",
         "max_pending_jobs_per_provider",
+        # D5's operator-owned MCP configuration. None of these is a credential: the origins are
+        # destinations, the stdio servers are operator-declared commands the *Worker* launches, and
+        # the aliases are names bound to targets. A secret value is never representable here -- the
+        # alias resolves against the Worker's environment at the moment a transport is built.
+        "mcp_allowed_origins",
+        "mcp_stdio_servers",
+        "mcp_credential_aliases",
     }
     for field in type(settings).model_fields:
         assert "anthropic" not in field and "openai" not in field
+    # The alias field names aliases and their targets; it can never hold a secret, because resolving
+    # one requires an environment variable this process does not read.
+    assert isinstance(settings.mcp_credential_aliases, str)
 
 
 def test_the_pending_cap_defaults_and_reads_the_environment(

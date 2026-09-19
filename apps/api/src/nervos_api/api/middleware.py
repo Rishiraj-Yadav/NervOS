@@ -17,6 +17,9 @@ _MAX_CREDENTIAL_BODY_BYTES = 4096
 _MAX_PROOF_BODY_BYTES = 16 * 1024
 _AGENT_INSTANCE_ITEM_PATH = re.compile(r"/api/v1/agent-instances/\d+\Z")
 _AGENT_INSTANCE_RUNS_PATH = re.compile(r"/api/v1/agent-instances/\d+/runs\Z")
+# The MCP connection family. Its bodies carry only names and a URL, so they share the proof bound.
+_MCP_CONNECTIONS_PATH = "/api/v1/mcp-connections"
+_MCP_CONNECTION_ITEM_PATH = re.compile(r"/api/v1/mcp-connections/\d+\Z")
 
 
 def json_body_limit(method: str, path: str) -> int | None:
@@ -37,6 +40,10 @@ def json_body_limit(method: str, path: str) -> int | None:
     if method == "PATCH" and _AGENT_INSTANCE_ITEM_PATH.fullmatch(normalized):
         return _MAX_PROOF_BODY_BYTES
     if method == "POST" and _AGENT_INSTANCE_RUNS_PATH.fullmatch(normalized):
+        return _MAX_PROOF_BODY_BYTES
+    if method == "POST" and normalized == _MCP_CONNECTIONS_PATH:
+        return _MAX_PROOF_BODY_BYTES
+    if method == "PATCH" and _MCP_CONNECTION_ITEM_PATH.fullmatch(normalized):
         return _MAX_PROOF_BODY_BYTES
     return None
 

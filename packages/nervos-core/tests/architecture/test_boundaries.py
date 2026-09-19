@@ -171,13 +171,22 @@ def test_trusted_chat_and_execution_stay_provider_neutral() -> None:
             assert provider not in text, (name, provider)
 
 
+# D5 authorizes exactly one new control-plane resource: the owner-scoped MCP connection. That is
+# the *only* execution-plane word the router may now contain, and it is asserted positively below,
+# so this is a narrowing of one name rather than a relaxation of the guard.
+D5_AUTHORIZED_ROUTER_SUBSYSTEMS = ("mcp",)
+
+
 def test_b3_route_surface_and_migration_freeze() -> None:
     """The B3 surface is exactly the approved resources, and the schema is unchanged."""
     router_text = (API_SOURCE / "api" / "router.py").read_text(encoding="utf-8").lower()
     for subsystem in FORBIDDEN_SUBSYSTEMS:
+        if subsystem in D5_AUTHORIZED_ROUTER_SUBSYSTEMS:
+            continue
         assert subsystem not in router_text, subsystem
     assert "agent_instances_router" in router_text
     assert "runs_router" in router_text
+    assert "mcp_connections_router" in router_text
 
     migrations = sorted((ROOT / "apps" / "api" / "alembic" / "versions").glob("*.py"))
     assert [path.name for path in migrations] == [
@@ -591,6 +600,8 @@ def test_c7_adds_only_the_reviewed_observability_surface() -> None:
         "agent_instances.py",
         "auth.py",
         "health.py",
+        # D5 is authorized exactly one new control-plane resource family: MCP connections.
+        "mcp_connections.py",
         "runs.py",
         "setup.py",
     ]
@@ -835,3 +846,97 @@ def test_the_tool_loop_emits_no_run_event() -> None:
     loop = (CORE_APPLICATION / "tool_loop.py").read_text(encoding="utf-8")
     for forbidden in ("RunEventType", "run_event", "_append_event", "RunEvent"):
         assert forbidden not in loop, forbidden
+
+
+# --- D5: the MCP client lives in one package, and reaches only public SDK surfaces ---
+
+NERVOS_MCP_SOURCE = ROOT / "packages" / "nervos-mcp" / "src" / "nervos_mcp"
+NERVOS_MCP_TESTS = ROOT / "packages" / "nervos-mcp" / "tests"
+
+
+def _private_sdk_imports(path: Path) -> list[str]:
+    """Imports of an underscored module *inside* the MCP SDK, which is not a supported surface."""
+    private: list[str] = []
+    for module in imported_modules(path):
+        parts = module.split(".")
+        if parts[0] != "mcp":
+            continue
+        # A path such as `mcp.client._transport` crosses a private segment. A private helper is not
+        # part of the SDK's contract, so depending on one would break silently on a patch upgrade.
+        if any(segment.startswith("_") for segment in parts[1:]):
+            private.append(module)
+    return private
+
+
+def test_nervos_mcp_depends_only_on_public_sdk_surfaces() -> None:
+    """A private SDK import would be an undeclared dependency on an implementation detail."""
+    offenders = {
+        str(path.relative_to(ROOT)): found
+        for path in python_files(NERVOS_MCP_SOURCE)
+        if (found := _private_sdk_imports(path))
+    }
+    assert not offenders
+
+
+def test_nervos_mcp_never_reaches_the_model_provider_adapters() -> None:
+    """The MCP package is a tool boundary, not a model boundary."""
+    for path in python_files(NERVOS_MCP_SOURCE):
+        imports = imported_modules(path)
+        assert not any(module.startswith("nervos_models") for module in imports), path
+        assert not any(
+            module.startswith(sdk) for sdk in ("anthropic", "openai") for module in imports
+        ), path
+
+
+def test_the_loopback_permissive_egress_policy_is_not_reachable_from_production() -> None:
+    """Tests need to dial a loopback fake server. Nothing shipped may be able to.
+
+    The production policy refuses loopback, private, link-local and metadata addresses with no
+    override. A permissive implementation therefore cannot live under `src/` at all: if it did, some
+    future composition root could select it, and no guard here could tell that apart from a bug.
+
+    This looks for a relaxation *definition* rather than the word itself, because the production
+    module's own docstring explains that the permissive policy lives in the test support package --
+    prose that would otherwise read as the thing it forbids.
+    """
+    for path in python_files(NERVOS_MCP_SOURCE):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                assert "permissive" not in node.name.lower(), path
+            if isinstance(node, ast.Name):
+                assert "allow_loopback" not in node.id, path
+
+
+# The one file in the control plane allowed to name the concrete MCP implementation, for the same
+# reason `apps/worker/src/nervos_worker/app.py` is the one allowed to name a provider adapter: a
+# composition root is where a port is bound to an implementation. Every other module -- and every
+# route -- stays free of it, which is what the guard above and below assert.
+API_COMPOSITION_ROOT = API_SOURCE / "app.py"
+
+
+def test_the_control_plane_routes_cannot_reach_the_mcp_sdk() -> None:
+    """The API configures and selects a connection; it never speaks MCP itself."""
+    for path in python_files(API_SOURCE):
+        imports = imported_modules(path)
+        assert not any(module == "mcp" or module.startswith("mcp.") for module in imports), path
+        if path == API_COMPOSITION_ROOT:
+            continue
+        assert not any(module.startswith("nervos_mcp") for module in imports), path
+    for path in python_files(API_ROUTES):
+        imports = imported_modules(path)
+        assert not any(module.startswith("nervos_mcp") for module in imports), path
+
+
+def test_only_a_composition_root_may_name_the_concrete_mcp_implementation() -> None:
+    """A binding of port to implementation belongs in a composition root and nowhere else."""
+    namers = {
+        path.relative_to(ROOT).as_posix()
+        for path in (*python_files(API_SOURCE), *python_files(WORKER_SOURCE))
+        if any(module.startswith("nervos_mcp") for module in imported_modules(path))
+    }
+    assert namers <= {
+        API_COMPOSITION_ROOT.relative_to(ROOT).as_posix(),
+        "apps/worker/src/nervos_worker/app.py",
+        "apps/worker/src/nervos_worker/mcp.py",
+    }, namers

@@ -12,6 +12,7 @@ members = [
     "apps/api",
     "apps/worker",
     "packages/nervos-core",
+    "packages/nervos-mcp",
     "packages/nervos-models",
 ]
 
@@ -31,6 +32,7 @@ testpaths = [
     "apps/api/tests",
     "apps/worker/tests",
     "packages/nervos-core/tests",
+    "packages/nervos-mcp/tests",
     "packages/nervos-models/tests",
 ]
 
@@ -54,6 +56,8 @@ include = [
     "apps/worker/tests",
     "packages/nervos-core/src",
     "packages/nervos-core/tests",
+    "packages/nervos-mcp/src",
+    "packages/nervos-mcp/tests",
     "packages/nervos-models/src",
     "packages/nervos-models/tests",
     "scripts",
@@ -67,6 +71,7 @@ extraPaths = [
     "apps/api/src",
     "apps/worker/src",
     "packages/nervos-core/src",
+    "packages/nervos-mcp/src",
     "packages/nervos-models/src",
 ]
 pythonVersion = "3.12"

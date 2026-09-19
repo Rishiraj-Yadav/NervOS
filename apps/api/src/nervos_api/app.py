@@ -18,6 +18,7 @@ from nervos_core.application.authentication import (
     AuthenticationError,
     AuthenticationService,
 )
+from nervos_core.application.mcp_connection_service import McpConnectionService
 from nervos_core.application.run_cancellation import RunCancellationService
 from nervos_core.infrastructure.database import create_session_factory, create_sqlite_engine
 from nervos_core.infrastructure.database.agents import SqlAlchemyAgentPersistence
@@ -26,7 +27,13 @@ from nervos_core.infrastructure.database.jobs import (
     SqlAlchemyJobPersistence,
     SqlAlchemyRunCancellationPersistence,
 )
+from nervos_core.infrastructure.database.mcp_connections import (
+    SqlAlchemyMcpConnectionPersistence,
+)
 from nervos_core.infrastructure.security import Argon2PasswordHasher, SecureSessionTokens
+from nervos_mcp.adapters import OperatorFacts, build_discovery
+from nervos_mcp.operator_config import load_operator_config
+from nervos_mcp.policy.egress import StrictEgressPolicy
 from nervos_models import compose_model_providers
 
 from nervos_api.api.dependencies import utc_now
@@ -69,6 +76,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             max_pending_per_provider=resolved_settings.max_pending_jobs_per_provider,
         ),
     )
+    # The control plane's MCP surface. It is bound here -- in the composition root -- so every route
+    # and every application module stays free of the SDK. An empty operator configuration refuses
+    # every origin, server key and alias, which is the fail-closed default for an unconfigured host.
+    operator_config = load_operator_config(
+        allowed_origins=resolved_settings.mcp_allowed_origins,
+        stdio_servers_json=resolved_settings.mcp_stdio_servers,
+        credential_aliases_json=resolved_settings.mcp_credential_aliases,
+    )
+    egress_policy = StrictEgressPolicy(operator_config.allowed_origins)
+    mcp_connection_service = McpConnectionService(
+        SqlAlchemyMcpConnectionPersistence(engine),
+        build_discovery(operator_config, egress_policy),
+        OperatorFacts(operator_config, egress_policy),
+        utc_now,
+    )
     # Cancellation composes only the narrow control-plane store: this process gains the ability
     # to revoke authority over an owned Run, and no ability to claim, start, heartbeat,
     # terminalize, or reconcile execution.
@@ -97,6 +119,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.run_submission_service = agent_service
     app.state.run_cancellation_service = run_cancellation_service
     app.state.model_provider_catalog = known_providers
+    app.state.mcp_connection_service = mcp_connection_service
     app.add_exception_handler(Exception, unexpected_error_handler)
     app.add_exception_handler(AuthenticationError, authentication_error_handler)
     app.add_exception_handler(InvalidOrigin, authentication_error_handler)
