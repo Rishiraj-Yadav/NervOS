@@ -20,16 +20,32 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from deterministic import RETRY_DELAY_VARIABLE, FixedDelayRetry, build_deterministic_completions
+from nervos_core.application.builtin_tools import BUILTIN_SOURCE_REF, create_builtin_tool_registry
 from nervos_core.application.job_execution import ClaimedAttempt, JobExecutionService
 from nervos_core.application.lease_reclamation import LeaseReclaimer
 from nervos_core.application.retry_policy import PRODUCTION_RETRY_POLICY, RetryPolicy
 from nervos_core.application.run_execution import RunExecutor
-from nervos_core.application.trusted_chat import create_builtin_handler_registry
+from nervos_core.application.tool_loop import ToolLoop
+from nervos_core.application.trusted_chat import (
+    NERVOS_TOOL_CHAT_SYSTEM_INSTRUCTION,
+    create_builtin_handler_registry,
+)
 from nervos_core.infrastructure.database import create_sqlite_engine
 from nervos_core.infrastructure.database.jobs import SqlAlchemyJobExecutionPersistence
+from nervos_core.infrastructure.database.tool_definitions import (
+    SqlAlchemyToolDefinitionPersistence,
+)
+from nervos_core.infrastructure.database.tool_invocations import (
+    SqlAlchemyToolInvocationPersistence,
+)
+from nervos_core.infrastructure.database.tools import SqlAlchemyToolPermissionEvaluator
 
 # The Worker application itself is production code; only the provider mapping is a double.
-from nervos_worker.app import require_schema_revision, write_ready_marker
+from nervos_worker.app import (
+    reconcile_tool_definitions,
+    require_schema_revision,
+    write_ready_marker,
+)
 from nervos_worker.config import WorkerSettings
 from nervos_worker.identity import generate_worker_id
 from nervos_worker.registry import ReclaimLoop, WorkerRegistry
@@ -216,13 +232,32 @@ async def run() -> int:
                 revision=revision,
             )
         completions = build_deterministic_completions()
+        # The tool path is composed exactly as the production Worker composes it, so a tool-enabled
+        # Run crosses the same registry, catalog, permission, and invocation seams. MCP sources are
+        # deliberately absent because this offline journey ships no MCP connection; the built-in
+        # source alone is complete, and the catalog still authorizes each call live.
+        tool_definitions = SqlAlchemyToolDefinitionPersistence(engine)
+        tool_registry = create_builtin_tool_registry(tool_definitions, clock=utc_now)
+        tool_loop = ToolLoop(
+            registry=tool_registry,
+            source_ref=BUILTIN_SOURCE_REF,
+            authorize=SqlAlchemyToolPermissionEvaluator(engine),
+            invocations=SqlAlchemyToolInvocationPersistence(engine),
+            usage=persistence,
+            system_instruction=NERVOS_TOOL_CHAT_SYSTEM_INSTRUCTION,
+            clock=utc_now,
+        )
         execution = JobExecutionService(
             persistence,
-            RunExecutor(create_builtin_handler_registry()),
+            RunExecutor(create_builtin_handler_registry(), tool_loop=tool_loop),
             completions,
             utc_now,
             retry_policy=resolve_retry_policy(),
         )
+        # Built-in definitions are made durable before the readiness marker, exactly as the shipped
+        # Worker does. Grants nothing: only reconciled definitions plus an explicit grant authorize
+        # a call, and D2's live predicate still decides every one at call time.
+        reconcile_tool_definitions(engine)
         worker_id = generate_worker_id()
         registry = WorkerRegistry(persistence, worker_id, clock=utc_now)
         reclaimer = ReclaimLoop(LeaseReclaimer(persistence), clock=utc_now)

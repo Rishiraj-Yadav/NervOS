@@ -19,6 +19,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO
 
@@ -51,11 +52,24 @@ CANCEL_INPUT = "hold this call open until cancelled"
 CANCEL_DISCOVERY_TIMEOUT_SECONDS = 40
 # Every provider invocation in the whole journey: one for the recovered Run, one for the
 # OpenAI Run, two for the retried Run (its refused first Attempt and its succeeding second
-# Attempt), and one for the cancelled Run. The number is asserted globally on top of the
-# per-prompt counts in `assert_retry_journey` and `assert_cancellation_journey`, so an
-# unexpected extra invocation anywhere — including a cancelled Run being executed again — still
-# fails the journey.
-TOTAL_PROVIDER_CALLS = 5
+# Attempt), one for the cancelled Run, and two for the tool-enabled Run (its tool-requesting turn
+# and its concluding turn). The number is asserted globally on top of the per-prompt counts in
+# `assert_retry_journey` and `assert_cancellation_journey`, so an unexpected extra invocation
+# anywhere — including a cancelled Run being executed again — still fails the journey.
+TOTAL_PROVIDER_CALLS = 7
+
+# Stage-D tool journey. One prompt whose scripted model turn asks for the one tool the supervisor
+# grants, then concludes, so the browser observes a real tool lifecycle on the timeline. No grant
+# management UI exists, so the supervisor seeds the grant directly; the argument JSON the double
+# sends is fixed in `tests/e2e_support/deterministic.py` for the same built-in, so the seed and the
+# script cannot drift apart.
+TOOL_INPUT = "use the granted tool and then answer"
+TOOL_UPSTREAM_NAME = "calculate"
+TOOL_DEFINITION_VERSION = "2"
+# How long the supervisor's seed thread waits for the browser to create the tool-enabled Agent
+# Instance before giving up. It is bounded work on a side thread; the browser's own ack poll is
+# what reports a seed that never happened.
+TOOL_SEED_TIMEOUT_SECONDS = PLAYWRIGHT_TIMEOUT
 
 
 @dataclass(frozen=True)
@@ -286,6 +300,10 @@ def run_e2e() -> int:
         scripted_failures = temporary / "scripted-failures.txt"
         scripted_call_log = temporary / "scripted-calls.txt"
         scripted_failures.write_text(f"{RETRY_PROVIDER}\t{RETRY_INPUT}\t1\n", encoding="utf-8")
+        # Stage-D tool seam. The supervisor seeds the one tool grant as soon as the browser has
+        # created the tool-enabled Agent Instance, and reports the seeded tool's durable
+        # model-facing name here so the browser can assert it never reaches the rendered timeline.
+        tool_grant_ack = temporary / "tool-grant-ack.txt"
         api_reservation = PortReservation()
         web_reservation = PortReservation()
         api_port = api_reservation.port
@@ -316,6 +334,9 @@ def run_e2e() -> int:
             "NERVOS_E2E_BLOCK_INPUT": CANCEL_INPUT,
             "NERVOS_E2E_BLOCK_RELEASE": str(cancel_release),
             "NERVOS_E2E_CANCEL_OBSERVED": str(cancel_observed),
+            # Stage-D tool seam: this one prompt makes the double request the granted tool and then
+            # conclude, so both Workers that may execute the tool-enabled Run are scripted alike.
+            "NERVOS_E2E_TOOL_INPUT": TOOL_INPUT,
         }
         worker_environment = {**worker_environment, **retry_environment}
         worker_b_environment = {**worker_b_environment, **retry_environment}
@@ -326,6 +347,8 @@ def run_e2e() -> int:
             "NERVOS_E2E_CLAIM_GATE": str(worker_claim_gate),
             "NERVOS_E2E_RETRY_INPUT": RETRY_INPUT,
             "NERVOS_E2E_CANCEL_INPUT": CANCEL_INPUT,
+            "NERVOS_E2E_TOOL_INPUT": TOOL_INPUT,
+            "NERVOS_E2E_TOOL_GRANT_ACK": str(tool_grant_ack),
         }
         pnpm = resolve_required_command("pnpm")
 
@@ -449,11 +472,30 @@ def run_e2e() -> int:
                     daemon=True,
                 )
                 watcher.start()
+                # The tool-enabled Agent Instance is created mid-journey through the API, because no
+                # UI exposes the definition version and no grant UI exists at all. This side thread
+                # waits for that row, seeds the one grant, and acknowledges it so the browser only
+                # submits the Run once the grant is committed and therefore inside its cutoff.
+                tool_seed: dict[str, object] = {"seeded": False}
+                tool_seeder = threading.Thread(
+                    target=seed_tool_grant_when_agent_appears,
+                    args=(
+                        database,
+                        tool_grant_ack,
+                        TOOL_UPSTREAM_NAME,
+                        TOOL_SEED_TIMEOUT_SECONDS,
+                        tool_seed,
+                    ),
+                    name="nervos-e2e-tool-seed",
+                    daemon=True,
+                )
+                tool_seeder.start()
                 try:
                     returncode = playwright.wait(timeout=PLAYWRIGHT_TIMEOUT)
                 except subprocess.TimeoutExpired as error:
                     raise RuntimeError("Playwright exceeded its 120 second timeout") from error
                 watcher.join(timeout=WORKER_READY_TIMEOUT)
+                tool_seeder.join(timeout=WORKER_READY_TIMEOUT)
                 if returncode != 0:
                     # Report the browser's own failure *before* any durable assertion. Otherwise
                     # a downstream state mismatch -- a Run left `running` because the journey
@@ -461,6 +503,11 @@ def run_e2e() -> int:
                     # the investigation in the wrong direction.
                     print(log_tail(playwright_log_path), file=sys.stderr)
                     raise RuntimeError(f"Playwright journey failed with status {returncode}")
+                assert_tool_journey(
+                    database=database,
+                    tool_input=TOOL_INPUT,
+                    tool_seeded=bool(tool_seed["seeded"]),
+                )
                 assert_cancellation_journey(
                     database=database,
                     cancel_observed=cancel_observed,
@@ -525,6 +572,155 @@ def count_provider_calls(ledger: Path) -> int:
     if not ledger.exists():
         return 0
     return len([line for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip()])
+
+
+def seed_tool_grant_when_agent_appears(
+    database: Path,
+    ack: Path,
+    upstream_name: str,
+    timeout: float,
+    record: dict[str, object],
+) -> None:
+    """Grant one built-in tool to the tool-enabled Agent Instance the browser creates.
+
+    No capability-management UI exists, so the grant is written durably, exactly as the reviewed
+    operator action would be. It runs on a side thread because the browser creates the Agent
+    Instance mid-journey: the thread waits for that row, commits the grant, and only then writes the
+    acknowledgment the browser polls. The Run is therefore submitted *after* the grant is committed,
+    which is what lets its submission-time cutoff admit the grant at call time.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            model_name = _grant_builtin_tool(database, upstream_name)
+        except (sqlite3.Error, OSError):
+            # A concurrent API/Worker write may hold the database briefly; retry rather than fail.
+            model_name = None
+        if model_name is not None:
+            ack.write_text(f"{model_name}\n", encoding="utf-8")
+            record["seeded"] = True
+            return
+        time.sleep(0.15)
+
+
+def _grant_builtin_tool(database: Path, upstream_name: str) -> str | None:
+    """Insert the one grant for the first tool-enabled Agent Instance, or return None to retry.
+
+    Returns ``None`` while the Agent Instance or the reconciled built-in definition does not exist
+    yet. The reviewed fingerprint is copied from the durable definition inside the same statement,
+    so the grant can never record a fingerprint the definition does not currently have, and an
+    already-present grant is left untouched rather than duplicated.
+    """
+    connection = sqlite3.connect(database, timeout=5.0)
+    try:
+        connection.execute("PRAGMA busy_timeout = 5000")
+        agent = connection.execute(
+            "SELECT id FROM agent_instances WHERE agent_definition_version = ? ORDER BY id LIMIT 1",
+            (TOOL_DEFINITION_VERSION,),
+        ).fetchone()
+        if agent is None:
+            return None
+        definition = connection.execute(
+            "SELECT id, model_name FROM tool_definitions"
+            " WHERE source_kind = 'builtin' AND upstream_name = ? AND status = 'available'",
+            (upstream_name,),
+        ).fetchone()
+        if definition is None:
+            return None
+        existing = connection.execute(
+            "SELECT id FROM agent_tool_grants"
+            " WHERE agent_instance_id = ? AND tool_definition_id = ?",
+            (agent[0], definition[0]),
+        ).fetchone()
+        if existing is None:
+            connection.execute(
+                "INSERT INTO agent_tool_grants"
+                " (agent_instance_id, tool_definition_id, reviewed_fingerprint, created_at)"
+                " SELECT ?, id, fingerprint, ? FROM tool_definitions WHERE id = ?",
+                (agent[0], _utc_storage_text(), definition[0]),
+            )
+            connection.commit()
+        return str(definition[1])
+    finally:
+        connection.close()
+
+
+def _utc_storage_text() -> str:
+    """Format the current instant the way SQLAlchemy stores naive UTC datetimes in SQLite."""
+    return datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
+def assert_tool_journey(*, database: Path, tool_input: str, tool_seeded: bool) -> None:
+    """Prove the Stage-D tool lifecycle from committed state alone.
+
+    A browser can only show that *a* timeline rendered. This checks the durable truth behind it: the
+    Run snapshotted a tool budget and a live grant cutoff, exactly one granted built-in was invoked,
+    it reached `succeeded` rather than being denied or left ambiguous, and the timeline is the
+    frozen lifecycle with nothing invented to fill a gap.
+    """
+    if not tool_seeded:
+        raise RuntimeError("the tool grant was never seeded for the tool-enabled Agent Instance")
+    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    try:
+        run = connection.execute(
+            "SELECT id, status, output_text, error_code, max_tool_calls, tool_grant_cutoff_id"
+            " FROM runs WHERE input_text = ?",
+            (tool_input,),
+        ).fetchone()
+        if run is None:
+            raise RuntimeError("the tool-enabled Run was never accepted")
+        run_id, status, output_text, error_code, max_tool_calls, cutoff = run
+        timeline = [
+            row[0]
+            for row in connection.execute(
+                "SELECT event_type FROM run_events WHERE run_id = ? ORDER BY sequence",
+                (run_id,),
+            )
+        ]
+        invocations = [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT upstream_name, status, started_at FROM tool_invocations"
+                " WHERE run_id = ? ORDER BY tool_sequence",
+                (run_id,),
+            )
+        ]
+    finally:
+        connection.close()
+
+    if max_tool_calls <= 0 or cutoff <= 0:
+        raise RuntimeError(
+            f"the tool-enabled Run snapshotted max_tool_calls={max_tool_calls!r} with cutoff"
+            f" {cutoff!r}; a tool Run needs a positive budget and a live grant cutoff"
+        )
+    expected = [
+        "run.created",
+        "run.queued",
+        "attempt.claimed",
+        "attempt.started",
+        "tool.requested",
+        "tool.started",
+        "tool.succeeded",
+        "run.succeeded",
+    ]
+    if timeline != expected:
+        raise RuntimeError(f"tool timeline was {timeline}, expected {expected}")
+    if status != "succeeded" or error_code is not None or output_text is None:
+        raise RuntimeError(
+            f"the tool-enabled Run ended as {status!r} with error {error_code!r}"
+            f" and output {'set' if output_text is not None else 'unset'}"
+        )
+    if len(invocations) != 1:
+        raise RuntimeError(f"expected one tool invocation for the tool Run, saw {len(invocations)}")
+    upstream_name, invocation_status, started_at = invocations[0]
+    if upstream_name != TOOL_UPSTREAM_NAME:
+        raise RuntimeError(
+            f"the tool Run invoked {upstream_name!r}, expected {TOOL_UPSTREAM_NAME!r}"
+        )
+    if invocation_status != "succeeded" or started_at is None:
+        raise RuntimeError(
+            f"the tool invocation was {invocation_status!r} with started_at={started_at!r}"
+        )
 
 
 def assert_recovery_journey(

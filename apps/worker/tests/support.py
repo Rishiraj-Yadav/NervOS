@@ -19,9 +19,9 @@ from nervos_core.application.model_completion import (
     StopOutcome,
 )
 from nervos_core.application.queue_policy import PRODUCTION_QUEUE_POLICY, QueuePolicy
-from nervos_core.application.run_execution import RunExecutor
+from nervos_core.application.run_execution import RunExecutor, ToolLoopHandler
 from nervos_core.application.trusted_chat import create_builtin_handler_registry
-from nervos_core.domain.runs import STAGE_B_LIMITS
+from nervos_core.domain.runs import STAGE_B_LIMITS, RunLimits
 from nervos_core.infrastructure.database import create_sqlite_engine
 from nervos_core.infrastructure.database.jobs import (
     SqlAlchemyJobExecutionPersistence,
@@ -76,13 +76,24 @@ def migrate(
     return engine
 
 
-def submit(engine: Engine, *, text_value: str = "hello", agent_instance_id: int = 1) -> int:
-    """Durably accept one Run and return its identifier."""
+def submit(
+    engine: Engine,
+    *,
+    text_value: str = "hello",
+    agent_instance_id: int = 1,
+    limits: RunLimits = STAGE_B_LIMITS,
+) -> int:
+    """Durably accept one Run and return its identifier.
+
+    `limits` defaults to the Stage B/C snapshot, so a caller that wants the tool-enabled shape must
+    name `TOOL_ENABLED_LIMITS` explicitly -- the routing decision the D7 acceptance suites exercise
+    is read from the Run's own frozen limits, never inferred from the registry.
+    """
     run = SqlAlchemyJobPersistence(engine, max_pending=1000).submit(
         owner_user_id=1,
         agent_instance_id=agent_instance_id,
         input_text=text_value,
-        limits=STAGE_B_LIMITS,
+        limits=limits,
         now=NOW,
     )
     return run.id
@@ -219,12 +230,18 @@ def build_execution_service(
     completions: dict[str, ModelCompletion],
     clock: Callable[[], datetime] | None = None,
     policy: QueuePolicy = PRODUCTION_QUEUE_POLICY,
+    tool_loop: ToolLoopHandler | None = None,
 ) -> tuple[SqlAlchemyJobExecutionPersistence, JobExecutionService]:
-    """Compose the shipped execution service over disposable persistence."""
+    """Compose the shipped execution service over disposable persistence.
+
+    `tool_loop` is what production's composition root always wires and every pre-D7 test omitted: a
+    Run whose snapshot allows tools is routed to the loop, and one that allows none keeps the
+    unchanged single-call path. Passing `None` reproduces the tool-free composition exactly.
+    """
     persistence = SqlAlchemyJobExecutionPersistence(engine, policy=policy, sleep=lambda _: None)
     service = JobExecutionService(
         persistence,
-        RunExecutor(create_builtin_handler_registry()),
+        RunExecutor(create_builtin_handler_registry(), tool_loop=tool_loop),
         completions,
         clock or (lambda: NOW),
     )
@@ -247,17 +264,21 @@ def build_worker(
     register: bool = True,
     clock: Callable[[], datetime] | None = None,
     policy: QueuePolicy = PRODUCTION_QUEUE_POLICY,
+    tool_loop: ToolLoopHandler | None = None,
 ) -> Worker:
     """Compose the shipped Worker loop over disposable persistence.
 
     The registry and reclaimer are real, not doubles, so every Worker test exercises the shipped
     registration path. Both auxiliary loops default to a very long interval so they stay out of
     the way of tests that are not about them.
+
+    `tool_loop` mirrors production's composition root so a Worker-composed suite can carry a
+    tool-enabled Run through the same `RunExecutor` routing decision the process uses.
     """
     now = clock or (lambda: NOW)
     # The orchestration clock must be the same object the Worker uses: a start committed with a
     # clock behind the claim's own heartbeat would violate the ordering the schema enforces.
-    _persistence, execution = build_execution_service(engine, completions, now, policy)
+    _persistence, execution = build_execution_service(engine, completions, now, policy, tool_loop)
     registry = WorkerRegistry(_persistence, worker_id, clock=now)
     worker = Worker(
         _persistence,

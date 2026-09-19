@@ -19,6 +19,8 @@ from nervos_core.application.model_completion import (
     ModelResponse,
     ModelUsage,
     StopOutcome,
+    ToolCall,
+    ToolResultTurn,
 )
 
 ANTHROPIC_ID = "anthropic"
@@ -72,6 +74,17 @@ BLOCK_RELEASE_VARIABLE = "NERVOS_E2E_BLOCK_RELEASE"
 # provider had not answered yet". Production sets neither variable, so production never blocks
 # and never writes a file.
 CANCEL_OBSERVED_VARIABLE = "NERVOS_E2E_CANCEL_OBSERVED"
+
+# Test-only tool-turn scripting. The supervisor names one prompt whose model turn must request the
+# one granted tool and then conclude. The double never guesses the model-facing tool name: the
+# catalog it is actually offered is passed to it, so it calls whatever name that turn offered. It
+# decides turn *kind* from the conversation it is handed -- a request that already carries a tool
+# result is the concluding turn, so exactly one tool call runs per Run and no state is kept between
+# provider invocations. The argument JSON is the built-in `calculate` expression the supervisor
+# grants, kept here so the script and the seed cannot drift apart silently.
+TOOL_INPUT_VARIABLE = "NERVOS_E2E_TOOL_INPUT"
+TOOL_ARGUMENTS_JSON = '{"expression": "6 * 7"}'
+TOOL_CALL_ID = "e2e-tool-call-1"
 
 
 def _record_cancellation_observed(provider_id: str, user_text: str) -> None:
@@ -140,6 +153,24 @@ def _record_scripted_call(provider_id: str, user_text: str) -> int:
     return prior
 
 
+def _scripted_tool_call(request: ModelRequest) -> ToolCall | None:
+    """Return the one tool call the supervisor scripted for this turn, if any.
+
+    Three conditions must all hold, and every one of them is read from the request rather than from
+    process state: the prompt is the scripted one, the model was actually offered a tool (the
+    grant-filtered catalog decided that), and the conversation has not yet carried a tool result.
+    The last condition is what makes the second turn a conclusion instead of an infinite loop.
+    """
+    target = os.environ.get(TOOL_INPUT_VARIABLE, "").strip()
+    if not target or request.user_text != target or not request.tools:
+        return None
+    if any(isinstance(turn, ToolResultTurn) for turn in request.turns):
+        return None
+    return ToolCall(
+        call_id=TOOL_CALL_ID, name=request.tools[0].name, arguments_json=TOOL_ARGUMENTS_JSON
+    )
+
+
 class DeterministicCompletion:
     """Provider-identifying offline completion used only by supervised E2E."""
 
@@ -156,6 +187,16 @@ class DeterministicCompletion:
         if prior < _scripted_failure_count(self.provider_id, request.user_text):
             raise ModelProviderError(MODEL_RATE_LIMITED)
         await _block_until_released_or_cancelled(self.provider_id, request.user_text)
+        tool_call = _scripted_tool_call(request)
+        if tool_call is not None:
+            return ModelResponse(
+                "",
+                self.provider_id,
+                request.model_name,
+                StopOutcome.TOOL_USE,
+                ModelUsage(11, 7, self.total_tokens),
+                tool_calls=(tool_call,),
+            )
         return ModelResponse(
             self.reply,
             self.provider_id,

@@ -1,6 +1,6 @@
 # ADR 0016 — MCP Client, Discovery, and Connection Trust Boundary
 
-Status: Proposed — D0 architecture freeze, pending external review
+Status: Accepted for Stage D implementation
 
 This ADR freezes how NervOS speaks MCP, what it will and will not connect to, and where the boundary
 between NervOS policy and the official protocol implementation sits. Authority and audit are

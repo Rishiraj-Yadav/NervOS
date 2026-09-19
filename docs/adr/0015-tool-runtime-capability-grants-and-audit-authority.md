@@ -1,6 +1,6 @@
 # ADR 0015 — Tool Runtime, Capability Grants, and Audit Authority
 
-Status: Proposed — D0 architecture freeze, pending external review
+Status: Accepted for Stage D implementation
 
 This ADR freezes the policy half of Stage D: what a capability *is*, who may hold one, when it is
 checked, what may be recorded about a call, and what may never be. The protocol half is ADR 0016; the

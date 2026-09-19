@@ -6,7 +6,7 @@ Stage C — Persistent execution engine is COMPLETE. The C0 architecture freeze,
 
 Stage B — Trusted-agent runtime proof is complete and accepted. B1 domain/persistence, B2 internal one-call execution, B3 trusted Agent/Run HTTP API with the minimal Chat dashboard interaction, and B4 second-provider portability are implemented, merged to `main`, and post-merge verified.
 
-The current engineering milestone is **Stage D — tool and MCP layer**. Its **D0 architecture,
+**Stage D — the tool and MCP layer — is COMPLETE.** Its **D0 architecture,
 protocol and safety freeze is complete and externally accepted**. D0 delivered governance only: it
 froze the tool, capability, permission and tool-durability architecture in ADRs 0015–0017 and changed
 no runtime behaviour. **D1 — durable tool, capability, and audit schema is complete and accepted**.
@@ -15,7 +15,8 @@ no runtime behaviour. **D1 — durable tool, capability, and audit schema is com
 **D4 — provider-neutral tool calling and the Think → Act → Observe loop is complete and accepted**.
 **D5 — MCP client/gateway and connection lifecycle is complete and accepted**.
 **D6 — tool audit, failure semantics, and C3–C6 integration is complete and accepted**.
-The next milestone is **D7 — Integrated acceptance, MVP closeout, and documentation**.
+**D7 — integrated acceptance and Stage-D closeout is complete and accepted**.
+The next milestone is **Stage E — Scheduling, events, and triggers**.
 
 ## Stage D milestones
 
@@ -26,7 +27,7 @@ The next milestone is **D7 — Integrated acceptance, MVP closeout, and document
 - [x] D4 — Provider-neutral tool calling and the Think → Act → Observe loop
 - [x] D5 — MCP client/gateway and connection lifecycle
 - [x] D6 — Tool audit, failure semantics, and C3–C6 integration
-- [ ] D7 — Integrated acceptance, MVP closeout, and documentation
+- [x] D7 — Integrated acceptance, MVP closeout, and documentation
 
 D0 is **architecture frozen and externally accepted**. It fixed: the MCP protocol target
 (`2026-07-28`, modern era only, Streamable HTTP and stdio, official SDK v2 with no custom protocol
@@ -788,7 +789,7 @@ C8 proves that the finished kernel composes. Each of C2–C7 proved its own slic
 
 Taken together, the guarantees NervOS now offers are: **fenced durable authority**, so only a live lease holder may write; **no blind replay of ambiguous execution**, so an unknown outcome is closed as failed rather than repeated; **safe retry only for a positively safe outcome**; and **late stale writes cannot overwrite truth**. NervOS does **not** guarantee exactly-once remote provider execution. Remote provider processing, billing, and side effects may still occur after an ambiguous post-start crash, a running cancellation, or an execution timeout, and these remain outside the local transaction boundary.
 
-The next engineering milestone is **D7 — Integrated acceptance, MVP closeout, and documentation**.
+D7 is complete and externally accepted, and Stage D — the tool and MCP layer — is **complete**. The next engineering milestone is **Stage E — Scheduling, events, and triggers**.
 
 D2 adds the permission layer that will gate every future tool call, and it adds nothing that can call one. A user's Agent Instance holds an explicit ALLOW row per tool; there is no DENY row, so "not granted" and "revoked" are the same observable state and an entire class of precedence bug cannot be expressed. The call-time evaluator derives its authority from durable rows rather than from its caller: it takes only a Run id and a tool definition id, loads the Run to obtain the Agent Instance and the monotonic grant cutoff, loads the grant, and loads the definition to compare `grant.reviewed_fingerprint` against `tool_definitions.fingerprint` directly. No caller can supply an Agent, a cutoff, or a fingerprint, so a stale grant cannot be revived by presenting the fingerprint it was reviewed at. Revocation deletes the row and bites at the very next check; a new grant is invisible to a Run already submitted because its id exceeds that Run's snapshotted cutoff; re-granting and re-confirming both mint a new AUTOINCREMENT id, so the capability reaches only Runs submitted afterwards. Drift fails closed as `DEFINITION_CHANGED`, an unavailable definition as `DEFINITION_UNAVAILABLE`, a disabled MCP connection as `CONNECTION_DISABLED`, and a cross-owner MCP grant as `OWNER_MISMATCH` — the last re-proven at call time against the connection's owner rather than trusted from grant creation, so a grant row inserted directly into the database still fails closed. Annotations remain presentation-only and never grant. The evaluator is a pure read: it writes no `tool_invocations` row, emits no Run Event, and touches no execution state. **D2 added no migration and no dependency**; the migration head remains `0007_stage_d1_tool_capability_audit`. Nothing executes a tool yet: there is still no registry, no canonical schema validator, no built-in tool, no MCP client, no provider tool calling, and no Think → Act → Observe loop.
 
@@ -812,6 +813,22 @@ Stage C — Persistent execution engine is complete. C0–C8 are all implemented
 Stage B implementation is complete. B4 passed external implementation review and hosted checks, was finalized as implementation commit `faa52a2`, and was merged to `main` by pull request #8 in merge commit `acb55b3`.
 
 No live provider proof has been executed for either provider; those optional proofs remain separately authorized and non-blocking.
+
+## D7 implementation verification
+
+D7 is integrated deterministic acceptance for Stage D and its closeout, not a feature milestone. It adds **no** product architecture: no API, no route, no status, no table, no migration, no execution policy, no queue policy, no transport, no configuration, and no authority mechanism. **No production source file changed at all.** No production defect was found by the integrated journeys, so no source re-freeze and no evidence rerun was required.
+
+**The composition was the point.** Every pre-D7 test in the repository constructed `RunExecutor` **without** a `tool_loop`; only the Worker composition root ever wired one. The routing decision inside `run_execution.py` — which execution shape a Run takes, and what happens when a tool-enabled Run arrives with no claim to fence its writes on — had therefore never been exercised by a test. D7's harness builds the composition the Worker builds, and every journey is driven through the real `JobExecutionService` → `RunExecutor` → `ToolLoop` path rather than calling `ToolLoop.run` directly. That fail-closed branch is now covered too: a tool-enabled Run reaching the executor without a claim fails as a normalized internal error with zero provider calls, instead of silently falling back to the tool-free path.
+
+**Integrated journeys.** Backward compatibility (`nervos.chat@1` is byte-for-byte the Stage B/C execution it always was, with no invocation and no tool event); the builtin `nervos.chat@2` Think → Act → Observe loop; one Attempt executing a builtin **plus two MCP sources** out of one frozen catalog with source-correct identities and per-source ledgers; MCP over Streamable HTTP and over an operator-declared stdio `server_key` (a real child process, never a shell, with the child confirmed gone after shutdown); default deny; the Run grant cutoff across two Runs; revocation before the start boundary; fingerprint drift; `unsupported_schema` failing closed; a connection disabled **after** catalog assembly; model rate-limit after a remote write; Worker loss after a remote write; cancellation on both sides of the dispatch boundary; tool timeout; unknown and malformed requests; the consecutive-failure cap; the one Run / one Job / one Attempt shape; C6 concurrency, fairness and backpressure over a tool-enabled fleet; lease heartbeat across a multi-turn loop; lease loss with a late remote result; the MCP lifecycle-owner repair through the production `close_worker` consumer; restart persistence; a fresh database migrated to `0007` with a real Worker boot and clean shutdown; owner-scoped API behaviour; and the safe public tool timeline read through the C7 projection rather than raw SQL.
+
+**No-replay acceptance.** Two journeys carry the milestone's most important claim, and both assert exact equality rather than a bound: a rate limit following a remote `write_document` leaves the fake server's ledger at **exactly one** entry with `attempt_count` 1 and no `retry.scheduled`, and an expired lease following a remote write leaves the ledger at **exactly one** entry and closes the invocation `started → ambiguous` with the frozen event tail `attempt.expired → recovery.ambiguous → tool.ambiguous → run.failed`. Cancellation after dispatch releases the held remote call *after* the Run is cancelled, proving the late result is fenced and cannot resurrect it.
+
+**Audit, privacy and the browser.** The tool lifecycle is asserted through the public read path, with monotonic sequences and correct invocation linkage, and with no argument, result, digest, provider error or internal-ambiguity text reachable in any published field. The deterministic supervised browser journey gained **one** seeded tool-enabled Run and asserts only that the Run is visible, the tool lifecycle renders, the final state settles, and no raw or internal material reaches the DOM — all pre-existing Stage A–C5 assertions unchanged.
+
+**D7 added no migration and no dependency**; the migration head remains `0007_stage_d1_tool_capability_audit`, which was byte-identical throughout, and no `0008` exists. **Not included:** the Stage E scheduler, events and triggers; Stage F conversation sessions and memory; the Stage G package system; Stage H approvals, sandboxing and isolation; and any exactly-once remote-effect claim.
+
+**Stage D proves capable tool-using agents.** It does not yet provide scheduling, background triggers, persistent conversation memory, installable agent packages, or interactive approvals and isolation — those remain Stages E, F, G and H. NervOS still makes **no exactly-once claim** for remote effects: it prevents known unsafe replay after dispatch and records ambiguity when a remote outcome cannot be proven.
 
 ## Maintenance rule
 

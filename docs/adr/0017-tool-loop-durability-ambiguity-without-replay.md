@@ -1,6 +1,6 @@
 # ADR 0017 — Tool-Loop Durability: Ambiguity Without Replay
 
-Status: Proposed — D0 architecture freeze, pending external review
+Status: Accepted for Stage D implementation
 
 This ADR freezes what happens to a Run when a model call and an external action are interleaved —
 across a crash, a retry, a cancellation, a timeout, and a fleet of Workers. It is the part of Stage D
