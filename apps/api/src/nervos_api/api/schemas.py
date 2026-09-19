@@ -3,6 +3,7 @@
 from datetime import datetime
 from typing import Annotated, Literal
 
+from nervos_core.application.mcp_connections import McpConnectionRow
 from nervos_core.domain.agents import AgentInstance, InvalidAgentInstance
 from nervos_core.domain.jobs import JobStatus, RunEvent, RunEventType
 from nervos_core.domain.runs import ModelUsage, Run, RunStatus
@@ -282,3 +283,94 @@ def usage_response(usage: ModelUsage) -> RunUsageResponse | None:
         output_tokens=usage.output_tokens,
         total_tokens=usage.total_tokens,
     )
+
+
+class McpConnectionCreateRequest(BaseModel):
+    """Configuration of one approved MCP tool source.
+
+    Every field here is a *name*: an opaque operator-declared server key, an opaque credential
+    alias, a URL. There is deliberately no field for a command, an argument vector, a shell, a
+    working directory, an environment mapping, or the name of an environment variable, and
+    ``extra="forbid"`` is what makes that structural -- a request carrying one is rejected rather
+    than silently ignored.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: Annotated[str, Field(min_length=1, max_length=100)]
+    transport: Literal["http", "stdio"]
+    endpoint: Annotated[str, Field(min_length=1, max_length=512)] | None = None
+    server_key: Annotated[str, Field(min_length=1, max_length=128)] | None = None
+    credential_ref: Annotated[str, Field(min_length=1, max_length=128)] | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_target(self) -> "McpConnectionCreateRequest":
+        """Require the one target this transport uses, and forbid the other."""
+        if self.transport == "http":
+            if self.endpoint is None or self.server_key is not None:
+                raise ValueError("an http connection requires exactly one endpoint")
+        elif self.server_key is None or self.endpoint is not None:
+            raise ValueError("a stdio connection requires exactly one server key")
+        return self
+
+
+class McpConnectionDisplayNameRequest(BaseModel):
+    """The one in-place mutation a connection permits."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: Annotated[str, Field(min_length=1, max_length=100)]
+
+
+class McpConnectionResponse(BaseModel):
+    """Safe persisted connection representation.
+
+    It exposes the credential *alias* -- which is an operator-visible name the owner themselves
+    supplied -- and never a credential value, an environment-variable name, an executable, an
+    argument vector, or any raw remote text.
+    """
+
+    id: int
+    display_name: str
+    transport: str
+    endpoint: str | None
+    server_key: str | None
+    credential_ref: str | None
+    enabled: bool
+    catalog_status: str
+    last_discovery_at: datetime | None
+    last_error_code: str | None
+    last_error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_domain(cls, connection: McpConnectionRow) -> "McpConnectionResponse":
+        return cls(
+            id=connection.connection_id,
+            display_name=connection.display_name,
+            transport=connection.transport.value,
+            endpoint=connection.endpoint,
+            server_key=connection.server_key,
+            credential_ref=connection.credential_ref,
+            enabled=connection.enabled,
+            catalog_status=connection.catalog_status.value,
+            last_discovery_at=connection.last_discovery_at,
+            last_error_code=connection.last_error_code,
+            last_error_message=connection.last_error_message,
+            created_at=connection.created_at,
+            updated_at=connection.updated_at,
+        )
+
+
+class McpConnectionPageResponse(BaseModel):
+    """One newest-first page of owned MCP connections."""
+
+    items: list[McpConnectionResponse]
+    next_before_id: int | None
+
+
+class McpConnectionDeletedResponse(BaseModel):
+    """Confirmation that a connection and its private definitions were removed."""
+
+    deleted: Literal[True] = True

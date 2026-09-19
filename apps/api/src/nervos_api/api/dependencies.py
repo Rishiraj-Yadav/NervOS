@@ -12,6 +12,7 @@ from nervos_core.application.authentication import (
     AuthenticationService,
     PublicUser,
 )
+from nervos_core.application.mcp_connection_service import McpConnectionService
 from nervos_core.application.model_providers import ModelProviderCatalog
 from nervos_core.application.run_cancellation import RunCancellationService
 
@@ -48,6 +49,11 @@ def get_run_submission_service(request: Request) -> AgentService:
 def get_run_cancellation_service(request: Request) -> RunCancellationService:
     """Return the owner-authorized Run cancellation service; routes never build one."""
     return cast(RunCancellationService, request.app.state.run_cancellation_service)
+
+
+def get_mcp_connection_service(request: Request) -> McpConnectionService:
+    """Return the owner-scoped MCP connection service; routes never build one."""
+    return cast(McpConnectionService, request.app.state.mcp_connection_service)
 
 
 def get_model_provider_catalog(request: Request) -> ModelProviderCatalog:
@@ -88,6 +94,10 @@ RunCancellationDependency = Annotated[
 ModelProviderCatalogDependency = Annotated[
     ModelProviderCatalog,
     Depends(get_model_provider_catalog),
+]
+McpConnectionServiceDependency = Annotated[
+    McpConnectionService,
+    Depends(get_mcp_connection_service),
 ]
 OriginDependency = Annotated[None, Depends(require_configured_origin)]
 CurrentUserDependency = Annotated[PublicUser, Depends(get_current_user)]

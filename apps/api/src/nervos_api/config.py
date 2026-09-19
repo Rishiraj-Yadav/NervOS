@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     # operator the knob without refusing a Run that C2 would have admitted.
     max_pending_jobs_per_agent: int = Field(default=1000, ge=1, le=100_000)
     max_pending_jobs_per_provider: int = Field(default=1000, ge=1, le=100_000)
+    # Operator-owned MCP configuration. It is read here because the control plane must be able to
+    # answer "did the operator approve this origin, this server key, this credential alias?" at
+    # create time -- a connection whose target nobody published is refused when it is written, not
+    # when it is first executed. All three default to empty, and empty refuses everything.
+    mcp_allowed_origins: str = ""
+    mcp_stdio_servers: str = ""
+    mcp_credential_aliases: str = ""
 
     @field_validator("database_path", mode="before")
     @classmethod

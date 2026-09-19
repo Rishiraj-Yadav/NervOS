@@ -51,7 +51,9 @@ from nervos_core.application.model_completion import (
 from nervos_core.application.tool_catalog import (
     ToolCatalog,
     ToolCatalogInvalid,
+    ToolSourceSynchronizer,
     assemble_tool_catalog,
+    gather_descriptors,
 )
 from nervos_core.application.tool_invocations import (
     ClaimHandle,
@@ -63,7 +65,11 @@ from nervos_core.application.tool_invocations import (
     result_envelope,
 )
 from nervos_core.application.tool_permissions import ToolPermissionEvaluator
-from nervos_core.application.tool_registry import ToolExecutionFailure, ToolRegistry
+from nervos_core.application.tool_registry import (
+    ToolExecutionFailure,
+    ToolOutcomeUnknown,
+    ToolRegistry,
+)
 from nervos_core.application.tool_schema import validate_instance
 from nervos_core.application.trusted_chat import ChatOutcome, final_chat_outcome
 from nervos_core.domain.runs import Run, RunStatus
@@ -244,6 +250,7 @@ class ToolLoop:
         system_instruction: str,
         clock: Callable[[], datetime],
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        synchronizer: ToolSourceSynchronizer | None = None,
     ) -> None:
         self._registry = registry
         self._source_ref = source_ref
@@ -253,6 +260,7 @@ class ToolLoop:
         self._system_instruction = system_instruction
         self._clock = clock
         self._sleep = sleep
+        self._synchronizer = synchronizer
 
     async def run(
         self,
@@ -293,9 +301,21 @@ class ToolLoop:
                 await self._dispatch(run, claim, catalog, state, call)
 
     async def _assemble_catalog(self, run: Run) -> ToolCatalog:
-        """Assemble this Attempt's one immutable catalog, or fail the Run closed."""
+        """Assemble this Attempt's one immutable catalog, or fail the Run closed.
+
+        Every registered source contributes, so one Attempt may offer built-ins alongside the tools
+        of each MCP connection this process has synchronised. Membership still grants nothing: the
+        assembly below submits every candidate to the live D2 evaluator.
+
+        Synchronising first is what keeps the registry from being a startup-time snapshot. It runs
+        *before* gathering and *outside* the provider call, it reads durable state only, and a
+        failure here withholds tools rather than granting them -- so it cannot widen what this Run
+        may do.
+        """
         try:
-            descriptors = await self._registry.source(self._source_ref).list_tools()
+            if self._synchronizer is not None:
+                await self._synchronizer.synchronize_for_run(run)
+            descriptors = await gather_descriptors(self._registry)
             return assemble_tool_catalog(
                 descriptors=descriptors, run_id=run.id, authorize=self._authorize
             )
@@ -499,6 +519,20 @@ class ToolLoop:
             self._failed_invocation(state, claim, requested.invocation_id, failure)
             self._observe_failure(run, state, call.call_id, failure.message)
             return
+        except ToolOutcomeUnknown:
+            # An executor that lost the answer rather than obtaining one. This is the same
+            # ambiguity the timeout above models, reached deliberately instead of by accident: the
+            # call may have landed, so it is recorded ambiguous and the Run fails without an
+            # observation -- a model told "the result is unknown" would simply ask again, and one
+            # Requested call may not produce two effects.
+            self._invocations.mark_ambiguous(
+                claim=claim,
+                invocation_id=requested.invocation_id,
+                error_code=TOOL_OUTCOME_UNKNOWN,
+                error_message=safe_error_message(TOOL_OUTCOME_UNKNOWN),
+                now=self._clock(),
+            )
+            raise ModelProviderError(TOOL_OUTCOME_UNKNOWN, usage=state.usage) from None
         except asyncio.CancelledError:
             # The caller withdrew the task -- an outer deadline or shutdown. The invocation is left
             # truthfully `started`: the call happened, and this Worker may not say how it ended.

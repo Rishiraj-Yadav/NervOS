@@ -40,6 +40,13 @@ class WorkerSettings(BaseSettings):
     max_active_jobs: int = Field(default=4, ge=1, le=16)
     # Test-only readiness marker. Production never sets it, so production never writes a file.
     worker_ready_file: Path | None = None
+    # Operator-owned MCP configuration. It is read at startup and never persisted: a durable
+    # connection row names an alias and an origin, and both are resolved against this process's
+    # configuration at the last practical moment before a transport exists. All three default to
+    # empty, and empty refuses every origin, every server key and every alias.
+    mcp_allowed_origins: str = ""
+    mcp_stdio_servers: str = ""
+    mcp_credential_aliases: str = ""
     anthropic_api_key: SecretStr | None = Field(
         default=None,
         validation_alias=ANTHROPIC_API_KEY_VARIABLE,

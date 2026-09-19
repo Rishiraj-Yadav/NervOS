@@ -31,6 +31,9 @@ from nervos_core.application.trusted_chat import (
 from nervos_core.domain.tools import ToolDescriptor
 from nervos_core.infrastructure.database import create_session_factory, create_sqlite_engine
 from nervos_core.infrastructure.database.jobs import SqlAlchemyJobExecutionPersistence
+from nervos_core.infrastructure.database.mcp_connections import (
+    SqlAlchemyMcpConnectionPersistence,
+)
 from nervos_core.infrastructure.database.tool_definitions import (
     SqlAlchemyToolDefinitionPersistence,
 )
@@ -38,6 +41,9 @@ from nervos_core.infrastructure.database.tool_invocations import (
     SqlAlchemyToolInvocationPersistence,
 )
 from nervos_core.infrastructure.database.tools import SqlAlchemyToolPermissionEvaluator
+from nervos_mcp.gateway import McpGateway
+from nervos_mcp.operator_config import load_operator_config
+from nervos_mcp.policy.egress import StrictEgressPolicy
 from nervos_models import (
     ModelProviderComposition,
     close_model_providers,
@@ -49,6 +55,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from nervos_worker.config import WorkerSettings, get_worker_settings
 from nervos_worker.identity import generate_worker_id
+from nervos_worker.mcp import McpRegistrySynchronizer, build_mcp_gateway
 from nervos_worker.registry import ReclaimLoop, WorkerRegistry
 from nervos_worker.service import Worker
 
@@ -115,6 +122,8 @@ class WorkerComposition:
     registry: WorkerRegistry
     reclaimer: ReclaimLoop
     worker: Worker
+    mcp_gateway: McpGateway
+    mcp_synchronizer: McpRegistrySynchronizer
 
 
 def create_worker(settings: WorkerSettings | None = None) -> WorkerComposition:
@@ -134,14 +143,39 @@ def create_worker(settings: WorkerSettings | None = None) -> WorkerComposition:
     providers = compose_model_providers(anthropic_secret, openai_secret)
     completions = resolve_completions(providers)
     tool_definitions = SqlAlchemyToolDefinitionPersistence(engine)
+    tool_registry = create_builtin_tool_registry(tool_definitions, clock=utc_now)
+    # The Worker's MCP side: one process-local cache of live clients, and the durable connection
+    # rows it may execute against. The strict policy is chosen here and nowhere else -- `build_
+    # mcp_gateway` deliberately takes it as an argument rather than constructing one.
+    mcp_operator = load_operator_config(
+        allowed_origins=resolved.mcp_allowed_origins,
+        stdio_servers_json=resolved.mcp_stdio_servers,
+        credential_aliases_json=resolved.mcp_credential_aliases,
+    )
+    mcp_connections = SqlAlchemyMcpConnectionPersistence(engine)
+    mcp_gateway = build_mcp_gateway(
+        connections=mcp_connections,
+        operator=mcp_operator,
+        policy=StrictEgressPolicy(mcp_operator.allowed_origins),
+    )
+    mcp_synchronizer = McpRegistrySynchronizer(
+        registry=tool_registry,
+        connections=mcp_connections,
+        definitions=tool_definitions,
+        gateway=mcp_gateway,
+    )
     tool_loop = ToolLoop(
-        registry=create_builtin_tool_registry(tool_definitions, clock=utc_now),
+        registry=tool_registry,
         source_ref=BUILTIN_SOURCE_REF,
         authorize=SqlAlchemyToolPermissionEvaluator(engine),
         invocations=SqlAlchemyToolInvocationPersistence(engine),
         usage=persistence,
         system_instruction=NERVOS_TOOL_CHAT_SYSTEM_INSTRUCTION,
         clock=utc_now,
+        # The one non-startup seam: before each Attempt assembles its catalog, the registry is
+        # re-synchronised from durable connection state. This is what lets a connection created by
+        # the control plane after this process started become usable without a restart.
+        synchronizer=mcp_synchronizer,
     )
     execution = JobExecutionService(
         persistence,
@@ -178,11 +212,14 @@ def create_worker(settings: WorkerSettings | None = None) -> WorkerComposition:
         registry=registry,
         reclaimer=reclaimer,
         worker=worker,
+        mcp_gateway=mcp_gateway,
+        mcp_synchronizer=mcp_synchronizer,
     )
 
 
 async def close_worker(composition: WorkerComposition) -> None:
-    """Close owned provider clients and dispose the engine."""
+    """Close owned provider clients, live MCP sessions, and the engine."""
+    await composition.mcp_gateway.close_all()
     await close_model_providers(composition.providers)
     composition.engine.dispose()
 

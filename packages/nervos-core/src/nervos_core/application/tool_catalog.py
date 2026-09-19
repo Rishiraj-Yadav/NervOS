@@ -14,15 +14,17 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import cast
+from typing import Protocol, cast
 
 from nervos_core.application.model_completion import ToolSchema
 from nervos_core.application.tool_permissions import ToolPermissionEvaluator
+from nervos_core.application.tool_registry import ToolRegistry
 from nervos_core.application.tool_schema import (
     CanonicalSchema,
     SchemaRejection,
     validate_canonical_schema,
 )
+from nervos_core.domain.runs import Run
 from nervos_core.domain.tools import JsonValue, ToolDescriptor, canonical_json_text
 
 # The frozen provider-neutral catalog bounds. Both are counted over the *whole* ordered array as it
@@ -88,6 +90,49 @@ def _canonical_input_schema(descriptor: ToolDescriptor) -> CanonicalSchema:
     if isinstance(schema, SchemaRejection):  # pragma: no cover - registration already proves this
         raise ToolCatalogInvalid("a descriptor carries a non-canonical input schema")
     return schema
+
+
+class ToolSourceSynchronizer(Protocol):
+    """Make the sources a Run's catalog will be gathered from available in this process.
+
+    A Worker's registry is process-local state, but a connection is durable and may have been
+    created, refreshed or disabled by the control plane, or by a different Worker, at any moment.
+    Without this seam the registry would only ever reflect what existed when the process started, so
+    a tool discovered a second later would stay invisible until a restart.
+
+    Implementations read durable state only. Synchronising is **not** authorising: it may register a
+    source, and D2's live evaluator still decides every call, so doing nothing here can only ever
+    withhold a tool -- never permit one. It must also perform no remote I/O, because it runs on the
+    path to assembling a catalog and a network round trip per Attempt would make the catalog's
+    contents depend on a remote server being reachable.
+    """
+
+    async def synchronize_for_run(self, run: Run) -> None: ...
+
+
+async def gather_descriptors(registry: ToolRegistry) -> tuple[ToolDescriptor, ...]:
+    """Collect every descriptor the registry can currently offer, across all registered sources.
+
+    One Attempt's catalog is a view over *all* the sources this process has registered -- the
+    built-ins and each MCP connection alike -- rather than over a single named source. That is what
+    lets a Run hold grants from a built-in and from two different connections at once, and it is why
+    nothing here restricts a Run to one MCP connection or invents an aggregate source identity: the
+    registry is already keyed by real :class:`ToolSourceRef`, so iterating it needs no new concept.
+
+    Gathering is not authorisation. Every descriptor collected here is still submitted to the live
+    permission evaluator inside :func:`assemble_tool_catalog`, and an entry that survives is still
+    re-checked immediately before it is dispatched. A definition whose connection is disabled or
+    whose fingerprint has drifted is therefore dropped by the evaluator, not by this function.
+
+    No de-duplication happens here, deliberately. A definition belongs to exactly one source, so two
+    registered sources cannot report the same one; collapsing rows by id would be solving a problem
+    that cannot occur, and it would silently drop genuinely distinct candidates that happen to share
+    an id in a test fixture.
+    """
+    descriptors: list[ToolDescriptor] = []
+    for source_ref in registry.source_refs():
+        descriptors.extend(await registry.source(source_ref).list_tools())
+    return tuple(descriptors)
 
 
 def assemble_tool_catalog(

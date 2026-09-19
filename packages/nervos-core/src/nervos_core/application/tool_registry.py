@@ -63,6 +63,24 @@ class ToolExecutionFailure(Exception):
         self.message = message
 
 
+class ToolOutcomeUnknown(Exception):
+    """A tool call that may have reached its executor, whose outcome cannot be known.
+
+    This is the provider-neutral form of the ambiguity D4's timeout already models: before this
+    existed the loop could reach that state only by timing itself out, so an executor that *knows*
+    it lost the answer -- an external tool whose request was sent and whose reply never arrived --
+    had no way to say so and would have had to misreport the call as a clean failure.
+
+    It carries **no** payload of any kind. An executor signals it, and the loop does the rest: the
+    invocation is marked ``ambiguous``, the Run fails with ``tool_outcome_unknown``, no observation
+    is appended for the model, and nothing is retried or redispatched. There is deliberately no
+    message parameter, so no remote text can ride into durable state on this path.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("tool outcome unknown")
+
+
 class DuplicateToolSource(ValueError):
     """Raised when one exact source identity is registered twice."""
 
@@ -228,6 +246,21 @@ class ToolRegistry:
             return self._executors[source_ref]
         except KeyError as error:
             raise UnknownToolSource(source_ref) from error
+
+    def unregister(self, source_ref: ToolSourceRef) -> None:
+        """Forget one registered source, if it is registered.
+
+        This exists for local cleanup -- a Worker that has synchronised a source it no longer needs
+        can drop it -- and nothing depends on it having run. **Correctness never rests on this
+        succeeding.** A stale registration is harmless because the authority over a call is D2's
+        live evaluator reading durable connection and definition state, not the presence of one;
+        so a Worker that never hears about another Worker's disable still denies the call.
+
+        Removing an unknown ref is a no-op rather than an error, for the same reason: a cleanup path
+        that can fail spuriously is a cleanup path that will.
+        """
+        self._sources.pop(source_ref, None)
+        self._executors.pop(source_ref, None)
 
     def source_refs(self) -> tuple[ToolSourceRef, ...]:
         return tuple(self._sources)

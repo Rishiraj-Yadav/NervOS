@@ -1,1 +1,20 @@
-# Future MCP integration package. Excluded from the Stage A1 uv workspace.
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nervos-mcp"
+version = "0.1.0"
+description = "NervOS MCP client, gateway, and connection lifecycle"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx2>=2.5,<3",
+    "mcp>=2.2,<3",
+    "nervos-core",
+]
+
+[tool.uv.sources]
+nervos-core = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nervos_mcp"]

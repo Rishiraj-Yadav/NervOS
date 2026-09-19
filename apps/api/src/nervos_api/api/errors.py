@@ -24,11 +24,13 @@ from nervos_core.application.errors import (
     PersistenceUnavailable as ApplicationPersistenceUnavailable,
 )
 from nervos_core.application.errors import QueueCapacityExceeded
+from nervos_core.application.mcp_connections import InvalidMcpConnection
 from nervos_core.application.model_providers import (
     ModelProviderUnavailable,
     UnknownModelProvider,
 )
 from nervos_core.application.run_cancellation import RunNotCancellable
+from nervos_core.application.tool_permissions import McpConnectionNotFound
 from nervos_core.application.trusted_chat import UnknownAgentHandler
 from nervos_core.domain.agents import InvalidAgentDefinitionId, InvalidAgentInstance
 from nervos_core.domain.runs import InvalidRun
@@ -38,6 +40,23 @@ from nervos_api.api.schemas import ErrorDetail, ErrorResponse
 
 class InvalidOrigin(Exception):
     """Raised when an unsafe request lacks the exact configured Origin."""
+
+
+class McpConnectionDeleteRefused(Exception):
+    """Raised when a connection cannot be hard-deleted without destroying evidence.
+
+    The two refusals are separate types rather than one carrying a reason, because the error map
+    is keyed by exact type: a caller cannot then accidentally widen one into the other, and the
+    response body stays a fixed NervOS-authored sentence.
+    """
+
+
+class McpConnectionHasHistory(McpConnectionDeleteRefused):
+    """A tool invocation from this connection exists, so deleting it would erase audit truth."""
+
+
+class McpConnectionHasLiveRun(McpConnectionDeleteRefused):
+    """A nonterminal Run's grants could still reach this connection's tools."""
 
 
 class UnsupportedB3AgentDefinition(Exception):
@@ -90,6 +109,22 @@ AGENT_ERROR_MAP: dict[type[Exception], tuple[int, str, str]] = {
         "The agent instance configuration is invalid.",
     ),
     InvalidRun: (422, "invalid_input", "The submitted input is invalid."),
+    InvalidMcpConnection: (
+        422,
+        "invalid_mcp_connection",
+        "The MCP connection configuration is invalid.",
+    ),
+    McpConnectionNotFound: (404, "mcp_connection_not_found", "The MCP connection was not found."),
+    McpConnectionHasHistory: (
+        409,
+        "mcp_connection_has_history",
+        "This MCP connection has recorded tool invocations and cannot be deleted.",
+    ),
+    McpConnectionHasLiveRun: (
+        409,
+        "mcp_connection_has_live_run",
+        "An active run can still reach this MCP connection's tools, so it cannot be deleted.",
+    ),
     AgentInstanceNotFound: (404, "agent_instance_not_found", "The agent instance was not found."),
     RunNotFound: (404, "run_not_found", "The run was not found."),
     RunNotCancellable: (

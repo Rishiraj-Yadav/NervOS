@@ -110,6 +110,12 @@ async def run_worker(settings: WorkerSettings) -> int:
         # The built-in tool definitions become durable only after the schema has been validated, so
         # a Worker that refuses to start cannot have written first.
         reconcile_tool_definitions(composition.engine)
+        # Register a local source for every MCP connection that could contribute a tool. This reads
+        # durable state only -- no MCP network I/O -- and it is what lets this process offer tools
+        # another Worker or the control plane discovered. Registration is not authorization: D2's
+        # live predicate still decides every call, so a stale registration is harmless.
+        registered = composition.mcp_synchronizer.synchronize()
+        logger.info("worker_mcp_sources_registered count=%s", registered)
         providers = composition.worker.provider_ids
         logger.info(
             "worker_started worker_id=%s schema_revision=%s concurrency=%s max_active=%s",
