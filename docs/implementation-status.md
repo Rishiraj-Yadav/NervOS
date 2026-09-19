@@ -2,6 +2,15 @@
 
 ## Current phase
 
+**Stage D — the tool and MCP layer — is COMPLETE.** **Stage E — scheduling, events, and triggers —
+has begun with its architecture freeze (E0)**, which is documentation and governance only: it froze
+when a Run may come into existence, who may cause one, and the single acceptance path every Run
+travels, in ADRs 0018–0020.
+
+**No Stage E runtime behaviour exists yet.** There is no scheduler process, no trigger table, no
+migration `0008`, no scheduling domain, no webhook or event ingress, and no Automations UI. Nothing
+in Stage E may be described as implemented until its own milestone lands and is accepted.
+
 Stage C — Persistent execution engine is COMPLETE. The C0 architecture freeze, the C1 durable execution foundation, C2 — asynchronous submission and minimal durable Worker execution — C3 — Worker registry/health, expired-lease reconciliation, and fencing hardening — C4 — the safe execution retry engine — C5 — owner cancellation and Attempt execution-timeout orchestration — C6 — authoritative global/per-Agent/per-provider execution concurrency, durable Agent fairness, and full admission backpressure — C7 — public read-only execution observability, the Run Events API, the execution timeline, and the polling model — and C8 — integrated deterministic Stage C acceptance and closeout — are implemented, externally reviewed, and accepted.
 
 Stage B — Trusted-agent runtime proof is complete and accepted. B1 domain/persistence, B2 internal one-call execution, B3 trusted Agent/Run HTTP API with the minimal Chat dashboard interaction, and B4 second-provider portability are implemented, merged to `main`, and post-merge verified.
@@ -28,6 +37,30 @@ The next milestone is **Stage E — Scheduling, events, and triggers**.
 - [x] D5 — MCP client/gateway and connection lifecycle
 - [x] D6 — Tool audit, failure semantics, and C3–C6 integration
 - [x] D7 — Integrated acceptance, MVP closeout, and documentation
+
+## Stage E milestones
+
+- [x] E0 — Architecture, protocol, and safety freeze (documentation/governance only; no schema, no dependency, no runtime code)
+- [ ] E1 — Durable trigger/occurrence domain, migration `0008`, and the shared Run-submission foundation
+- [ ] E2 — Scheduler: one-time / interval / cron, timezone, misfire, multi-instance, restart
+- [ ] E3 — Webhook ingress, secret authentication and rotation, idempotency
+- [ ] E4 — Internal events, trigger management and occurrence history, minimal Automations surface
+- [ ] E5 — Integrated acceptance and Stage-E closeout
+
+**E0 is architecture frozen and externally accepted.** It delivered governance only and changed no
+runtime behaviour. It fixed: that **Stage E decides when a Run exists while Stages C and D continue to
+decide how it executes**, so every automatic execution becomes an ordinary Run through the one existing
+acceptance seam; the `TriggerDefinition` / `TriggerOccurrence` / Run separation and the two-status
+occurrence vocabulary (`run_created`, `skipped`, with duplicates returning the existing occurrence
+rather than writing one); the five trigger kinds; one-time, interval and cron semantics including the
+frozen 5-field dialect, the UTC storage rule, the IANA-timezone-for-cron rule and the explicit DST
+contract; the fixed `COALESCE_ONE` misfire policy; the `next_fire_at` invariants; the dedicated
+scheduler process, its fixed polling, and database-arbitrated multi-instance behaviour; the webhook
+trust boundary at `/hooks/v1/{public_id}` with a locator separate from the secret and constant-time
+verification; the internal event envelope, its owner scope, exact matching and bounded fanout; and
+reverse Run provenance through `trigger_occurrences.run_id` with **no column added to `runs`**. It
+added no migration, no dependency, no API surface, no frontend, and no source change. Its authority is
+**ADR 0018**, **ADR 0019** and **ADR 0020**.
 
 D0 is **architecture frozen and externally accepted**. It fixed: the MCP protocol target
 (`2026-07-28`, modern era only, Streamable HTTP and stdio, official SDK v2 with no custom protocol
@@ -789,7 +822,7 @@ C8 proves that the finished kernel composes. Each of C2–C7 proved its own slic
 
 Taken together, the guarantees NervOS now offers are: **fenced durable authority**, so only a live lease holder may write; **no blind replay of ambiguous execution**, so an unknown outcome is closed as failed rather than repeated; **safe retry only for a positively safe outcome**; and **late stale writes cannot overwrite truth**. NervOS does **not** guarantee exactly-once remote provider execution. Remote provider processing, billing, and side effects may still occur after an ambiguous post-start crash, a running cancellation, or an execution timeout, and these remain outside the local transaction boundary.
 
-D7 is complete and externally accepted, and Stage D — the tool and MCP layer — is **complete**. The next engineering milestone is **Stage E — Scheduling, events, and triggers**.
+D7 is complete and externally accepted, and Stage D — the tool and MCP layer — is **complete**. **E0 is complete and externally accepted**: Stage E — scheduling, events, and triggers — has its architecture frozen in **ADRs 0018–0020**, and it changed no runtime behaviour. The next engineering milestone is **E1 — the durable trigger/occurrence domain, migration `0008`, and the shared Run-submission foundation**.
 
 D2 adds the permission layer that will gate every future tool call, and it adds nothing that can call one. A user's Agent Instance holds an explicit ALLOW row per tool; there is no DENY row, so "not granted" and "revoked" are the same observable state and an entire class of precedence bug cannot be expressed. The call-time evaluator derives its authority from durable rows rather than from its caller: it takes only a Run id and a tool definition id, loads the Run to obtain the Agent Instance and the monotonic grant cutoff, loads the grant, and loads the definition to compare `grant.reviewed_fingerprint` against `tool_definitions.fingerprint` directly. No caller can supply an Agent, a cutoff, or a fingerprint, so a stale grant cannot be revived by presenting the fingerprint it was reviewed at. Revocation deletes the row and bites at the very next check; a new grant is invisible to a Run already submitted because its id exceeds that Run's snapshotted cutoff; re-granting and re-confirming both mint a new AUTOINCREMENT id, so the capability reaches only Runs submitted afterwards. Drift fails closed as `DEFINITION_CHANGED`, an unavailable definition as `DEFINITION_UNAVAILABLE`, a disabled MCP connection as `CONNECTION_DISABLED`, and a cross-owner MCP grant as `OWNER_MISMATCH` — the last re-proven at call time against the connection's owner rather than trusted from grant creation, so a grant row inserted directly into the database still fails closed. Annotations remain presentation-only and never grant. The evaluator is a pure read: it writes no `tool_invocations` row, emits no Run Event, and touches no execution state. **D2 added no migration and no dependency**; the migration head remains `0007_stage_d1_tool_capability_audit`. Nothing executes a tool yet: there is still no registry, no canonical schema validator, no built-in tool, no MCP client, no provider tool calling, and no Think → Act → Observe loop.
 

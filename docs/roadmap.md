@@ -37,9 +37,24 @@ Outcome: agents can perform controlled actions.
 
 ## Stage E — Scheduling and events
 
-Cron/interval scheduling, event router, scheduler-to-job flow, webhooks/events.
+Cron/interval scheduling, event router, webhooks/events.
 
 Outcome: background agents can run autonomously.
+
+**E0 — architecture, protocol, and safety freeze — is complete**, and its authority is ADR 0018
+(trigger, occurrence and scheduler semantics), ADR 0019 (ingress trust boundary, idempotency and
+internal events) and ADR 0020 (Run provenance and the shared acceptance seam). It fixed the division
+the whole stage rests on: **Stage E decides *when* a Run exists; Stages C and D continue to decide
+*how* it executes.** A schedule, webhook or internal event produces a `TriggerOccurrence`, and that
+occurrence submits an ordinary Run through the one existing acceptance seam. There is no
+`scheduler-to-job` path that mints execution obligations directly, and Stage E adds no queue, no retry
+engine and no second worker.
+
+The remaining milestones are **E1** (durable trigger/occurrence domain, migration `0008`, and the
+shared Run-submission foundation), **E2** (scheduler: one-time, interval, cron, timezone, misfire,
+multi-instance and restart), **E3** (webhook ingress, secret authentication and rotation, idempotency),
+**E4** (internal events, trigger management and occurrence history, and a minimal Automations surface)
+and **E5** (integrated acceptance and closeout). None of them is implemented yet.
 
 ## Stage F — Agent sessions and memory
 
