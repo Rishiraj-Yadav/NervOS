@@ -52,6 +52,7 @@ EVENT_FIELDS = {
     "code",
     "message",
     "available_at",
+    "tool_invocation_id",
 }
 
 
@@ -186,6 +187,39 @@ def test_every_event_carries_exactly_the_public_allow_list(
     assert items
     for item in items:
         assert set(item) == EVENT_FIELDS, sorted(set(item) ^ EVENT_FIELDS)
+
+
+def test_a_non_tool_event_publishes_a_null_tool_invocation_id(
+    owner_client: TestClient,
+    app_under_test: FastAPI,
+    seed_user_account: Callable[[str], int],
+    sign_in_as: Callable[[str], None],
+) -> None:
+    """The additive handle is explicit null for Stage C events, not an absent key.
+
+    A tool-free Run predates any invocation, so every event carries `tool_invocation_id` as null
+    rather than omitting it: a client can bind the field unconditionally. The endpoint, its keyset
+    pagination, and the foreign-versus-missing 404 are otherwise untouched by the new column.
+    """
+    instance_id = make_instance(owner_client)
+    run_id = submit(owner_client, instance_id)
+    drive_retrying_run(app_under_test, run_id)
+
+    response = events_of(owner_client, run_id, "?limit=3")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["items"]
+    assert all(item["tool_invocation_id"] is None for item in body["items"])
+    assert all("tool_invocation_id" in item for item in body["items"])
+    # The keyset cursor still advances across the untouched Stage C history.
+    assert body["next_after_sequence"] == 3
+
+    seed_user_account("intruder")
+    sign_in_as("intruder")
+    foreign = events_of(owner_client, run_id)
+    missing = events_of(owner_client, 9999)
+    assert foreign.status_code == missing.status_code == 404
+    assert foreign.json() == missing.json()
 
 
 def test_the_projection_never_names_an_internal_identifier(

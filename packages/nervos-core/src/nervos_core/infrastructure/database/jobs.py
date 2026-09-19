@@ -59,11 +59,16 @@ from nervos_core.application.model_completion import (
     EXECUTION_CANCELLED,
     EXECUTION_OUTCOME_AMBIGUOUS,
     MODEL_RATE_LIMITED,
+    TOOL_OUTCOME_UNKNOWN,
     safe_error_message,
 )
 from nervos_core.application.queue_policy import PRODUCTION_QUEUE_POLICY, QueuePolicy
 from nervos_core.application.retry_policy import RetryPolicy, retry_due_at
-from nervos_core.application.tool_invocations import DISPATCHED_STATUSES, ClaimHandle
+from nervos_core.application.tool_invocations import (
+    DISPATCHED_STATUSES,
+    ClaimHandle,
+    InvocationStatus,
+)
 from nervos_core.domain.agents import AgentDefinitionId
 from nervos_core.domain.jobs import (
     AttemptStatus,
@@ -91,6 +96,11 @@ from nervos_core.infrastructure.database.models import (
     RunRecord,
     ToolInvocationRecord,
     WorkerRecord,
+)
+from nervos_core.infrastructure.database.run_events import (
+    EventOwnershipViolation,
+    append_event_on_connection,
+    sequence_base,
 )
 
 # SQLite primary result codes. Classification uses the driver's own numeric code rather than
@@ -213,6 +223,7 @@ def run_event_from_record(record: RunEventRecord) -> RunEvent:
         record.attempt_number,
         record.available_at,
         record.created_at,
+        record.tool_invocation_id,
     )
 
 
@@ -241,14 +252,7 @@ def _is_contention(error: SQLAlchemyError) -> bool:
 
 def _sequence_base(connection: Connection, run_id: int) -> int:
     """Read the per-Run event high-water mark exactly once."""
-    return int(
-        connection.scalar(
-            select(func.coalesce(func.max(RunEventRecord.sequence), 0)).where(
-                RunEventRecord.run_id == run_id
-            )
-        )
-        or 0
-    )
+    return sequence_base(connection, run_id)
 
 
 def _append_event_on_connection(
@@ -260,6 +264,7 @@ def _append_event_on_connection(
     event_type: RunEventType,
     created_at: datetime,
     attempt_id: int | None = None,
+    tool_invocation_id: int | None = None,
     code: str | None = None,
     message: str | None = None,
     attempt_number: int | None = None,
@@ -270,21 +275,22 @@ def _append_event_on_connection(
     C1's standalone appender opens its own connection and its own `BEGIN IMMEDIATE`, so
     calling it from inside an open lifecycle transaction would attempt a nested, competing
     SQLite write transaction. Every C2 mutation therefore appends its events through this
-    primitive, inside the same transaction that performed the mutation.
+    primitive -- now a delegation to the shared append module, so the tool lifecycle and the
+    Job/Attempt lifecycle write events through exactly one implementation.
     """
-    connection.execute(
-        insert(RunEventRecord).values(
-            run_id=run_id,
-            job_id=job_id,
-            attempt_id=attempt_id,
-            sequence=sequence,
-            event_type=event_type.value,
-            code=code,
-            message=message,
-            attempt_number=attempt_number,
-            available_at=available_at,
-            created_at=created_at,
-        )
+    append_event_on_connection(
+        connection,
+        run_id=run_id,
+        job_id=job_id,
+        attempt_id=attempt_id,
+        tool_invocation_id=tool_invocation_id,
+        sequence=sequence,
+        event_type=event_type,
+        code=code,
+        message=message,
+        attempt_number=attempt_number,
+        available_at=available_at,
+        created_at=created_at,
     )
 
 
@@ -296,6 +302,78 @@ def _elapsed_ms(started_at: datetime | None, now: datetime) -> int:
     if started_at is None:
         return 0
     return max(0, int((now - started_at).total_seconds() * 1000))
+
+
+def _reconcile_abandoned_tool_invocations(
+    connection: Connection, *, attempt_id: int, now: datetime
+) -> tuple[int, ...]:
+    """Close an abandoned Attempt's nonterminal tool calls inside the caller's transaction.
+
+    ADR 0017 gives this exact rule, and the two states it covers are the whole reason the
+    reconciliation exists: `tool_invocations` is authoritative about what a call *did*, so a call
+    left dangling by a crash or a cancellation would otherwise be a permanent hole in that record.
+
+    * A `requested` row provably never dispatched -- the start boundary is a property of the
+      insert, so a row still in `requested` has no `started_at`. It is closed **`cancelled`**, the
+      frozen state that permanently means "stopped before it ran", and it emits **no tool event**,
+      because the six frozen tool event types deliberately contain no `tool.cancelled`: the
+      cancellation and recovery timelines are what say why, and the invocation's own status is
+      where the call's fate is read.
+
+    * A `started` row may already have reached an external system, so it is closed **`ambiguous`**
+      and never `failed`: `failed` would assert the call concluded without effect, which is
+      precisely the fact that is unknowable. It carries `tool_outcome_unknown`, the same code a
+      post-start timeout uses, because it is the same fact.
+
+    A row already terminal is left exactly as it is. Completed work is never reinterpreted, and no
+    reconciliation path ever re-runs, re-dispatches, or rewrites it.
+
+    Returns the ids of the calls that crossed the start boundary, in `tool_sequence` order, so the
+    caller can append their `tool.ambiguous` events into the same contiguous sequence batch.
+
+    **Scope.** The query is bounded by `attempt_id`, served by `uq_tool_invocations(attempt_id,
+    tool_sequence)`, so this is an index seek over one Attempt rather than a scan of a table that
+    grows with every tool call the database has ever seen. There is deliberately no periodic sweep
+    anywhere in the engine: reconciliation happens only inside the transaction that already owns
+    the Job/Attempt truth for the Attempt being recovered, so it can never race that truth.
+    """
+    rows = connection.execute(
+        select(ToolInvocationRecord.id, ToolInvocationRecord.status)
+        .where(
+            ToolInvocationRecord.attempt_id == attempt_id,
+            ToolInvocationRecord.status.in_(
+                (InvocationStatus.REQUESTED.value, InvocationStatus.STARTED.value)
+            ),
+        )
+        .order_by(ToolInvocationRecord.tool_sequence.asc())
+    ).all()
+
+    message = safe_error_message(TOOL_OUTCOME_UNKNOWN)
+    ambiguous: list[int] = []
+    for invocation_id, status in rows:
+        values: dict[str, Any] = {"status": InvocationStatus.CANCELLED.value, "finished_at": now}
+        if status == InvocationStatus.STARTED.value:
+            # A dispatched call is never closed as `failed` or `cancelled` here: `failed` would
+            # claim a conclusion nobody observed, and cancellation is not an outcome a tool had.
+            values = {
+                "status": InvocationStatus.AMBIGUOUS.value,
+                "finished_at": now,
+                "error_code": TOOL_OUTCOME_UNKNOWN,
+                "error_message": message,
+            }
+            ambiguous.append(int(invocation_id))
+        closed = connection.execute(
+            update(ToolInvocationRecord)
+            .where(
+                ToolInvocationRecord.id == invocation_id,
+                ToolInvocationRecord.attempt_id == attempt_id,
+                ToolInvocationRecord.status == status,
+            )
+            .values(**values)
+        )
+        if _rowcount(closed) != 1:
+            raise _Fenced
+    return tuple(ambiguous)
 
 
 class _TransactionRunner:
@@ -2171,6 +2249,12 @@ class SqlAlchemyJobExecutionPersistence:
             )
             if candidate is None:
                 return None
+            # The pre-start branches deliberately reconcile no tool invocation, and that is a
+            # proof rather than an omission: `record_requested` refuses to insert unless the
+            # parent Attempt already carries `execution_started_at`, so a Job still `claimed`
+            # with a `claimed`, never-started Attempt provably has no call recorded against it.
+            # There is nothing to close, and querying for one would be a read that can only
+            # return nothing.
             if candidate["status"] == JobStatus.CLAIMED.value:
                 if candidate["attempt_count"] < candidate["max_attempts"]:
                     return self._reclaim_pre_start_requeue(connection, candidate, now, backoff)
@@ -2179,8 +2263,10 @@ class SqlAlchemyJobExecutionPersistence:
 
         try:
             return self._runner.run(operation)
-        except _Fenced:
-            # A concurrent authority change won the race. Nothing was written.
+        except (_Fenced, EventOwnershipViolation):
+            # A concurrent authority change won the race, or a tool event named an invocation
+            # that is not this Run's. Either way the transaction rolled back and nothing was
+            # written.
             return None
 
     def _expire_pre_start_attempt(
@@ -2384,16 +2470,44 @@ class SqlAlchemyJobExecutionPersistence:
         )
         if _rowcount(run_update) != 1:
             raise _Fenced
+        # The Attempt is now durably closed, so its dangling tool calls are reconciled in this
+        # same transaction -- terminalizing the Attempt first and repairing the invocations in a
+        # second transaction would leave a window in which the Attempt is terminal and a call it
+        # dispatched is still `started`, which is the artifact this reconciliation exists to make
+        # impossible.
+        ambiguous_calls = _reconcile_abandoned_tool_invocations(
+            connection, attempt_id=int(candidate["attempt_id"]), now=now
+        )
         base = _sequence_base(connection, int(candidate["run_id"]))
         self._append_recovery_events(
             connection, candidate, now, base, RunEventType.RECOVERY_AMBIGUOUS
         )
+        # Ordering is frozen as: the recovery facts that establish *why* this Attempt ended, then
+        # one `tool.ambiguous` per dispatched-and-unresolved call, then the Run's terminal event.
+        # A reader of the timeline therefore sees the cause before the consequence, and the
+        # Run-level closeout always comes last.
+        offset = 3
+        for invocation_id in ambiguous_calls:
+            _append_event_on_connection(
+                connection,
+                run_id=int(candidate["run_id"]),
+                job_id=int(candidate["id"]),
+                attempt_id=int(candidate["attempt_id"]),
+                tool_invocation_id=invocation_id,
+                sequence=base + offset,
+                event_type=RunEventType.TOOL_AMBIGUOUS,
+                code=TOOL_OUTCOME_UNKNOWN,
+                message=safe_error_message(TOOL_OUTCOME_UNKNOWN),
+                attempt_number=int(candidate["attempt_number"]),
+                created_at=now,
+            )
+            offset += 1
         _append_event_on_connection(
             connection,
             run_id=int(candidate["run_id"]),
             job_id=int(candidate["id"]),
             attempt_id=int(candidate["attempt_id"]),
-            sequence=base + 3,
+            sequence=base + offset,
             event_type=RunEventType.RUN_FAILED,
             code=EXECUTION_OUTCOME_AMBIGUOUS,
             message=message,
@@ -2619,22 +2733,60 @@ class SqlAlchemyRunCancellationPersistence:
             )
             if _rowcount(closed_run) != 1:
                 raise _Fenced
+            # A cancelled Attempt's dangling tool calls are reconciled inside this same serialized
+            # transaction, so there is no instant at which the Run is cancelled and a call the
+            # worker had already dispatched is still `started`. The event order is frozen as the
+            # request, then one `tool.ambiguous` per dispatched-and-unresolved call, then the Run's
+            # terminal event, so a reader sees the revocation before the consequence and the
+            # Run-level closeout last.
+            ambiguous_calls = (
+                ()
+                if attempt_id is None
+                else _reconcile_abandoned_tool_invocations(
+                    connection, attempt_id=attempt_id, now=now
+                )
+            )
             base = _sequence_base(connection, run_id)
-            for offset, event_type in enumerate(
-                (RunEventType.CANCELLATION_REQUESTED, RunEventType.RUN_CANCELLED), start=1
-            ):
+            _append_event_on_connection(
+                connection,
+                run_id=run_id,
+                job_id=job_id,
+                attempt_id=attempt_id,
+                sequence=base + 1,
+                event_type=RunEventType.CANCELLATION_REQUESTED,
+                code=EXECUTION_CANCELLED,
+                message=safe_error_message(EXECUTION_CANCELLED),
+                attempt_number=attempt_number,
+                created_at=now,
+            )
+            offset = 2
+            for invocation_id in ambiguous_calls:
                 _append_event_on_connection(
                     connection,
                     run_id=run_id,
                     job_id=job_id,
                     attempt_id=attempt_id,
+                    tool_invocation_id=invocation_id,
                     sequence=base + offset,
-                    event_type=event_type,
-                    code=EXECUTION_CANCELLED,
-                    message=safe_error_message(EXECUTION_CANCELLED),
+                    event_type=RunEventType.TOOL_AMBIGUOUS,
+                    code=TOOL_OUTCOME_UNKNOWN,
+                    message=safe_error_message(TOOL_OUTCOME_UNKNOWN),
                     attempt_number=attempt_number,
                     created_at=now,
                 )
+                offset += 1
+            _append_event_on_connection(
+                connection,
+                run_id=run_id,
+                job_id=job_id,
+                attempt_id=attempt_id,
+                sequence=base + offset,
+                event_type=RunEventType.RUN_CANCELLED,
+                code=EXECUTION_CANCELLED,
+                message=safe_error_message(EXECUTION_CANCELLED),
+                attempt_number=attempt_number,
+                created_at=now,
+            )
             return CancellationOutcome.CANCELLED
 
         return self._runner.run(operation)

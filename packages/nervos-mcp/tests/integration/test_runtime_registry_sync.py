@@ -20,6 +20,7 @@ from nervos_core.domain.runs import RunStatus
 from nervos_core.domain.tools import ToolSourceKind, ToolSourceRef
 from nervos_core.infrastructure.database.mcp_connections import SqlAlchemyMcpConnectionPersistence
 from nervos_mcp.operator_config import McpOperatorConfig
+from sqlalchemy import text
 
 from ..support.fake_mcp_server import (
     READ_DOCUMENT,
@@ -172,6 +173,30 @@ async def test_two_mcp_connections_and_a_builtin_share_one_catalog(
             assert server.ledger.counts[READ_DOCUMENT] == 1
             assert server.ledger.counts[WRITE_DOCUMENT] == 1
             assert outcome.output_text == "all three"
+
+            # D6 correlation: three sources in one Attempt produce three *linked* tool timelines,
+            # each event naming the invocation of the call it is about. This is the multi-source
+            # proof -- the audit is source-neutral and one call cannot be attributed to another,
+            # whether the source is a built-in or one of two connections to the same server.
+            with engine.connect() as connection:
+                linked = connection.execute(
+                    text(
+                        "SELECT event_type, tool_invocation_id FROM run_events"
+                        " WHERE run_id = :r AND event_type LIKE 'tool.%' ORDER BY sequence"
+                    ),
+                    {"r": run_id},
+                ).all()
+            by_invocation: dict[int, list[str]] = {}
+            for event_type, invocation_id in linked:
+                assert invocation_id is not None
+                by_invocation.setdefault(int(invocation_id), []).append(event_type)
+            # Each invocation has its own complete, ordered triple, and the triples do not merge.
+            assert len(by_invocation) == 3
+            assert all(
+                kinds == ["tool.requested", "tool.started", "tool.succeeded"]
+                for kinds in by_invocation.values()
+            )
+            assert {int(row["id"]) for row in rows} == set(by_invocation)
         finally:
             # `close_all` is the real shutdown path, and this test leaves *two* live sessions in
             # the cache -- which is exactly the case that used to raise, because each client nests

@@ -76,7 +76,13 @@ export type RunEventType =
   | "run.succeeded"
   | "run.failed"
   | "recovery.pre_start"
-  | "recovery.ambiguous";
+  | "recovery.ambiguous"
+  | "tool.requested"
+  | "tool.started"
+  | "tool.succeeded"
+  | "tool.failed"
+  | "tool.denied"
+  | "tool.ambiguous";
 
 /**
  * One durable Run Event.
@@ -179,6 +185,12 @@ const RUN_EVENT_TYPES: readonly RunEventType[] = [
   "run.failed",
   "recovery.pre_start",
   "recovery.ambiguous",
+  "tool.requested",
+  "tool.started",
+  "tool.succeeded",
+  "tool.failed",
+  "tool.denied",
+  "tool.ambiguous",
 ];
 
 function isRecord(value: unknown): value is Record<string, unknown> {

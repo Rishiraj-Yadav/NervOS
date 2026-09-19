@@ -48,6 +48,17 @@ TOOL_OUTCOME_UNKNOWN = "tool_outcome_unknown"
 # error, not a provider error: the Run fails before any provider call, and nothing is truncated to
 # make it fit.
 TOOL_CATALOG_INVALID = "tool_catalog_invalid"
+# The one public code a refused tool call carries on the Run timeline. It is deliberately generic
+# and deliberately not the durable `permission_decision`: ADR 0015 states a denial reason is an
+# internal classification, and D2's reasons (`denied_not_granted`, `denied_connection_disabled`,
+# `denied_definition_changed`, and the rest) stay on the invocation row for internal audit rather
+# than becoming a public, enumerable description of a user's own configuration.
+#
+# It covers every refusal that provably did not run: a tool that was never granted, a grant
+# withdrawn or drifted between the two checks, a disabled or deleted connection, a definition that
+# became unavailable, and the pre-dispatch calls that never became a row at all -- an unknown tool
+# name, malformed arguments, and arguments a canonical schema rejected.
+TOOL_DENIED = "tool_denied"
 # Infrastructural closeout code for a Run that never reached the execution-start boundary and
 # whose Job exhausted its claim budget to repeated Worker losses. It is not a provider error, a
 # timeout, a cancellation, or a retry disposition: execution provably never began, so this code
@@ -93,6 +104,7 @@ SAFE_ERROR_MESSAGES: Mapping[str, str] = MappingProxyType(
             "NervOS could not present this agent's tools within the configured limits, so the run "
             "was closed before it reached the model."
         ),
+        TOOL_DENIED: "This tool call was refused before it ran.",
     }
 )
 

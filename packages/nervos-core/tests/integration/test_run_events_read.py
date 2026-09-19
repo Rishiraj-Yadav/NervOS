@@ -351,6 +351,8 @@ def test_the_domain_read_carries_only_safe_durable_facts(
         event = reader(engine).list_run_events(run_id, 0, 50)[4]
 
         # The exact field set of the durable row, so a new column cannot arrive unnoticed.
+        # `tool_invocation_id` is D6's one addition: a nullable durable link to the invocation a
+        # tool event is about, and nothing else -- no argument, result, digest, or credential.
         assert {field.name for field in fields(event)} == {
             "id",
             "run_id",
@@ -363,8 +365,11 @@ def test_the_domain_read_carries_only_safe_durable_facts(
             "attempt_number",
             "available_at",
             "created_at",
+            "tool_invocation_id",
         }
         assert event.code == MODEL_RATE_LIMITED
+        # A Stage C event is not about a tool call, so the new link is absent rather than zero.
+        assert event.tool_invocation_id is None
         assert "\x00" not in (event.message or "")
     finally:
         engine.dispose()
