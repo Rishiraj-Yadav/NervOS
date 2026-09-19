@@ -6,8 +6,9 @@ from sqlalchemy import Engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
 SCHEMA_MIGRATION_HINT = (
-    "Run `uv run alembic -c apps/api/alembic.ini upgrade head` first. "
-    "The Worker never migrates the database itself."
+    "Run `uv run alembic -c apps/api/alembic.ini upgrade head` before starting this process. "
+    "A process validates the applied revision and refuses to start against any other; none of "
+    "them migrates the database itself."
 )
 
 

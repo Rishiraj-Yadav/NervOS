@@ -223,6 +223,30 @@ def _utc(value: datetime) -> datetime:
 # ------------------------------------------------------------------------------------------------
 
 
+def validate_timezone_name(value: str) -> str:
+    """Check that a timezone **name** is well formed, without requiring it to resolve.
+
+    Resolvability is deliberately not part of this check, and the distinction matters. A name is
+    refused where it is *entered* — see :class:`TimeZoneName` — because that is the moment an
+    operator can correct it. But a name that was accepted can later stop resolving, because the
+    tz database belongs to the host and not to the trigger: a container image, a base-image upgrade
+    or a trimmed distribution can drop a zone that a stored row still names.
+
+    Reading a stored row therefore checks the name's shape only. A durable value that cannot be
+    read at all is one no recovery path can act on, and ADR 0018 says exactly what to do about a
+    zone that has gone missing at fire time: record the occurrence as skipped and disable the
+    trigger. That behaviour is only reachable if the row can be read first.
+    """
+    if (
+        not value
+        or len(value) > MAX_TIMEZONE_NAME_LENGTH
+        or _SAFE_TEXT_FORBIDDEN in value
+        or value.strip() != value
+    ):
+        raise InvalidTrigger("invalid timezone name")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class TimeZoneName:
     """A resolved IANA timezone name.
@@ -236,14 +260,7 @@ class TimeZoneName:
     name: str
 
     def __post_init__(self) -> None:
-        value = self.name
-        if (
-            not value
-            or len(value) > MAX_TIMEZONE_NAME_LENGTH
-            or _SAFE_TEXT_FORBIDDEN in value
-            or value.strip() != value
-        ):
-            raise InvalidTrigger("invalid timezone name")
+        value = validate_timezone_name(self.name)
         try:
             ZoneInfo(value)
         except (ZoneInfoNotFoundError, ValueError) as error:
@@ -599,7 +616,10 @@ class TriggerDefinition:
                 raise InvalidTrigger("invalid interval bounds")
         elif self.kind is TriggerKind.CRON:
             CronExpression(self.cron_expression or "")
-            TimeZoneName(self.timezone or "")
+            # The stored name's shape, not its resolvability: a row whose zone has since left the
+            # host's tz database must still be readable, so that a later tick can record the skip
+            # and retire the trigger the frozen contract prescribes.
+            validate_timezone_name(self.timezone or "")
         elif self.kind is TriggerKind.WEBHOOK:
             validate_webhook_public_id(self.public_id or "")
             validate_webhook_secret_digest(self.secret_digest or b"")

@@ -572,11 +572,14 @@ def test_an_injected_failure_after_the_run_insert_writes_nothing(
 def test_a_foreign_agent_definition_fails_closed(
     triggers: SqlAlchemyTriggerPersistence, engine: Engine
 ) -> None:
-    """A trigger whose Agent no longer matches the resolved definition skips rather than misroutes.
+    """A trigger whose Agent no longer matches the resolved definition consumes nothing.
 
     The canonical helper re-checks the Agent's exact definition identity inside the transaction, so
-    a mismatch is refused there. ADR 0018 defines that refusal as a safe one: the occurrence is
-    written `skipped` and no Run is created.
+    a mismatch is refused there. E2 narrows what that refusal *means*: a definition change is a
+    race between resolving the Agent and acting on it, so it is refused without writing anything —
+    no occurrence, no Run, and no schedule advance. Recording it as an `agent_disabled` skip, as
+    E1 did, would consume a scheduled occurrence and tell the operator something untrue, because
+    the Agent is neither disabled nor at fault. The next tick re-resolves and proceeds normally.
     """
     trigger = triggers.create_trigger(OWNER, cron_draft(), NOW)
     with engine.begin() as connection:
@@ -592,8 +595,34 @@ def test_a_foreign_agent_definition_fails_closed(
         occurred_at=NOW,
         nominal_at=trigger.next_fire_at,
     )
+    with pytest.raises(TriggerNotEditable):
+        triggers.materialize_occurrence_and_run(command)
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM runs")) == 0
+        assert connection.scalar(text("SELECT count(*) FROM trigger_occurrences")) == 0
+
+
+def test_a_disabled_agent_is_still_recorded_as_a_skip(
+    triggers: SqlAlchemyTriggerPersistence, engine: Engine
+) -> None:
+    """A disabled Agent is an outcome, not a race, so it is still recorded as a skip."""
+    trigger = triggers.create_trigger(OWNER, cron_draft(), NOW)
+    with engine.begin() as connection:
+        connection.execute(
+            text("UPDATE agent_instances SET enabled = 0 WHERE id = 1 AND owner_user_id = 1")
+        )
+    command = TriggerMaterializationCommand(
+        trigger_definition_id=trigger.id,
+        definition=ResolvedAgentDefinition(
+            definition_id=AgentDefinitionId("nervos.chat", "1"), limits=STAGE_B_LIMITS
+        ),
+        now=NOW,
+        occurred_at=NOW,
+        nominal_at=trigger.next_fire_at,
+    )
     outcome = triggers.materialize_occurrence_and_run(command)
     assert outcome.occurrence.status is OccurrenceStatus.SKIPPED
+    assert outcome.occurrence.skip_code == "agent_disabled"
     assert outcome.occurrence.run_id is None
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM runs")) == 0
@@ -738,3 +767,73 @@ def test_the_event_lookup_is_an_indexed_seek(populated: Engine) -> None:
 def test_provenance_lookup_is_an_indexed_seek(populated: Engine) -> None:
     plan = _plan(populated, "SELECT id FROM trigger_occurrences WHERE run_id = 1")
     assert "ux_trigger_occurrences_run_id" in plan, plan
+
+
+# ------------------------------------------------------------------------------------------
+# E2: the due scan is an indexed, bounded, keyset-continuable page
+# ------------------------------------------------------------------------------------------
+
+
+def test_the_e2_due_scan_predicate_is_an_indexed_seek(populated: Engine) -> None:
+    """The scheduler's hot read must never scan a table that grows with every trigger.
+
+    `0008` carries a partial index over exactly `(next_fire_at, id)` for rows that have a next fire
+    time, and the scan's predicate and ordering are built to be served by it. E2 adds no index and
+    no predicate the index cannot satisfy.
+    """
+    plan = _plan(
+        populated,
+        "SELECT id FROM trigger_definitions"
+        " WHERE enabled = 1 AND next_fire_at IS NOT NULL AND next_fire_at <= :now"
+        " AND kind IN ('one_time','interval','cron')"
+        " ORDER BY next_fire_at ASC, id ASC LIMIT 32",
+        now=NOW + timedelta(hours=1),
+    )
+    assert "ix_trigger_definitions_next_fire_at_id" in plan, plan
+    assert "SCAN trigger_definitions" not in plan, plan
+
+
+def test_the_due_scan_continuation_uses_the_same_index(populated: Engine) -> None:
+    """The continuation that keeps a blocked page from stranding later rows is a seek too."""
+    plan = _plan(
+        populated,
+        "SELECT id FROM trigger_definitions"
+        " WHERE enabled = 1 AND next_fire_at IS NOT NULL AND next_fire_at <= :now"
+        " AND kind IN ('one_time','interval','cron')"
+        " AND (next_fire_at > :after_time"
+        " OR (next_fire_at = :after_time AND id > :after_id))"
+        " ORDER BY next_fire_at ASC, id ASC LIMIT 32",
+        now=NOW + timedelta(hours=1),
+        after_time=NOW,
+        after_id=1,
+    )
+    assert "ix_trigger_definitions_next_fire_at_id" in plan, plan
+    assert "SCAN trigger_definitions" not in plan, plan
+
+
+def test_the_due_scan_does_not_join_a_table_that_grows_with_execution(populated: Engine) -> None:
+    """A scheduling read must not touch Runs, Jobs or events — it decides *when*, not *how*."""
+    plan = _plan(populated, _DUE_SCAN_SQL, now=NOW + timedelta(hours=1))
+    for table in ("runs", "jobs", "run_events"):
+        assert f"TABLE {table}" not in plan, plan
+
+
+_DUE_SCAN_SQL = (
+    "SELECT trigger_definitions.id, agent_instances.agent_key"
+    " FROM trigger_definitions"
+    " JOIN agent_instances ON agent_instances.id = trigger_definitions.agent_instance_id"
+    " WHERE trigger_definitions.enabled = 1 AND trigger_definitions.next_fire_at IS NOT NULL"
+    " AND trigger_definitions.next_fire_at <= :now"
+    " AND trigger_definitions.kind IN ('one_time','interval','cron')"
+    " ORDER BY trigger_definitions.next_fire_at ASC, trigger_definitions.id ASC LIMIT 32"
+)
+
+
+def test_the_occurrence_identity_lookup_is_a_unique_index_seek(populated: Engine) -> None:
+    """The duplicate check runs on every materialization, so it must be a seek."""
+    plan = _plan(
+        populated,
+        "SELECT id FROM trigger_occurrences WHERE trigger_definition_id = 1 AND nominal_at = :n",
+        n=NOW + timedelta(minutes=1),
+    )
+    assert "ux_trigger_occurrences_schedule_identity" in plan, plan

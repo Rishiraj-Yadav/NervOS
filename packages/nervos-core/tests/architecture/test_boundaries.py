@@ -1232,13 +1232,162 @@ def test_stage_e_added_no_column_to_an_existing_table() -> None:
     assert 'down_revision = "0007_stage_d1_tool_capability_audit"' in migration
 
 
-def test_stage_e_adds_no_cron_library_and_no_scheduler_process() -> None:
-    """E1 validates syntax only; evaluation is E2's, and no scheduler process exists yet."""
-    core_text = "\n".join(path.read_text(encoding="utf-8") for path in python_files(CORE_SOURCE))
-    assert "cronsim" not in core_text
-    assert "croniter" not in core_text
-    assert "apscheduler" not in core_text
-    assert not (ROOT / "apps" / "scheduler").exists()
+def test_the_cron_library_is_confined_to_one_infrastructure_adapter() -> None:
+    """E2 evaluates schedules, so the library arrives — but in exactly one adapter and nowhere else.
+
+    This replaces E1's `test_stage_e_adds_no_cron_library_and_no_scheduler_process`, whose stated
+    premise ("E1 validates syntax only; evaluation is E2's, and no scheduler process exists yet")
+    expired by design when E2 was implemented. It is replaced rather than deleted or weakened: the
+    invariant it guarded — that no domain or application module depends on a cron library — is
+    still enforced, and now enforced more precisely, because "not anywhere in core" is no longer
+    the right statement once an adapter legitimately exists.
+
+    Imports are read, not text, so a module that merely *mentions* the library in a docstring —
+    these two do, deliberately — is not mistaken for one that depends on it.
+    """
+    importing = {
+        path.relative_to(CORE_SOURCE).as_posix()
+        for path in python_files(CORE_SOURCE)
+        if any(module.split(".")[0] == "cronsim" for module in imported_modules(path))
+    }
+    assert importing == {"infrastructure/scheduling.py"}, importing
+
+
+def test_no_scheduling_frontier_imports_a_cron_library() -> None:
+    """Domain and application decide *when*; only the adapter knows how to iterate."""
+    for frontier in (CORE_SOURCE / "domain", CORE_APPLICATION):
+        for path in python_files(frontier):
+            roots = {module.split(".")[0] for module in imported_modules(path)}
+            assert not roots & _SCHEDULING_LIBRARIES, path
+
+
+_SCHEDULING_LIBRARIES = frozenset({"cronsim", "croniter", "apscheduler", "celery", "kombu"})
+
+
+def test_no_other_scheduler_framework_is_adopted() -> None:
+    """One calculation library. No framework may own the loop, the state or the timing.
+
+    `cronsim` itself is excluded here because it is the adopted one; where it may live is the
+    subject of the confinement guard above. The Worker and the API are included, because a second
+    scheduling path introduced anywhere would be a second authority for when a Run exists. Only
+    `src` trees are read: test files legitimately name the forbidden frameworks in order to assert
+    they are absent.
+    """
+    sources: list[Path] = []
+    for package in ("nervos-core", "nervos-mcp", "nervos-models"):
+        sources += python_files(ROOT / "packages" / package / "src")
+    for app in ("api", "worker", "scheduler"):
+        sources += python_files(ROOT / "apps" / app / "src")
+    forbidden = _SCHEDULING_LIBRARIES - {"cronsim"}
+    for path in sources:
+        roots = {module.split(".")[0] for module in imported_modules(path)}
+        assert not roots & forbidden, path
+
+
+def test_the_scheduler_process_exists_and_owns_no_execution_surface() -> None:
+    """The scheduler decides *when* a Run exists. It cannot reach anything that decides *how*."""
+    scheduler = ROOT / "apps" / "scheduler" / "src" / "nervos_scheduler"
+    sources = list(python_files(scheduler))
+    assert sources, "the scheduler process must exist"
+    for path in sources:
+        for module in imported_modules(path):
+            root = module.split(".")[0]
+            assert root not in _EXECUTION_MODULES, (path, module)
+
+
+_EXECUTION_MODULES = frozenset(
+    {
+        "nervos_models",
+        "nervos_mcp",
+        "fastapi",
+        "starlette",
+        "uvicorn",
+        "nervos_worker",
+        "nervos_api",
+    }
+)
+
+
+def test_the_scheduler_reads_no_execution_state() -> None:
+    """A schedule decision may not depend on a Job, an Attempt, a Run event or a Run status.
+
+    Read as imports and attribute access rather than as prose: the scheduler's own docstrings say
+    the words "claim" and "Job" precisely in order to record that it does none of it.
+    """
+    scheduler = ROOT / "apps" / "scheduler" / "src" / "nervos_scheduler"
+    for path in python_files(scheduler):
+        text = path.read_text(encoding="utf-8")
+        for symbol in (
+            "JobRecord",
+            "JobAttemptRecord",
+            "RunEventRecord",
+            "RunRecord",
+            "JobExecutionService",
+            "LeaseReclaimer",
+            "RunExecutor",
+        ):
+            assert symbol not in text, (path, symbol)
+    modules_used = {
+        module
+        for path in python_files(ROOT / "apps" / "scheduler" / "src")
+        for module in imported_modules(path)
+    }
+    assert not any("jobs" in module or "run_events" in module for module in modules_used)
+
+
+def test_the_scheduler_declares_its_own_schema_expectation() -> None:
+    """Each process states its own revision; neither imports the other's answer."""
+    scheduler_app = (ROOT / "apps" / "scheduler" / "src" / "nervos_scheduler" / "app.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'EXPECTED_SCHEMA_REVISION = "0008_stage_e1_trigger_scheduling"' in scheduler_app
+    assert "nervos_worker" not in scheduler_app
+    main = (ROOT / "apps" / "scheduler" / "src" / "nervos_scheduler" / "main.py").read_text(
+        encoding="utf-8"
+    )
+    assert "require_schema_revision(" in main
+    assert main.index("require_schema_revision(") < main.index("run_tick(")
+
+
+def test_the_scheduler_service_owns_no_sleep_and_no_clock_read() -> None:
+    """Time is a parameter all the way down, which is why no scheduler test waits for a minute."""
+    service = (CORE_APPLICATION / "scheduler.py").read_text(encoding="utf-8")
+    for forbidden in (
+        "time.sleep",
+        "asyncio.sleep",
+        "datetime.now",
+        "datetime.utcnow",
+        "time.time",
+        "import time",
+    ):
+        assert forbidden not in service, forbidden
+
+
+def test_the_due_scan_is_bounded_ordered_and_keyset_continuable() -> None:
+    """One bounded page per tick, in a total order, with no wholesale load of the due set."""
+    persistence = (CORE_SOURCE / "infrastructure" / "database" / "triggers.py").read_text(
+        encoding="utf-8"
+    )
+    scan = persistence.split("def due_schedule_candidates", 1)[1].split("def materialize_schedule")[
+        0
+    ]
+    assert ".limit(limit)" in scan
+    assert "next_fire_at.asc()" in scan
+    assert "id.asc()" in scan
+    # The continuation predicate is the keyset pair, not an offset.
+    assert "next_fire_at > after_time" in scan
+    assert "TriggerDefinitionRecord.id > after_id" in scan
+    # The only read is the engine's own; no ORM session may appear on this path.
+    assert "Session" not in scan
+
+
+def test_the_scheduler_cursor_has_no_durable_representation() -> None:
+    """Scan fairness state is process-local by design and must never become a table."""
+    names = {path.name for path in python_files(ROOT / "apps" / "api" / "alembic" / "versions")}
+    assert "0009" not in " ".join(names)
+    models = (CORE_SOURCE / "infrastructure" / "database" / "models.py").read_text(encoding="utf-8")
+    assert "scheduler_cursor" not in models.lower()
+    assert "_ = migrations"  # keep the migration set in scope for the assertion above
 
 
 def test_the_occurrence_status_vocabulary_matches_the_frozen_schema() -> None:

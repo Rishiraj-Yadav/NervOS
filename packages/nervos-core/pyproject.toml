@@ -9,6 +9,10 @@ description = "NervOS core domain, application, and infrastructure package"
 requires-python = ">=3.12"
 dependencies = [
     "argon2-cffi>=23,<26",
+    # Schedule evaluation for Stage E cron triggers. It is a *calculation* library and nothing
+    # more: it never owns durable state, never fires anything, and is confined to one
+    # infrastructure adapter so no domain or application module acquires a dependency on it.
+    "cronsim>=2.7,<3",
     "sqlalchemy>=2,<3",
     # IANA timezone data. `zoneinfo` reads a database the OS supplies on Linux and the CI runners,
     # but Windows and slim containers have none -- so without this the frozen UTC/timezone contract

@@ -1,4 +1,4 @@
-.PHONY: bootstrap dev-api dev-worker dev-web test test-e2e e2e lint typecheck security check clean-check
+.PHONY: bootstrap dev-api dev-worker dev-scheduler dev-web test test-e2e e2e lint typecheck security check clean-check
 
 PYTHON ?= python
 
@@ -10,6 +10,9 @@ dev-api:
 
 dev-worker:
 	uv run python scripts/dev.py worker
+
+dev-scheduler:
+	uv run python -m nervos_scheduler
 
 dev-web:
 	uv run python scripts/dev.py web
