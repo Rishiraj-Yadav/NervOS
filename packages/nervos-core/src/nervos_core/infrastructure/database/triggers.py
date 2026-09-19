@@ -15,14 +15,19 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import datetime
+from datetime import UTC, datetime
 
-from sqlalchemy import Engine, delete, func, insert, select, update
+from sqlalchemy import Engine, and_, delete, func, insert, or_, select, update
 from sqlalchemy.engine import Connection, RowMapping
 
 from nervos_core.application.agents import DurableSubmissionRejected
 from nervos_core.application.errors import PersistenceUnavailable
 from nervos_core.application.triggers import (
+    DueScheduleCandidate,
+    ScheduleMaterializationCommand,
+    ScheduleMaterializationOutcome,
+    ScheduleOutcomeKind,
+    StaleReason,
     TriggerDraft,
     TriggerEdit,
     TriggerHasHistory,
@@ -32,12 +37,15 @@ from nervos_core.application.triggers import (
     TriggerNotFound,
 )
 from nervos_core.domain.agents import AgentDefinitionId
+from nervos_core.domain.scheduling import schedule_of
 from nervos_core.domain.triggers import (
     SCHEDULE_KINDS,
+    SKIP_MESSAGES,
     InvalidTrigger,
     MisfirePolicy,
     OccurrenceStatus,
     ScheduleSpec,
+    SkipReason,
     TriggerDefinition,
     TriggerKind,
     TriggerOccurrence,
@@ -65,6 +73,21 @@ _DEFINING_FIELDS = (
     "timezone",
     "event_type",
 )
+
+
+def _as_utc(value: object) -> datetime:
+    """Normalize a stored instant so two reads of the same fact compare equal.
+
+    SQLite hands back naive datetimes for a `DateTime(timezone=True)` column, so comparing a stored
+    value against a command's aware instant would be comparing the right instant in the wrong
+    shape. Normalizing both sides here is what makes the stale check exact rather than
+    accidentally always-unequal.
+    """
+    if not isinstance(value, datetime):
+        raise InvalidTrigger("a stored schedule instant was not a timestamp")
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 class SqlAlchemyTriggerPersistence:
@@ -324,9 +347,20 @@ class SqlAlchemyTriggerPersistence:
     def _materialize_once(
         self, connection: Connection, command: TriggerMaterializationCommand
     ) -> TriggerMaterializationOutcome:
+        """The one materialization core, in the one ordering every kind of trigger uses.
+
+        The ordering is load-bearing, and it is why a second scheduler racing the first is
+        harmless. **Identity is resolved before authority is applied**: if the deterministic
+        occurrence this command names already exists, that row is the answer — whatever has since
+        happened to `enabled`, `config_revision` or `next_fire_at` is beside the point, because the
+        work this command describes has already been done and recorded. Applying authority first
+        would turn a completed materialization into an error for whichever caller arrived second.
+
+        Authority is still applied in full to every *new* identity: a fresh delivery to a disabled
+        trigger is refused exactly as before. The reorder narrows nothing for a new occurrence; it
+        only stops a duplicate from being mistaken for one.
+        """
         definition = self._load_definition(connection, command.trigger_definition_id)
-        if not definition.enabled:
-            raise TriggerNotEditable("a disabled trigger materializes nothing")
         self._require_identity_matches_kind(definition.kind, command)
 
         existing = self._find_existing(connection, definition, command)
@@ -334,7 +368,34 @@ class SqlAlchemyTriggerPersistence:
             # A duplicate identity refers to an occurrence that already exists. Nothing is written:
             # the original terminal outcome, whichever status it has, is authoritative.
             return TriggerMaterializationOutcome(occurrence=existing, duplicate=True)
+        if not definition.enabled:
+            raise TriggerNotEditable("a disabled trigger materializes nothing")
 
+        return TriggerMaterializationOutcome(
+            occurrence=self._materialize_new(connection, definition, command)
+        )
+
+    def _materialize_new(
+        self,
+        connection: Connection,
+        definition: TriggerDefinition,
+        command: TriggerMaterializationCommand,
+        *,
+        terminal_skip: SkipReason | None = None,
+    ) -> TriggerOccurrence:
+        """Create the Run and the occurrence for an identity that does not yet exist.
+
+        `terminal_skip` short-circuits the Run entirely: a schedule that cannot be evaluated has no
+        Run to create, but its occurrence is still owed, because "this schedule was due and could
+        not be honoured" is a durable fact an operator needs.
+        """
+        if terminal_skip is not None:
+            return self._write_skipped(connection, definition, command, terminal_skip)
+        # The resolved Agent Definition was read before this transaction opened, so the durable row
+        # is re-checked here against it. Without this, a drift between the two would be recorded as
+        # an `agent_disabled` skip — consuming a scheduled occurrence, and telling the operator
+        # something untrue, since the Agent is neither disabled nor at fault.
+        self._require_agent_definition_unchanged(connection, definition, command)
         try:
             run = insert_run_and_job_on_connection(
                 connection,
@@ -350,27 +411,67 @@ class SqlAlchemyTriggerPersistence:
                 provider_capacity=self._provider_capacity,
             )
         except DurableSubmissionRejected:
-            return TriggerMaterializationOutcome(
-                occurrence=self._write_occurrence(
-                    connection,
-                    definition,
-                    command,
-                    status=OccurrenceStatus.SKIPPED,
-                    run_id=None,
-                    skip_code="agent_disabled",
-                    skip_message="The agent instance is not eligible to create new runs.",
-                )
+            # The definition identity was verified immediately above, on this connection, inside
+            # this write transaction, so the remaining way the canonical helper's predicates can
+            # fail is that the Agent Instance is disabled. That is the frozen meaning of
+            # `agent_disabled`, and it is the only meaning reachable here.
+            return self._write_skipped(connection, definition, command, SkipReason.AGENT_DISABLED)
+        return self._write_occurrence(
+            connection,
+            definition,
+            command,
+            status=OccurrenceStatus.RUN_CREATED,
+            run_id=run.id,
+            skip_code=None,
+            skip_message=None,
+        )
+
+    @staticmethod
+    def _require_agent_definition_unchanged(
+        connection: Connection,
+        definition: TriggerDefinition,
+        command: TriggerMaterializationCommand,
+    ) -> None:
+        """Fail closed when the target Agent Instance no longer matches the resolved definition.
+
+        The canonical helper enforces the same predicate, but it reports every refusal as one
+        undifferentiated error. Checking here first is what lets the two refusals be told apart: a
+        definition change is a race that must consume nothing, while a disabled Agent is an outcome
+        that must be recorded.
+        """
+        expected = command.definition.definition_id
+        row = (
+            connection.execute(
+                select(
+                    AgentInstanceRecord.agent_key,
+                    AgentInstanceRecord.agent_definition_version,
+                ).where(AgentInstanceRecord.id == definition.agent_instance_id)
             )
-        return TriggerMaterializationOutcome(
-            occurrence=self._write_occurrence(
-                connection,
-                definition,
-                command,
-                status=OccurrenceStatus.RUN_CREATED,
-                run_id=run.id,
-                skip_code=None,
-                skip_message=None,
-            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None or (
+            str(row["agent_key"]),
+            str(row["agent_definition_version"]),
+        ) != (expected.agent_key, expected.agent_definition_version):
+            raise TriggerNotEditable("the target agent instance changed definition")
+
+    def _write_skipped(
+        self,
+        connection: Connection,
+        definition: TriggerDefinition,
+        command: TriggerMaterializationCommand,
+        reason: SkipReason,
+    ) -> TriggerOccurrence:
+        """Record a recognised occurrence that produced no Run, with its static reason."""
+        return self._write_occurrence(
+            connection,
+            definition,
+            command,
+            status=OccurrenceStatus.SKIPPED,
+            run_id=None,
+            skip_code=reason.value,
+            skip_message=SKIP_MESSAGES[reason],
         )
 
     @staticmethod
@@ -399,6 +500,213 @@ class SqlAlchemyTriggerPersistence:
             )
         if not valid:
             raise InvalidTrigger("occurrence identity does not match the trigger kind")
+
+    # ------------------------------------------------------------------------------------------
+    # The scheduler seam: due scanning and one verified, atomic schedule materialization
+    # ------------------------------------------------------------------------------------------
+
+    def due_schedule_candidates(
+        self, *, now: datetime, limit: int, after: tuple[datetime, int] | None
+    ) -> tuple[DueScheduleCandidate, ...]:
+        """Read one bounded page of due schedules, in a stable total order.
+
+        The scan is a read: it opens no write transaction, takes no lock, and is not authority. The
+        order is `(next_fire_at, id)` so the page is resumable without skipping or repeating a row,
+        and it is served entirely by the partial index `0008` already carries over those columns
+        for rows that have a next fire time.
+
+        `enabled = 1` is implied by the `next_fire_alignment` invariant — an enabled schedule
+        always has a next fire time and a disabled one never does — but it is stated anyway, so the
+        query says what it means rather than relying on a reader to reconstruct the implication. It
+        is a residual filter either way, applied after the index seek, and the transaction re-checks
+        it regardless.
+        """
+        query = (
+            select(
+                TriggerDefinitionRecord,
+                AgentInstanceRecord.agent_key.label("agent_key"),
+                AgentInstanceRecord.agent_definition_version.label("agent_definition_version"),
+            )
+            .join(
+                AgentInstanceRecord,
+                AgentInstanceRecord.id == TriggerDefinitionRecord.agent_instance_id,
+            )
+            .where(
+                TriggerDefinitionRecord.enabled.is_(True),
+                TriggerDefinitionRecord.next_fire_at.is_not(None),
+                TriggerDefinitionRecord.next_fire_at <= now,
+                TriggerDefinitionRecord.kind.in_([kind.value for kind in SCHEDULE_KINDS]),
+            )
+            .order_by(
+                TriggerDefinitionRecord.next_fire_at.asc(),
+                TriggerDefinitionRecord.id.asc(),
+            )
+            .limit(limit)
+        )
+        if after is not None:
+            after_time, after_id = after
+            query = query.where(
+                or_(
+                    TriggerDefinitionRecord.next_fire_at > after_time,
+                    and_(
+                        TriggerDefinitionRecord.next_fire_at == after_time,
+                        TriggerDefinitionRecord.id > after_id,
+                    ),
+                )
+            )
+        with self._engine.connect() as connection:
+            rows = connection.execute(query).mappings().all()
+        return tuple(
+            DueScheduleCandidate(
+                trigger=self._to_definition(row),
+                expected_config_revision=int(row["config_revision"]),
+                expected_next_fire_at=_as_utc(row["next_fire_at"]),
+            )
+            for row in rows
+        )
+
+    def materialize_schedule_occurrence(
+        self, command: ScheduleMaterializationCommand
+    ) -> ScheduleMaterializationOutcome:
+        """One transaction: verify a schedule decision against durable state, then apply it.
+
+        Everything the decision was computed from is re-read here and required to be unchanged. A
+        decision that no longer matches current state writes **nothing at all** — no occurrence, no
+        Run, no Job, and no schedule mutation — because recording a race as history would make a
+        harmless lost race permanent and indistinguishable from a real outcome.
+        """
+        return self._runner.run(
+            lambda connection: self._materialize_schedule_once(connection, command)
+        )
+
+    def _materialize_schedule_once(
+        self, connection: Connection, command: ScheduleMaterializationCommand
+    ) -> ScheduleMaterializationOutcome:
+        definition = self._load_definition(connection, command.trigger_definition_id)
+        existing = self._find_existing_schedule(connection, definition, command.nominal_at)
+        if existing is not None:
+            # Identity before authority, for the same reason the shared core does it: this
+            # occurrence already exists, so it is the answer whether or not the trigger is still
+            # enabled. A one-time trigger is disabled by its own materialization, so without this
+            # a second scheduler would report a failure for work that succeeded.
+            return ScheduleMaterializationOutcome(
+                kind=ScheduleOutcomeKind.DUPLICATED, occurrence=existing
+            )
+        stale = self._schedule_stale_reason(connection, definition, command)
+        if stale is not None:
+            return ScheduleMaterializationOutcome(
+                kind=ScheduleOutcomeKind.STALE, stale_reason=stale
+            )
+        occurrence = self._materialize_new(
+            connection,
+            definition,
+            TriggerMaterializationCommand(
+                trigger_definition_id=definition.id,
+                definition=command.definition,
+                now=command.now,
+                occurred_at=command.occurred_at,
+                nominal_at=command.nominal_at,
+            ),
+            terminal_skip=command.terminal_skip,
+        )
+        self._apply_schedule_transition(connection, definition, command)
+        kind = (
+            ScheduleOutcomeKind.SKIPPED
+            if occurrence.status is OccurrenceStatus.SKIPPED
+            else ScheduleOutcomeKind.MATERIALIZED
+        )
+        return ScheduleMaterializationOutcome(kind=kind, occurrence=occurrence)
+
+    def _schedule_stale_reason(
+        self,
+        connection: Connection,
+        definition: TriggerDefinition,
+        command: ScheduleMaterializationCommand,
+    ) -> StaleReason | None:
+        """Why this decision no longer applies, or `None` when it still does.
+
+        Checked in the order that gives the most informative answer, and every check is a
+        **precondition**: none of these values is written back. The revision and the next fire time
+        are compared against what the scan saw, which is what makes a concurrent scheduler's
+        committed advance stop this one — for a recurring trigger the identity alone would not,
+        because two schedulers whose clocks differ can compute different nominal instants for the
+        same trigger and the unique index would not separate them.
+        """
+        if not definition.is_schedule:
+            return StaleReason.NOT_SCHEDULE
+        if definition.config_revision != command.expected_config_revision:
+            return StaleReason.REVISION_CHANGED
+        if not definition.enabled:
+            return StaleReason.DISABLED
+        stored = definition.next_fire_at
+        if stored is None or _as_utc(stored) != _as_utc(command.expected_next_fire_at):
+            return StaleReason.NEXT_FIRE_CHANGED
+        if _as_utc(stored) > _as_utc(command.now):
+            return StaleReason.NOT_DUE
+        # The Agent Definition is resolved outside the transaction, so the target's identity is
+        # re-checked before anything is written. A change here is a race that must consume nothing.
+        expected = command.definition.definition_id
+        row = (
+            connection.execute(
+                select(
+                    AgentInstanceRecord.agent_key,
+                    AgentInstanceRecord.agent_definition_version,
+                ).where(AgentInstanceRecord.id == definition.agent_instance_id)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None or (
+            str(row["agent_key"]),
+            str(row["agent_definition_version"]),
+        ) != (expected.agent_key, expected.agent_definition_version):
+            return StaleReason.AGENT_DEFINITION_CHANGED
+        return None
+
+    def _apply_schedule_transition(
+        self,
+        connection: Connection,
+        definition: TriggerDefinition,
+        command: ScheduleMaterializationCommand,
+    ) -> None:
+        """Move the trigger to its post-occurrence state, in the same transaction.
+
+        A `None` next fire time completes the schedule and disables it, which is the only shape the
+        `next_fire_alignment` invariant accepts for a finished schedule — a one-time trigger whose
+        sole occurrence exists, or a schedule that can no longer be evaluated. Otherwise the next
+        fire time advances and the trigger stays enabled, including when the occurrence was a skip:
+        an Agent being temporarily disabled must not silently end a recurring schedule.
+        """
+        values: dict[str, object] = {"updated_at": command.now}
+        if command.next_fire_at_after is None:
+            values["enabled"] = False
+            values["next_fire_at"] = None
+        else:
+            values["next_fire_at"] = command.next_fire_at_after
+        connection.execute(
+            update(TriggerDefinitionRecord)
+            .where(TriggerDefinitionRecord.id == definition.id)
+            .values(**values)
+        )
+
+    @staticmethod
+    def _find_existing_schedule(
+        connection: Connection, definition: TriggerDefinition, nominal_at: datetime
+    ) -> TriggerOccurrence | None:
+        row = (
+            connection.execute(
+                select(TriggerOccurrenceRecord)
+                .where(
+                    TriggerOccurrenceRecord.trigger_definition_id == definition.id,
+                    TriggerOccurrenceRecord.nominal_at == nominal_at,
+                )
+                .order_by(TriggerOccurrenceRecord.id)
+                .limit(1)
+            )
+            .mappings()
+            .first()
+        )
+        return None if row is None else SqlAlchemyTriggerPersistence._to_occurrence(row)
 
     def _find_existing(
         self,
@@ -570,21 +878,11 @@ class SqlAlchemyTriggerPersistence:
         """Reconstruct the schedule a stored trigger already carries.
 
         Used by an edit that does not restate its schedule, so a rename cannot silently erase a cron
-        expression and leave the row's kind shape invalid.
+        expression and leave the row's kind shape invalid. The reconstruction itself lives in the
+        domain, so the edit path and the schedule evaluator cannot disagree about what a stored row
+        means.
         """
-        if definition.kind is TriggerKind.ONE_TIME:
-            return ScheduleSpec.one_time(definition.run_at) if definition.run_at else None
-        if definition.kind is TriggerKind.INTERVAL:
-            return (
-                ScheduleSpec.interval(definition.interval_seconds)
-                if definition.interval_seconds
-                else None
-            )
-        if definition.kind is TriggerKind.CRON:
-            if definition.cron_expression is None:
-                return None
-            return ScheduleSpec.cron(definition.cron_expression, definition.timezone or "UTC")
-        return None
+        return schedule_of(definition)
 
     @staticmethod
     def _candidate(

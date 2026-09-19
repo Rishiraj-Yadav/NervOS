@@ -3,16 +3,18 @@
 ## Current phase
 
 **Stage D — the tool and MCP layer — is COMPLETE.** **Stage E — scheduling, events, and triggers —
-has begun**: its **E0 architecture freeze** is complete and externally accepted, and **E1 — the durable
-trigger/occurrence domain and migration `0008` — is complete and accepted.** Stage E decides when a Run
-comes into existence, who may cause one, and the single acceptance path every Run travels, in
-ADRs 0018–0020.
+has begun**: its **E0 architecture freeze** is complete and externally accepted, **E1 — the durable
+trigger/occurrence domain and migration `0008` — is complete and accepted**, and **E2 — the scheduler
+engine — is complete and accepted.** Stage E decides when a Run comes into existence, who may cause
+one, and the single acceptance path every Run travels, in ADRs 0018–0020.
 
-**No Stage E runtime behaviour is active yet.** There is no scheduler process, no due scan, no cron
-evaluation, no webhook or event ingress, and no Automations UI. The trigger tables exist and the
-atomic materialization seam exists, but **nothing fires a trigger**: every Run in NervOS today is
-still one a user submitted. Nothing in Stage E may be described as implemented until its own
-milestone lands and is accepted.
+**Schedule triggers now fire.** A dedicated Scheduler process evaluates one-time, interval and cron
+schedules, resolves them in their own IANA timezone under the frozen DST contract, and turns a due
+schedule into an **ordinary Run** through the same submission primitive a person uses. **Nothing else
+in Stage E is active:** there is no webhook or event ingress, no trigger management or
+occurrence-history API, and no Automations UI, so a trigger still cannot be created through the
+product — the scheduler acts on triggers that exist durably. Nothing in Stage E may be described as
+implemented until its own milestone lands and is accepted.
 
 Stage C — Persistent execution engine is COMPLETE. The C0 architecture freeze, the C1 durable execution foundation, C2 — asynchronous submission and minimal durable Worker execution — C3 — Worker registry/health, expired-lease reconciliation, and fencing hardening — C4 — the safe execution retry engine — C5 — owner cancellation and Attempt execution-timeout orchestration — C6 — authoritative global/per-Agent/per-provider execution concurrency, durable Agent fairness, and full admission backpressure — C7 — public read-only execution observability, the Run Events API, the execution timeline, and the polling model — and C8 — integrated deterministic Stage C acceptance and closeout — are implemented, externally reviewed, and accepted.
 
@@ -45,7 +47,7 @@ The next milestone is **Stage E — Scheduling, events, and triggers**.
 
 - [x] E0 — Architecture, protocol, and safety freeze (documentation/governance only; no schema, no dependency, no runtime code)
 - [x] E1 — Durable trigger/occurrence domain, migration `0008`, and the shared Run-submission foundation
-- [ ] E2 — Scheduler: one-time / interval / cron, timezone, misfire, multi-instance, restart
+- [x] E2 — Scheduler: one-time / interval / cron, timezone, misfire, multi-instance, restart
 - [ ] E3 — Webhook ingress, secret authentication and rotation, idempotency
 - [ ] E4 — Internal events, trigger management and occurrence history, minimal Automations surface
 - [ ] E5 — Integrated acceptance and Stage-E closeout
@@ -103,6 +105,60 @@ behaves identically on Windows and in slim containers rather than depending on t
 the first run of a timezone test failed on Windows without it, which is exactly the asymmetry it closes.
 **E1 added no scheduler, no due scan, no cron evaluation, no next-fire calculation, no REST API and no
 frontend.** Its authority remains ADRs 0018–0020, which it did not amend.
+
+**E2 is complete and externally accepted.** It is the milestone that makes a trigger *fire*. A
+dedicated **`apps/scheduler`** process — separate from the Worker, holding no provider credential and
+opening no remote connection — polls on a **fixed five-second interval** with no idle backoff, reads a
+**bounded page of at most 32 due schedules** in a stable `(next_fire_at, id)` order, and hands one
+decision at a time to a transaction that verifies it against durable state before applying it.
+
+**All three schedule kinds are evaluated.** A one-time schedule fires once for the instant it names
+and completes. An interval schedule advances on an exact fixed-duration sequence, and its misfire
+arithmetic is O(1) — a three-day outage on a five-minute interval resolves in one division and produces
+**exactly one** catch-up occurrence, not 864. A cron schedule is evaluated through a single `cronsim`
+adapter confined to one infrastructure module, on the zone's **local wall clock**, with every
+local-to-UTC conversion performed by NervOS in the domain. `COALESCE_ONE` therefore holds for both
+recurring kinds: the occurrence is the **latest missed** nominal instant, and the next fire time is the
+first strictly-future one.
+
+**The DST contract is met by NervOS, not by the library.** A local time that does not exist fires once
+at the **gap-end transition instant** — for `America/New_York`, `30 2 * * *` on 2026-03-08 resolves to
+`07:00Z`, which is neither `fold` value `zoneinfo` offers, so the transition is located by a bounded
+bisection over a window exactly one gap wide. A local time that happens twice fires once, on the first
+occurrence, and the second pass is suppressed structurally because iteration happens in wall-clock
+space. Non-hour shifts are handled — `Australia/Lord_Howe`'s thirty-minute transition included — and
+the tests assert NervOS semantics while separately pinning what the library itself returned, so an
+upstream change fails loudly rather than silently altering scheduling behaviour.
+
+**Materialization is atomic and duplicate-safe.** One `BEGIN IMMEDIATE` contains the trigger re-read,
+the existing-identity lookup, the precondition checks, the canonical Run + Job insertion, the
+occurrence insert, and the schedule state transition. **Identity is resolved before authority**: a
+decision naming an occurrence that already exists returns that occurrence and writes nothing, whatever
+has since happened to `enabled`, `config_revision` or `next_fire_at` — which is what stops a second
+scheduler from reporting a failure for work that already succeeded, and what makes a one-time trigger,
+which disables itself as it fires, safe to race. Authority is still applied in full to every **new**
+identity. Two schedulers need no leader election, no lease and no coordination table: SQLite's write
+lock decides which proceeds, and the database's own facts decide what the loser does — a duplicate
+identity, or a **stale** decision refused because the revision or the next fire time moved. A
+process-local keyset c‍ursor keeps a page blocked by admission backpressure from stranding later due
+schedules; it is fairness state only, has no durable representation, and correctness never depends on
+it.
+
+**The Scheduler decides *when*, never *how*.** It never calls a model, executes a tool, speaks MCP,
+claims a Job, creates an Attempt, terminalizes or retries a Run, or bypasses D2. A Run it creates is an
+ordinary Run with the same Agent snapshot, the same grant-cutoff snapshot, the same admission control
+and the same queue as a manual submission — asserted structurally, and enforced by architecture guards
+that forbid the scheduler from importing any execution module. **Queue-capacity backpressure rolls the
+whole candidate back** and leaves the schedule due rather than recording a skip; an Agent that is
+disabled yields a `skipped` occurrence and does not end a recurring schedule; a schedule that can no
+longer be evaluated records one skip with a static reason and retires itself. Errors are isolated per
+trigger, while schema, database and integrity failures stop the process rather than being swallowed.
+
+**E2 added no migration** — the head remains `0008_stage_e1_trigger_scheduling`, and the trigger
+tables, the partial due index and the `next_fire_alignment` invariant were already sufficient. It added
+**one dependency, `cronsim>=2.7,<3`**, as a calculation library with no scheduler framework behind it.
+**E2 added no webhook or event ingress, no trigger management or occurrence-history API, and no
+frontend surface.** Its authority remains ADRs 0018–0020, which it did not amend.
 
 D0 is **architecture frozen and externally accepted**. It fixed: the MCP protocol target
 (`2026-07-28`, modern era only, Streamable HTTP and stdio, official SDK v2 with no custom protocol
@@ -864,7 +920,9 @@ C8 proves that the finished kernel composes. Each of C2–C7 proved its own slic
 
 Taken together, the guarantees NervOS now offers are: **fenced durable authority**, so only a live lease holder may write; **no blind replay of ambiguous execution**, so an unknown outcome is closed as failed rather than repeated; **safe retry only for a positively safe outcome**; and **late stale writes cannot overwrite truth**. NervOS does **not** guarantee exactly-once remote provider execution. Remote provider processing, billing, and side effects may still occur after an ambiguous post-start crash, a running cancellation, or an execution timeout, and these remain outside the local transaction boundary.
 
-D7 is complete and externally accepted, and Stage D — the tool and MCP layer — is **complete**. **E0 is complete and externally accepted**: Stage E — scheduling, events, and triggers — has its architecture frozen in **ADRs 0018–0020**, and it changed no runtime behaviour. **E1 is complete and externally accepted**: the durable trigger/occurrence domain and migration `0008` exist, and the Run-creation seam is shared and atomic. The next engineering milestone is **E2 — the scheduler engine**: one-time, interval and cron evaluation with timezone and DST semantics, the `COALESCE_ONE` misfire policy, multi-instance safety, and restart recovery.
+D7 is complete and externally accepted, and Stage D — the tool and MCP layer — is **complete**. **E0 is complete and externally accepted**: Stage E — scheduling, events, and triggers — has its architecture frozen in **ADRs 0018–0020**, and it changed no runtime behaviour. **E1 is complete and externally accepted**: the durable trigger/occurrence domain and migration `0008` exist, and the Run-creation seam is shared and atomic. **E2 is complete and externally accepted**: a dedicated Scheduler process evaluates one-time, interval and cron schedules with IANA timezone and frozen DST semantics, coalesces missed occurrences under `COALESCE_ONE`, and materializes each due schedule into an ordinary Run atomically, with duplicate/stale protection across concurrent schedulers and deferral under admission backpressure. The next engineering milestone is **E3 — webhook ingress**: secret authentication and rotation, and the idempotency rules that make a repeated delivery resolve to the occurrence it already produced.
+
+**E2 is implemented and complete**, and it is the milestone that makes a schedule trigger *fire*. A dedicated `apps/scheduler` process — holding no provider credential and opening no remote connection — polls on a fixed five-second interval, reads a bounded page of at most 32 due schedules in a stable `(next_fire_at, id)` order, and hands each decision to one `BEGIN IMMEDIATE` transaction that verifies it against durable state before applying it. All three schedule kinds are evaluated: one-time fires once and completes; interval advances on an exact fixed-duration sequence with O(1) misfire arithmetic, so a three-day outage produces exactly one catch-up occurrence rather than 864; and cron iterates through a single `cronsim` adapter confined to one infrastructure module, on the zone's local wall clock, with every local-to-UTC conversion performed by NervOS in the domain. The DST contract is therefore met by NervOS rather than by a library: a nonexistent local time fires once at the gap-end transition instant — `30 2 * * *` in `America/New_York` on 2026-03-08 resolves to `07:00Z`, which is neither value `zoneinfo`'s `fold` offers, so the transition is located by a bounded bisection over a window exactly one gap wide — and a repeated local time fires once, on the first occurrence, suppressed structurally because iteration happens in wall-clock space. Non-hour shifts are handled, `Australia/Lord_Howe`'s thirty-minute transition included. Materialization resolves **identity before authority**, so a decision naming an occurrence that already exists returns that occurrence and writes nothing, whatever has since happened to `enabled`, `config_revision` or `next_fire_at` — which is what makes a self-disabling one-time trigger safe to race — while authority is still applied in full to every new identity. Concurrent schedulers need no leader election, lease or coordination table: the write lock decides which proceeds and the database's own facts decide what the loser does. Admission backpressure rolls a candidate back whole and leaves the schedule due; a disabled Agent yields a `skipped` occurrence without ending a recurring schedule; an unevaluable schedule records one skip with a static reason and retires itself. **E2 added no migration** and **one dependency, `cronsim>=2.7,<3`**; the migration head remains `0008_stage_e1_trigger_scheduling`. It added no webhook or event ingress, no trigger management or occurrence-history API, and no frontend surface.
 
 D2 adds the permission layer that will gate every future tool call, and it adds nothing that can call one. A user's Agent Instance holds an explicit ALLOW row per tool; there is no DENY row, so "not granted" and "revoked" are the same observable state and an entire class of precedence bug cannot be expressed. The call-time evaluator derives its authority from durable rows rather than from its caller: it takes only a Run id and a tool definition id, loads the Run to obtain the Agent Instance and the monotonic grant cutoff, loads the grant, and loads the definition to compare `grant.reviewed_fingerprint` against `tool_definitions.fingerprint` directly. No caller can supply an Agent, a cutoff, or a fingerprint, so a stale grant cannot be revived by presenting the fingerprint it was reviewed at. Revocation deletes the row and bites at the very next check; a new grant is invisible to a Run already submitted because its id exceeds that Run's snapshotted cutoff; re-granting and re-confirming both mint a new AUTOINCREMENT id, so the capability reaches only Runs submitted afterwards. Drift fails closed as `DEFINITION_CHANGED`, an unavailable definition as `DEFINITION_UNAVAILABLE`, a disabled MCP connection as `CONNECTION_DISABLED`, and a cross-owner MCP grant as `OWNER_MISMATCH` — the last re-proven at call time against the connection's owner rather than trusted from grant creation, so a grant row inserted directly into the database still fails closed. Annotations remain presentation-only and never grant. The evaluator is a pure read: it writes no `tool_invocations` row, emits no Run Event, and touches no execution state. **D2 added no migration and no dependency**; the migration head remains `0007_stage_d1_tool_capability_audit`. Nothing executes a tool yet: there is still no registry, no canonical schema validator, no built-in tool, no MCP client, no provider tool calling, and no Think → Act → Observe loop.
 
