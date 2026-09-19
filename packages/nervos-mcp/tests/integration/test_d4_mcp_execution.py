@@ -39,7 +39,7 @@ from nervos_core.infrastructure.database.jobs import SqlAlchemyJobExecutionPersi
 from nervos_core.infrastructure.database.tool_invocations import (
     SqlAlchemyToolInvocationPersistence,
 )
-from sqlalchemy import Engine
+from sqlalchemy import Engine, text
 
 from ..support.fake_mcp_server import (
     READ_DOCUMENT,
@@ -164,10 +164,13 @@ async def test_read_document_reaches_the_fake_server_through_the_real_stack(
 
             outcome = await rig.loop.run(completion, run, claim, 0)
 
-            # The loop itself emits nothing on the public Run timeline (D6 owns tool facts).
+            # D6 publishes the tool facts a remote call produces, and this is the first place an
+            # external source reaches the public timeline. The three events appear in order, all
+            # pointing at the durable invocation, and no Stage C event was disturbed.
             events_after = event_types(engine, run_id)
-            assert events_after == events_before
-            assert not [event for event in events_after if event.startswith("tool.")]
+            assert events_before <= events_after
+            added = [event for event in events_after if event not in events_before]
+            assert sorted(added) == ["tool.requested", "tool.started", "tool.succeeded"]
 
             assert succeed_run(engine, claim, outcome) is True
 
@@ -191,6 +194,25 @@ async def test_read_document_reaches_the_fake_server_through_the_real_stack(
             # No raw SDK object leaked: only the normalized JSON ToolResult reached the loop.
             assert observation.structured == {"result": "document:a.txt"}
             assert type(observation) is ToolResultTurn
+
+            # D6's audit surface carries the fact without the material: the tool event names the
+            # invocation and a static message, and neither the remote text nor the argument value
+            # is anywhere on it. Asserted here, on the external-source path, because that is where
+            # a raw server string would be most tempting to record.
+            with engine.connect() as connection:
+                audit_text = " ".join(
+                    str(value)
+                    for row in connection.execute(
+                        text(
+                            "SELECT event_type, code, message, tool_invocation_id FROM run_events"
+                            " WHERE run_id = :r AND event_type LIKE 'tool.%'"
+                        ),
+                        {"r": run_id},
+                    ).all()
+                    for value in row
+                )
+            assert "document:a.txt" not in audit_text
+            assert "a.txt" not in audit_text
 
             assert load_run(engine, run_id).status is RunStatus.SUCCEEDED
         finally:

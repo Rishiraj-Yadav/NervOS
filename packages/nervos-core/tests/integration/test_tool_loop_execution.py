@@ -871,8 +871,13 @@ class TestRegistrationAndLoop:
         assert observation.structured is not None
         assert "0.3333" in str(observation.structured)
 
-    def test_the_loop_emits_no_tool_run_event(self, engine: Engine) -> None:
-        """D4 keeps the public Run timeline free of tool facts; D6 owns that surface."""
+    def test_the_loop_emits_exactly_the_tool_run_events_of_one_call(self, engine: Engine) -> None:
+        """D6 closes the D4 deferral: a dispatched call now appears on the public timeline.
+
+        The loop itself still knows nothing about Run Events -- it reaches durable audit only
+        through the invocation port -- so what this proves is that the *transitions* carry their
+        events, and that nothing else on the timeline moved.
+        """
         instance_id = _instance_id(engine)
         definitions = SqlAlchemyToolDefinitionPersistence(engine)
         descriptors = reconcile_builtin_definitions(
@@ -916,7 +921,32 @@ class TestRegistrationAndLoop:
                     text("SELECT event_type FROM run_events WHERE run_id=:r"), {"r": run_id}
                 ).scalars()
             )
-        assert after == before
+            invocation_id = int(
+                connection.execute(
+                    select(ToolInvocationRecord.id).where(
+                        ToolInvocationRecord.attempt_id == claim.attempt_id
+                    )
+                ).scalar_one()
+            )
+            linked = connection.execute(
+                text(
+                    "SELECT event_type, tool_invocation_id FROM run_events"
+                    " WHERE run_id=:r AND event_type LIKE 'tool.%' ORDER BY sequence"
+                ),
+                {"r": run_id},
+            ).all()
+
+        # Exactly one request, one dispatch and one success -- in that order -- and every one of
+        # them points at the durable invocation rather than being a free-floating timeline fact.
+        assert linked == [
+            ("tool.requested", invocation_id),
+            ("tool.started", invocation_id),
+            ("tool.succeeded", invocation_id),
+        ]
+        # The Stage C events the Attempt already produced are untouched: the loop added tool
+        # facts and changed no existing timeline semantics.
+        assert before <= after
+        assert after - before == {"tool.requested", "tool.started", "tool.succeeded"}
 
 
 def _tool_turn(model_name: str, arguments_json: str) -> ModelResponse:

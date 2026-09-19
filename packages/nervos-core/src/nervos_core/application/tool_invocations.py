@@ -141,6 +141,33 @@ class StartOutcome:
     permission_decision: str | None = None
 
 
+class RefusalOutcomeKind(StrEnum):
+    """What `record_pre_dispatch_refusal` durably did with a call that had no invocation row."""
+
+    # The refusal is durable: one `tool.denied` event now carries it.
+    RECORDED = "recorded"
+    # The Run was cancelled. No audit fact was added, and the caller must take the cancellation
+    # path rather than continuing to another model turn.
+    CANCELLED = "cancelled"
+    # This Worker's authority is gone -- the lease lapsed, the claim was replaced, or the Attempt
+    # is no longer running. Nothing was written.
+    FENCED = "fenced"
+
+
+@dataclass(frozen=True, slots=True)
+class RefusalOutcome:
+    """The typed result of recording a refused call that never became a durable invocation.
+
+    It is deliberately not a boolean. A refused write here means either "the Run was cancelled" or
+    "this Worker no longer owns the Attempt", and those are different next actions: the first is
+    the ordinary cancellation closeout, the second is an authority loss that must stop the loop
+    without dispatching anything further. Collapsing them would force the loop to guess, and would
+    hide an authority loss behind an ordinary refusal.
+    """
+
+    kind: RefusalOutcomeKind
+
+
 @dataclass(frozen=True, slots=True)
 class ResultEnvelope:
     """The content evidence for one concluded call: its digest and its true byte size.
@@ -222,6 +249,17 @@ class ToolInvocationPersistence(Protocol):
         error_message: str,
         now: datetime,
     ) -> bool: ...
+
+    def record_pre_dispatch_refusal(self, *, claim: ClaimHandle, now: datetime) -> RefusalOutcome:
+        """Record a refused call that provably never became an invocation, or refuse to record it.
+
+        The three refusals this covers all happen before the loop may insert anything: a tool name
+        absent from the frozen catalog, arguments that were not a JSON object, and arguments the
+        tool's canonical input schema rejected. Each is a fact about a call the model made, and
+        none can carry a `tool_invocations` row without inventing a definition that does not
+        exist, so the fact is recorded as a tool event with no invocation id.
+        """
+        ...
 
 
 def permission_decision_value(decision: PermissionDecision) -> str:

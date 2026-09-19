@@ -29,6 +29,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import SQLAlchemyError
 
 from nervos_core.application.errors import PersistenceUnavailable
+from nervos_core.application.model_completion import TOOL_DENIED, safe_error_message
 from nervos_core.application.tool_invocations import (
     ALLOWED_DECISION,
     ClaimHandle,
@@ -36,6 +37,8 @@ from nervos_core.application.tool_invocations import (
     InvocationStatus,
     RecordOutcome,
     RecordOutcomeKind,
+    RefusalOutcome,
+    RefusalOutcomeKind,
     ResultEnvelope,
     StartOutcome,
     StartOutcomeKind,
@@ -44,11 +47,16 @@ from nervos_core.application.tool_invocations import (
     permission_decision_value,
 )
 from nervos_core.application.tool_permissions import PermissionDecision
-from nervos_core.domain.jobs import AttemptStatus, JobStatus
+from nervos_core.domain.jobs import AttemptStatus, JobStatus, RunEventType
 from nervos_core.infrastructure.database.models import (
     JobAttemptRecord,
     JobRecord,
     ToolInvocationRecord,
+)
+from nervos_core.infrastructure.database.run_events import (
+    EventOwnershipViolation,
+    append_event_on_connection,
+    sequence_base,
 )
 from nervos_core.infrastructure.database.tools import evaluate_permission_on_connection
 
@@ -166,7 +174,18 @@ class SqlAlchemyToolInvocationPersistence:
             primary_key = result.inserted_primary_key
             if primary_key is None or primary_key[0] is None:  # pragma: no cover - defensive
                 raise _Fenced
-            return RecordOutcome(RecordOutcomeKind.REQUESTED, int(primary_key[0]))
+            invocation_id = int(primary_key[0])
+            # The event is appended in the same transaction as the row it describes, so the public
+            # timeline can never show a request whose durable invocation rolled back, nor an
+            # invocation with no request on the timeline.
+            self._append_tool_event(
+                connection,
+                claim=claim,
+                event_type=RunEventType.TOOL_REQUESTED,
+                tool_invocation_id=invocation_id,
+                now=now,
+            )
+            return RecordOutcome(RecordOutcomeKind.REQUESTED, invocation_id)
 
         return self._runner.run(operation)
 
@@ -241,6 +260,20 @@ class SqlAlchemyToolInvocationPersistence:
                     != 1
                 ):
                     raise _Fenced
+                # This branch is the *live* re-check, and it is the one that catches a grant
+                # revoked, a connection disabled, a definition drifted, or an owner changed
+                # between the two checks. It must emit its own denial event here: this call never
+                # reaches `mark_denied`, so a missing append would leave a durable `denied` row
+                # with no `tool.denied` on the timeline -- the exact gap this milestone closes.
+                self._append_tool_event(
+                    connection,
+                    claim=claim,
+                    event_type=RunEventType.TOOL_DENIED,
+                    tool_invocation_id=invocation_id,
+                    code=TOOL_DENIED,
+                    message=safe_error_message(TOOL_DENIED),
+                    now=now,
+                )
                 return StartOutcome(
                     StartOutcomeKind.DENIED, invocation_id, permission_decision_value(decision)
                 )
@@ -256,11 +289,21 @@ class SqlAlchemyToolInvocationPersistence:
             )
             if _rowcount(updated) != 1:
                 raise _Fenced
+            # The start boundary is the one transition whose event matters most: it is the moment
+            # the call may already have reached an external system, so the timeline must show it
+            # before any terminal fact can exist.
+            self._append_tool_event(
+                connection,
+                claim=claim,
+                event_type=RunEventType.TOOL_STARTED,
+                tool_invocation_id=invocation_id,
+                now=now,
+            )
             return StartOutcome(StartOutcomeKind.STARTED, invocation_id, ALLOWED_DECISION)
 
         try:
             return self._runner.run(operation)
-        except _Fenced:
+        except (_Fenced, EventOwnershipViolation):
             return StartOutcome(StartOutcomeKind.FENCED)
 
     def mark_denied(
@@ -286,6 +329,15 @@ class SqlAlchemyToolInvocationPersistence:
             )
             if _rowcount(updated) != 1:
                 raise _Fenced
+            self._append_tool_event(
+                connection,
+                claim=claim,
+                event_type=RunEventType.TOOL_DENIED,
+                tool_invocation_id=invocation_id,
+                code=TOOL_DENIED,
+                message=safe_error_message(TOOL_DENIED),
+                now=now,
+            )
             return True
 
         return self._fenced(operation)
@@ -346,6 +398,13 @@ class SqlAlchemyToolInvocationPersistence:
             )
             if _rowcount(updated) != 1:
                 raise _Fenced
+            self._append_tool_event(
+                connection,
+                claim=claim,
+                event_type=RunEventType.TOOL_SUCCEEDED,
+                tool_invocation_id=invocation_id,
+                now=now,
+            )
             return True
 
         return self._fenced(operation)
@@ -380,6 +439,15 @@ class SqlAlchemyToolInvocationPersistence:
             )
             if _rowcount(updated) != 1:
                 raise _Fenced
+            self._append_tool_event(
+                connection,
+                claim=claim,
+                event_type=RunEventType.TOOL_FAILED,
+                tool_invocation_id=invocation_id,
+                code=error_code,
+                message=error_message,
+                now=now,
+            )
             return True
 
         return self._fenced(operation)
@@ -418,9 +486,90 @@ class SqlAlchemyToolInvocationPersistence:
             )
             if _rowcount(updated) != 1:
                 raise _Fenced
+            self._append_tool_event(
+                connection,
+                claim=claim,
+                event_type=RunEventType.TOOL_AMBIGUOUS,
+                tool_invocation_id=invocation_id,
+                code=error_code,
+                message=error_message,
+                now=now,
+            )
             return True
 
         return self._fenced(operation)
+
+    def record_pre_dispatch_refusal(self, *, claim: ClaimHandle, now: datetime) -> RefusalOutcome:
+        """Record a refused call that provably never became a durable invocation.
+
+        Three refusals happen before the loop may insert anything: the model named a tool that is
+        not in the frozen catalog, the arguments were not a JSON object, and the arguments did not
+        satisfy the tool's canonical input schema. Each is a real audit fact about a call the model
+        made, but none can truthfully carry a `tool_invocations` row -- that table requires a real
+        `tool_definition_id`, and inventing a sentinel definition, a fake id, or another Run's
+        definition id would make the durable record assert something untrue.
+
+        So the fact is recorded where it is honestly representable: one `tool.denied` event with a
+        NULL `tool_invocation_id`, meaning "this Run saw a refused call that never existed as a
+        row". The write is fenced on exactly the authority every other invocation write uses, so a
+        Worker that lost its claim, whose lease lapsed, or whose Run was cancelled cannot add audit
+        facts to a timeline it no longer owns.
+
+        The typed outcome is what the loop needs to keep the two refusals apart: a **cancelled** Run
+        means the ordinary cancellation path, while a **fenced** write means this Worker's authority
+        is gone and nothing more may be dispatched or observed.
+        """
+
+        def operation(connection: Connection) -> RefusalOutcome:
+            authority = self._authority(connection, claim=claim, now=now)
+            if not authority.live:
+                return RefusalOutcome(RefusalOutcomeKind.FENCED)
+            if authority.cancelled:
+                return RefusalOutcome(RefusalOutcomeKind.CANCELLED)
+            self._append_tool_event(
+                connection,
+                claim=claim,
+                event_type=RunEventType.TOOL_DENIED,
+                tool_invocation_id=None,
+                code=TOOL_DENIED,
+                message=safe_error_message(TOOL_DENIED),
+                now=now,
+            )
+            return RefusalOutcome(RefusalOutcomeKind.RECORDED)
+
+        return self._runner.run(operation)
+
+    def _append_tool_event(
+        self,
+        connection: Connection,
+        *,
+        claim: ClaimHandle,
+        event_type: RunEventType,
+        now: datetime,
+        tool_invocation_id: int | None = None,
+        code: str | None = None,
+        message: str | None = None,
+    ) -> None:
+        """Append one tool Run Event into the caller's transition transaction.
+
+        One event per transition, so the sequence is the Run's high-water mark plus one, read
+        inside the same transaction that performed the transition. The event therefore commits
+        with its cause or not at all, and a repeated transition -- which its compare-and-set
+        already refuses -- can never append a second event.
+        """
+        append_event_on_connection(
+            connection,
+            run_id=claim.run_id,
+            job_id=claim.job_id,
+            attempt_id=claim.attempt_id,
+            tool_invocation_id=tool_invocation_id,
+            sequence=sequence_base(connection, claim.run_id) + 1,
+            event_type=event_type,
+            code=code,
+            message=message,
+            attempt_number=claim.attempt_number,
+            created_at=now,
+        )
 
     @staticmethod
     def _close_non_dispatched(
@@ -517,7 +666,11 @@ class SqlAlchemyToolInvocationPersistence:
         """Run one operation, mapping a lost fence to a plain refusal rather than an error."""
         try:
             return self._runner.run(operation)
-        except _Fenced:
+        except (_Fenced, EventOwnershipViolation):
+            # `EventOwnershipViolation` means a tool event named an invocation that is not the one
+            # being audited. It cannot arise from a race -- the caller states every identifier --
+            # so it is a call-site defect, and the whole transaction, transition included, rolled
+            # back. Refusing is the safe reading: nothing was written.
             return False
 
 

@@ -59,6 +59,7 @@ from nervos_core.application.tool_invocations import (
     ClaimHandle,
     InvocationRequest,
     RecordOutcomeKind,
+    RefusalOutcomeKind,
     StartOutcomeKind,
     ToolInvocationPersistence,
     parse_arguments,
@@ -433,14 +434,14 @@ class ToolLoop:
         """
         entry = catalog.lookup(call.name)
         if entry is None:
-            self._observe_failure(run, state, call.call_id, _UNKNOWN_TOOL_NOTE)
+            await self._refuse(run, claim, state, call.call_id, _UNKNOWN_TOOL_NOTE)
             return
         arguments = parse_arguments(call.arguments_json)
         if arguments is None:
-            self._observe_failure(run, state, call.call_id, _INVALID_ARGUMENTS_NOTE)
+            await self._refuse(run, claim, state, call.call_id, _INVALID_ARGUMENTS_NOTE)
             return
         if validate_instance(entry.canonical_input_schema, arguments) is not None:
-            self._observe_failure(run, state, call.call_id, _INVALID_ARGUMENTS_NOTE)
+            await self._refuse(run, claim, state, call.call_id, _INVALID_ARGUMENTS_NOTE)
             return
 
         descriptor = entry.descriptor
@@ -606,6 +607,34 @@ class ToolLoop:
         ):
             return
         raise ModelProviderError(INTERNAL_EXECUTION_ERROR, usage=usage)
+
+    async def _refuse(
+        self,
+        run: Run,
+        claim: ClaimHandle,
+        state: _LoopState,
+        call_id: str,
+        note: str,
+    ) -> None:
+        """Make a pre-dispatch refusal durable *before* the model is told anything about it.
+
+        The durable fact comes first and the conversation follows it, never the reverse. If the
+        audit write is refused because the Run was cancelled or because this Worker lost its
+        authority, the loop must not append an observation and must not take another model turn:
+        continuing would build a conversation on an Attempt that no longer owns its claim, and
+        would present a refusal the timeline never recorded. So the authority result is propagated
+        as the corresponding failure instead of being swallowed.
+
+        A refusal that *is* recorded still counts exactly as it always did -- the same observation,
+        the same consecutive-failure increment, the same loop limit -- because D6 adds an audit
+        fact and changes no loop semantics.
+        """
+        outcome = self._invocations.record_pre_dispatch_refusal(claim=claim, now=self._clock())
+        if outcome.kind is RefusalOutcomeKind.CANCELLED:
+            raise ModelProviderError(EXECUTION_CANCELLED, usage=state.usage)
+        if outcome.kind is RefusalOutcomeKind.FENCED:
+            raise ModelProviderError(INTERNAL_EXECUTION_ERROR, usage=state.usage)
+        self._observe_failure(run, state, call_id, note)
 
     def _observe_failure(self, run: Run, state: _LoopState, call_id: str, note: str) -> None:
         """Append one safe failure observation, failing the Run once the limit is reached.

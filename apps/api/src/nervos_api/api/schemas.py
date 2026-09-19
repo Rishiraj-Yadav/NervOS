@@ -179,7 +179,9 @@ class RunEventResponse(BaseModel):
     could leak even by accident. The four identifiers it *does* store -- the global event `id`, and
     the `run_id`/`job_id`/`attempt_id` of the execution-obligation graph -- are deliberately not
     projected: they are internal identity, and `sequence` plus `attempt_number` already carry every
-    fact the timeline needs.
+    fact the timeline needs. `tool_invocation_id` is the one stored identifier that *is* projected:
+    a tool event's timeline row needs an opaque handle back to its invocation, and the handle names
+    no tool, argument, result, digest, or connection.
     """
 
     sequence: int
@@ -189,6 +191,7 @@ class RunEventResponse(BaseModel):
     code: str | None
     message: str | None
     available_at: datetime | None
+    tool_invocation_id: int | None = None
 
     @classmethod
     def from_domain(cls, event: RunEvent) -> "RunEventResponse":
@@ -200,6 +203,7 @@ class RunEventResponse(BaseModel):
             code=event.code,
             message=event.message,
             available_at=event.available_at,
+            tool_invocation_id=event.tool_invocation_id,
         )
 
 

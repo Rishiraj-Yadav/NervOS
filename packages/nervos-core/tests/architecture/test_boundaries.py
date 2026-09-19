@@ -6,9 +6,12 @@ import ast
 import re
 from pathlib import Path
 
+from nervos_core.domain.jobs import RunEventType
+
 ROOT = Path(__file__).resolve().parents[4]
 CORE_SOURCE = ROOT / "packages" / "nervos-core" / "src" / "nervos_core"
 CORE_APPLICATION = CORE_SOURCE / "application"
+CORE_INFRASTRUCTURE = CORE_SOURCE / "infrastructure" / "database"
 MODELS_SOURCE = ROOT / "packages" / "nervos-models" / "src" / "nervos_models"
 API_SOURCE = ROOT / "apps" / "api" / "src" / "nervos_api"
 API_ROUTES = API_SOURCE / "api" / "routes"
@@ -836,16 +839,88 @@ def test_the_tool_catalog_is_grant_filtered_and_never_a_permission_shortcut() ->
         assert forbidden not in catalog, forbidden
 
 
-def test_the_tool_loop_emits_no_run_event() -> None:
-    """D4 keeps the public Run timeline free of tool facts.
+def test_the_tool_loop_reaches_audit_only_through_the_invocation_port() -> None:
+    """D6 moved where the rule applies, and did not weaken it.
 
-    `RunEventResponse` projects `event_type` and `message` with no type filter, so emitting a tool
-    event here would publish it through the already accepted C7 endpoint before D6 designs that
-    surface. `tool_invocations` is D4's durable tool record instead.
+    D4 forbade the loop from emitting events at all, because the public surface did not exist yet.
+    D6 publishes tool events, so the loop now *does* cause them -- but it still names none of the
+    event vocabulary: durability is reached only through the invocation persistence port, whose
+    implementations append the matching event in the same transaction as the transition. That
+    keeps the loop's decisions testable without a database and keeps the event layer from becoming
+    a second place where tool semantics are decided.
     """
     loop = (CORE_APPLICATION / "tool_loop.py").read_text(encoding="utf-8")
     for forbidden in ("RunEventType", "run_event", "_append_event", "RunEvent"):
         assert forbidden not in loop, forbidden
+    # The one door it may use, and the only vocabulary it needs to read the result.
+    assert "record_pre_dispatch_refusal" in loop
+    assert "RefusalOutcomeKind" in loop
+
+
+def test_the_tool_event_vocabulary_matches_the_frozen_schema() -> None:
+    """The domain enum and the `run_events` CHECK cannot drift, because they are compared here.
+
+    D6 found the two out of step: `0007` accepted six `tool.*` strings that `RunEventType` could
+    not represent, so reading one back raised. A test that compares them is what keeps that from
+    happening again, and it is also why `tool.cancelled` can never be added by accident -- it is
+    absent from the migration, so an enum member for it would fail here.
+    """
+    migration = (
+        ROOT / "apps" / "api" / "alembic" / "versions" / "0007_stage_d1_tool_capability_audit.py"
+    )
+    # The migration is the authority; the enum must be a subset of the strings it accepts.
+    text = migration.read_text(encoding="utf-8")
+    members = {member.value for member in RunEventType}
+    for value in members:
+        assert f"'{value}'" in text, value
+    tool_types = {value for value in members if value.startswith("tool.")}
+    assert tool_types == {
+        "tool.requested",
+        "tool.started",
+        "tool.succeeded",
+        "tool.failed",
+        "tool.denied",
+        "tool.ambiguous",
+    }
+    # `tool.cancelled` is deliberately absent from the *accepted vocabulary*. The migration's
+    # prose explains why it is absent, so the assertion is made against the CHECK constant itself
+    # rather than the file text, which would only be testing the docstring.
+    accepted = re.search(r"TOOL_EVENT_TYPES\s*=\s*\((.*?)\)", text, re.DOTALL)
+    assert accepted is not None, "the migration declares no tool event vocabulary"
+    assert "tool.cancelled" not in accepted.group(1)
+
+
+def test_run_events_are_never_read_to_decide_anything() -> None:
+    """The timeline is an append-only projection, never an input to a decision.
+
+    A Run Event is a *safe fact about the past*. If permission, retry, replay or availability ever
+    consulted it, the projection would become a second authority beside `tool_invocations` and
+    D2's live predicate -- and a fact that can be absent, late, or reordered is exactly the wrong
+    thing to authorize with.
+
+    Naming `RunEventType` is allowed: appending an event means naming its type, and the invocation
+    persistence and the review set do exactly that. What no deciding module may do is *read* the
+    table -- query it, count it, or hydrate a row from it.
+    """
+    deciding_modules = (
+        CORE_APPLICATION / "tool_permissions.py",
+        CORE_APPLICATION / "tool_loop.py",
+        CORE_APPLICATION / "retry_policy.py",
+        CORE_INFRASTRUCTURE / "tools.py",
+        CORE_INFRASTRUCTURE / "tool_invocations.py",
+    )
+    readers = ("RunEventRecord", "list_run_events", "read_run_events", "run_event_from_record")
+    for path in deciding_modules:
+        text = path.read_text(encoding="utf-8")
+        for forbidden in readers:
+            assert forbidden not in text, (path.name, forbidden)
+
+    # Only the invocation lifecycle may know the table exists at all, and only to append through
+    # the shared primitive. Every other deciding module must not reference it in any form.
+    for path in deciding_modules[:-1]:
+        assert "run_events" not in path.read_text(encoding="utf-8"), path.name
+    lifecycle = deciding_modules[-1].read_text(encoding="utf-8")
+    assert "append_event_on_connection" in lifecycle
 
 
 # --- D5: the MCP client lives in one package, and reaches only public SDK surfaces ---
@@ -866,6 +941,123 @@ def _private_sdk_imports(path: Path) -> list[str]:
         if any(segment.startswith("_") for segment in parts[1:]):
             private.append(module)
     return private
+
+
+def test_the_tool_audit_path_stays_provider_neutral() -> None:
+    """Audit, reconciliation and recovery must not learn what a model provider is.
+
+    D6 runs inside the Stage C engine and beside the D4 loop, both of which are provider-blind.
+    A provider name reaching the audit or recovery path would mean a durable timeline that reads
+    differently depending on which adapter produced it.
+    """
+    modules = (
+        CORE_INFRASTRUCTURE / "run_events.py",
+        CORE_INFRASTRUCTURE / "tool_invocations.py",
+        CORE_INFRASTRUCTURE / "jobs.py",
+    )
+    for path in modules:
+        text = path.read_text(encoding="utf-8")
+        for provider in ("anthropic", "openai", "Anthropic", "OpenAI"):
+            assert provider not in text, (path.name, provider)
+
+
+def test_no_tool_queue_continuation_or_resume_primitive_exists() -> None:
+    """D6 integrated the tool layer with the existing engine; it did not add a second one.
+
+    A tool-specific queue, worker, job or attempt -- or any checkpoint/resume machinery -- would be
+    a new durable execution primitive, and ADR 0017's whole design is that one Job and one Attempt
+    carry the entire Think -> Act -> Observe loop. Stage F owns conversation resume; D6 owns none
+    of it.
+    """
+    forbidden = (
+        "ToolJob",
+        "ToolQueue",
+        "ToolWorker",
+        "ToolAttempt",
+        "tool_scheduler",
+        "checkpoint",
+        "checkpointer",
+        "resume_from",
+        "resume_attempt",
+    )
+    for path in python_files(CORE_SOURCE):
+        text = path.read_text(encoding="utf-8")
+        for name in forbidden:
+            assert name not in text, (path.name, name)
+
+
+def test_the_public_run_event_model_carries_only_safe_fields() -> None:
+    """The published event names the invocation and nothing else about it.
+
+    `tool_invocation_id` is deliberately opaque: an identifier names no tool, no argument, no
+    result and no connection. Enriching the projection into a tool name or a server message is the
+    change this guard exists to make someone argue for.
+    """
+    schema = (API_SOURCE / "api" / "schemas.py").read_text(encoding="utf-8")
+    response = re.search(
+        r"class RunEventResponse\(BaseModel\):(.*?)(?=\nclass )", schema, re.DOTALL
+    )
+    assert response is not None, "RunEventResponse is not declared in the API schemas"
+    body = response.group(1)
+    for forbidden in (
+        "arguments",
+        "result_digest",
+        "result_bytes",
+        "permission_decision",
+        "provider_call_id",
+        "upstream_name",
+        "model_name",
+        "source_kind",
+        "credential",
+    ):
+        assert forbidden not in body, forbidden
+    # The one link D6 added is present, so this is a narrowing check and not a vacuous one.
+    assert "tool_invocation_id" in body
+
+
+def test_the_frontend_gained_only_event_vocabulary() -> None:
+    """The frontend change is compatibility repair for the new event types, not a new surface.
+
+    The Run timeline validates `event_type` from a runtime allow-list with no fallback, so
+    publishing tool events without teaching the client those six literals would break the whole
+    page for any tool-using Run. Anything beyond the six literals -- a page, a capability control,
+    a tool browser -- belongs to a milestone that authorizes it.
+    """
+    timeline = (FRONTEND_SOURCE / "components" / "RunTimeline.tsx").read_text(encoding="utf-8")
+    for literal in (
+        "tool.requested",
+        "tool.started",
+        "tool.succeeded",
+        "tool.failed",
+        "tool.denied",
+        "tool.ambiguous",
+    ):
+        assert literal in timeline, literal
+    # No tool-management surface was smuggled in beside the copy. These are identifiers a
+    # capability UI would have to introduce, so they do not collide with ordinary prose.
+    for forbidden in (
+        "Capability",
+        "Grant",
+        "McpConnection",
+        "ToolBrowser",
+        "useTool",
+        "useMcp",
+        "mcpConnections",
+    ):
+        assert forbidden not in timeline, forbidden
+
+
+def test_the_migration_head_is_unchanged_and_no_0008_exists() -> None:
+    """D6 needed no schema change, and this is the assertion that keeps that claim honest.
+
+    Every state D6 reconciles was already representable in `0007`: `cancelled` exists as a
+    pre-dispatch terminal status, `ambiguous` exists with an error pair, the six tool event types
+    are in the CHECK, and `run_events.tool_invocation_id` is a nullable foreign key.
+    """
+    versions = ROOT / "apps" / "api" / "alembic" / "versions"
+    discovered = sorted(path.name for path in versions.glob("*.py"))
+    assert discovered[-1] == "0007_stage_d1_tool_capability_audit.py"
+    assert not any(name.startswith("0008") for name in discovered), discovered
 
 
 def test_nervos_mcp_depends_only_on_public_sdk_surfaces() -> None:

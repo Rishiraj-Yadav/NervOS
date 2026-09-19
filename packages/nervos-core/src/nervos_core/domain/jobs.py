@@ -53,6 +53,20 @@ class RunEventType(StrEnum):
     RUN_FAILED = "run.failed"
     RECOVERY_PRE_START = "recovery.pre_start"
     RECOVERY_AMBIGUOUS = "recovery.ambiguous"
+    # The six Stage D tool types. `0007` has accepted these strings since D1 and the `run_events`
+    # CHECK has always allowed them; they are listed here so the domain can represent what the
+    # schema already stores, which every reader of a durable event requires.
+    #
+    # `tool.cancelled` is deliberately absent, exactly as ADR 0017 states: cancellation is a Run
+    # lifecycle the user requested, `cancellation.requested` and `run.cancelled` carry it, and a
+    # tool that was stopped before dispatch says so on its own durable row. Inventing a per-tool
+    # cancellation event would create a second, weaker source of the same truth.
+    TOOL_REQUESTED = "tool.requested"
+    TOOL_STARTED = "tool.started"
+    TOOL_SUCCEEDED = "tool.succeeded"
+    TOOL_FAILED = "tool.failed"
+    TOOL_DENIED = "tool.denied"
+    TOOL_AMBIGUOUS = "tool.ambiguous"
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +216,12 @@ class RunEvent:
     attempt_number: int | None
     available_at: datetime | None
     created_at: datetime
+    # The durable ToolInvocation a tool event is about, or ``None``. It is nullable because the
+    # pre-dispatch refusals -- an unknown tool, malformed arguments, arguments a canonical schema
+    # rejected -- are real audit facts about a call that provably never existed as a row, and
+    # inventing a sentinel invocation or a fake definition id for them would make a durable lie
+    # out of a truthful gap.
+    tool_invocation_id: int | None = None
 
     def __post_init__(self) -> None:
         if min(self.id, self.run_id, self.job_id, self.sequence) <= 0:
@@ -210,6 +230,8 @@ class RunEvent:
             raise InvalidJob("invalid attempt identifier")
         if self.attempt_number is not None and self.attempt_number <= 0:
             raise InvalidJob("invalid attempt number")
+        if self.tool_invocation_id is not None and self.tool_invocation_id <= 0:
+            raise InvalidJob("invalid tool invocation identifier")
         if (self.code is None) != (self.message is None):
             raise InvalidJob("event code and message must be paired")
         if self.code is not None:

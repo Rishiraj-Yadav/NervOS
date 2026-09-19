@@ -39,6 +39,8 @@ from nervos_core.application.tool_invocations import (
     InvocationStatus,
     RecordOutcome,
     RecordOutcomeKind,
+    RefusalOutcome,
+    RefusalOutcomeKind,
     ResultEnvelope,
     StartOutcome,
     StartOutcomeKind,
@@ -206,13 +208,20 @@ class _Invocations:
     """In-memory invocation store mirroring the durable lifecycle's transitions."""
 
     def __init__(
-        self, *, record: str = "requested", start: str = "started", conclude: bool = True
+        self,
+        *,
+        record: str = "requested",
+        start: str = "started",
+        conclude: bool = True,
+        refusal_kind: RefusalOutcomeKind | None = None,
     ) -> None:
         self.rows: list[_Stored] = []
+        self.refusals = 0
         self._next_id = 1
         self._record = record
         self._start = start
         self._conclude = conclude
+        self._refusal_kind = refusal_kind
 
     def record_requested(
         self, *, claim: ClaimHandle, request: InvocationRequest, now: datetime
@@ -296,6 +305,13 @@ class _Invocations:
     ) -> bool:
         self._row(invocation_id).status = InvocationStatus.AMBIGUOUS.value
         return True
+
+    def record_pre_dispatch_refusal(self, *, claim: ClaimHandle, now: datetime) -> RefusalOutcome:
+        """Record a refusal that has no invocation row, standing in for the fenced durable write."""
+        if self._refusal_kind is not None:
+            return RefusalOutcome(self._refusal_kind)
+        self.refusals += 1
+        return RefusalOutcome(RefusalOutcomeKind.RECORDED)
 
     def _row(self, invocation_id: int) -> _Stored:
         return next(row for row in self.rows if row.invocation_id == invocation_id)
@@ -599,6 +615,66 @@ class TestToolCallBudget:
         # Only the well-formed, available call reached the executor; the other two still counted.
         assert len(executor.calls) == 1
         assert invocations.statuses() == [InvocationStatus.SUCCEEDED.value]
+
+    @pytest.mark.anyio
+    async def test_a_recorded_pre_dispatch_refusal_is_audited_then_observed(self) -> None:
+        """The durable fact is written first, and only then does the model hear about it."""
+        limits = replace(TOOL_ENABLED_LIMITS, max_tool_calls=2)
+        completion = _Completion(
+            _tool_turn(_call("absent", {"argument": "1"})),
+            _final(),
+        )
+        loop, executor, invocations, _, _ = _loop(completion=completion)
+
+        outcome = await _run_loop(loop, _run(limits), completion)
+
+        # Nothing was dispatched, no invocation row was fabricated, and one refusal is durable.
+        assert executor.calls == []
+        assert invocations.statuses() == []
+        assert invocations.refusals == 1
+        assert outcome.output_text == "the answer"
+
+    @pytest.mark.anyio
+    async def test_a_fenced_refusal_never_reaches_the_model(self) -> None:
+        """If the audit cannot commit, the loop stops instead of narrating an unrecorded refusal.
+
+        This is the load-bearing half of "audit before observation": a Worker that lost its claim
+        must not append a tool result the durable timeline never recorded, and must not take
+        another model turn on the strength of it.
+        """
+        limits = replace(TOOL_ENABLED_LIMITS, max_tool_calls=2)
+        completion = _Completion(
+            _tool_turn(_call("absent", {"argument": "1"})),
+            _final(),
+        )
+        invocations = _Invocations(refusal_kind=RefusalOutcomeKind.FENCED)
+        loop, executor, _invocations, _, _ = _loop(completion=completion, invocations=invocations)
+
+        with pytest.raises(ModelProviderError) as raised:
+            await _run_loop(loop, _run(limits), completion)
+
+        assert raised.value.code == INTERNAL_EXECUTION_ERROR
+        # No observation, no dispatch, and no second model turn was ever requested.
+        assert executor.calls == []
+        assert len(completion.requests) == 1
+
+    @pytest.mark.anyio
+    async def test_a_refusal_on_a_cancelled_run_takes_the_cancellation_path(self) -> None:
+        """A cancelled Run is a different outcome from a lost claim, and the loop must not guess."""
+        limits = replace(TOOL_ENABLED_LIMITS, max_tool_calls=2)
+        completion = _Completion(
+            _tool_turn(_call("absent", {"argument": "1"})),
+            _final(),
+        )
+        invocations = _Invocations(refusal_kind=RefusalOutcomeKind.CANCELLED)
+        loop, executor, _invocations, _, _ = _loop(completion=completion, invocations=invocations)
+
+        with pytest.raises(ModelProviderError) as raised:
+            await _run_loop(loop, _run(limits), completion)
+
+        assert raised.value.code == EXECUTION_CANCELLED
+        assert executor.calls == []
+        assert len(completion.requests) == 1
 
     @pytest.mark.anyio
     async def test_a_call_denied_after_the_catalog_was_assembled_is_still_refused(self) -> None:

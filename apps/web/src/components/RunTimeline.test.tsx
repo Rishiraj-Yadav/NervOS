@@ -298,6 +298,41 @@ describe("RunTimeline", () => {
     expect(screen.getByText(/stopped recovering this run/)).toBeInTheDocument();
   });
 
+  it("renders every tool event type instead of failing validation", async () => {
+    // An unknown `event_type` makes `isRunEventPage` reject the whole page, which would turn the
+    // timeline into an error state. Each new vocabulary member must render its own row.
+    server.use(
+      eventServer({
+        0: page([
+          apiRunEvent({ sequence: 1, event_type: "tool.requested", attempt_number: 1 }),
+          apiRunEvent({ sequence: 2, event_type: "tool.started", attempt_number: 1 }),
+          apiRunEvent({ sequence: 3, event_type: "tool.succeeded", attempt_number: 1 }),
+          apiRunEvent({
+            sequence: 4,
+            event_type: "tool.failed",
+            attempt_number: 1,
+            code: "tool_call_failed",
+            message: "The tool call failed safely.",
+          }),
+          apiRunEvent({ sequence: 5, event_type: "tool.denied", attempt_number: 1 }),
+          apiRunEvent({ sequence: 6, event_type: "tool.ambiguous", attempt_number: 1 }),
+        ]),
+      }),
+    );
+    renderWithQueryClient(<RunTimeline runId={1} isTerminal />);
+
+    const steps = await screen.findAllByRole("listitem");
+    expect(steps.map((step) => step.textContent)).toEqual([
+      expect.stringContaining("Requested tool"),
+      expect.stringContaining("Ran tool"),
+      expect.stringContaining("Tool succeeded"),
+      expect.stringContaining("Tool failed"),
+      expect.stringContaining("Tool refused"),
+      expect.stringContaining("Tool outcome unknown"),
+    ]);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("rebuilds the same timeline from the server after a reload", async () => {
     server.use(eventServer({ 0: page(FULL_HISTORY) }));
     const first = renderWithQueryClient(<RunTimeline runId={1} isTerminal />);

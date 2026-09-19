@@ -100,6 +100,30 @@ const EVENT_COPY: Record<RunEventType, EventCopy> = {
       return failure;
     },
   },
+  "tool.requested": {
+    headline: () => "Requested tool",
+    detail: () => null,
+  },
+  "tool.started": {
+    headline: () => "Ran tool",
+    detail: () => null,
+  },
+  "tool.succeeded": {
+    headline: () => "Tool succeeded",
+    detail: () => null,
+  },
+  "tool.failed": {
+    headline: () => "Tool failed",
+    detail: safeFailure,
+  },
+  "tool.denied": {
+    headline: () => "Tool refused",
+    detail: () => null,
+  },
+  "tool.ambiguous": {
+    headline: () => "Tool outcome unknown",
+    detail: safeFailure,
+  },
 };
 
 function TimelineRow({ event }: { event: RunEvent }) {
