@@ -64,11 +64,8 @@ class McpRegistrySynchronizer:
                 continue
             self._registry.register(
                 source_ref=source_ref,
-                source=McpToolSource(
-                    connection_id=connection_id, definitions=self._definitions                ),
-                executor=McpToolExecutor(
-                    gateway=self._gateway, connection_id=connection_id
-                ),
+                source=McpToolSource(connection_id=connection_id, definitions=self._definitions),
+                executor=McpToolExecutor(gateway=self._gateway, connection_id=connection_id),
             )
             registered += 1
         return registered

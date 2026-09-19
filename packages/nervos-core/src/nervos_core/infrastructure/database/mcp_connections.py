@@ -567,8 +567,7 @@ class SqlAlchemyMcpConnectionPersistence:
             connection.execute(
                 select(
                     exists().where(
-                        ToolInvocationRecord.tool_definition_id
-                        == ToolDefinitionRecord.id,
+                        ToolInvocationRecord.tool_definition_id == ToolDefinitionRecord.id,
                         ToolDefinitionRecord.source_kind == ToolSourceKind.MCP.value,
                         ToolDefinitionRecord.source_id == connection_id,
                     )

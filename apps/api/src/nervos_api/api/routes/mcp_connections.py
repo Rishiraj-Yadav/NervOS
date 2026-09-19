@@ -59,9 +59,7 @@ def list_connections(
     before_id: BeforeId = None,
 ) -> McpConnectionPageResponse:
     """Return one newest-first page of MCP connections owned by the authenticated user."""
-    return _page(
-        list(service.list_connections(user.id, limit=limit, before_id=before_id)), limit
-    )
+    return _page(list(service.list_connections(user.id, limit=limit, before_id=before_id)), limit)
 
 
 @router.post("", response_model=McpConnectionResponse, status_code=status.HTTP_201_CREATED)
