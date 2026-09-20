@@ -401,9 +401,15 @@ class WebhookProvisioningService:
         agent_instance_id: int,
         display_name: str,
         input_text: str,
+        enabled: bool = True,
         now: datetime,
     ) -> IssuedWebhook:
-        """Create one webhook trigger, retrying a locator collision a bounded number of times."""
+        """Create one webhook trigger, retrying a locator collision a bounded number of times.
+
+        The requested enabled state is carried on the draft, so a trigger is created disabled or
+        enabled in its one creation transaction -- never enabled and then flipped, which would give
+        a window in which fresh deliveries are accepted for a trigger the owner asked to be off.
+        """
         for _ in range(self._attempts):
             issued = self._factory.new_secret()
             draft = TriggerDraft(
@@ -414,6 +420,7 @@ class WebhookProvisioningService:
                 public_id=self._factory.new_public_id(),
                 secret_digest=issued.digest,
                 secret_created_at=now,
+                enabled=enabled,
             )
             try:
                 trigger = self._persistence.create_webhook_trigger(owner_user_id, draft, now)

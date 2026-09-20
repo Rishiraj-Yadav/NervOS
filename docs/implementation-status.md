@@ -16,9 +16,7 @@ uses. The sibling `POST /hooks/v1/{public_id}` ingress authenticates a Bearer ca
 re-checks the current secret transactionally, bounds and canonicalises JSON payloads, applies
 Idempotency-Key semantics and turns accepted deliveries into ordinary Runs/Jobs through that same
 seam. E3 also provides provider-neutral provisioning and secret-rotation application services.
-**Nothing else in Stage E is active:** there is no internal event ingress or fanout, no general
-trigger-management or occurrence-history API, and no Automations UI. E4 and E5 remain unimplemented,
-and nothing in either milestone may be described as implemented until separately accepted.
+**E4 is complete and externally accepted.** Internal EventEnvelope publication uses exact owner/event-type matching with bounded fanout; the owner-scoped trigger-management API supports all trigger kinds, schedule management reuses E2, webhook creation and rotation reuse E3, and occurrence history exposes Run provenance. The minimal `/automations` UI supports management and one-time webhook-secret handling. E4 adds no EventRecord, replay, public event HTTP ingress, migration, or dependency. **E5 remains the next milestone: integrated Stage-E acceptance, security, recovery, and documentation closeout.**
 
 Stage C — Persistent execution engine is COMPLETE. The C0 architecture freeze, the C1 durable execution foundation, C2 — asynchronous submission and minimal durable Worker execution — C3 — Worker registry/health, expired-lease reconciliation, and fencing hardening — C4 — the safe execution retry engine — C5 — owner cancellation and Attempt execution-timeout orchestration — C6 — authoritative global/per-Agent/per-provider execution concurrency, durable Agent fairness, and full admission backpressure — C7 — public read-only execution observability, the Run Events API, the execution timeline, and the polling model — and C8 — integrated deterministic Stage C acceptance and closeout — are implemented, externally reviewed, and accepted.
 
@@ -34,7 +32,7 @@ no runtime behaviour. **D1 — durable tool, capability, and audit schema is com
 **D5 — MCP client/gateway and connection lifecycle is complete and accepted**.
 **D6 — tool audit, failure semantics, and C3–C6 integration is complete and accepted**.
 **D7 — integrated acceptance and Stage-D closeout is complete and accepted**.
-The next milestone is **Stage E — Scheduling, events, and triggers**.
+The next milestone is **E5 — integrated Stage-E acceptance, security, recovery, and documentation closeout**.
 
 ## Stage D milestones
 
@@ -53,7 +51,7 @@ The next milestone is **Stage E — Scheduling, events, and triggers**.
 - [x] E1 — Durable trigger/occurrence domain, migration `0008`, and the shared Run-submission foundation
 - [x] E2 — Scheduler: one-time / interval / cron, timezone, misfire, multi-instance, restart
 - [x] E3 — Webhook ingress, secret authentication and rotation, idempotency
-- [ ] E4 — Internal events, trigger management and occurrence history, minimal Automations surface
+- [x] E4 — Internal events, trigger management and occurrence history, minimal Automations surface
 - [ ] E5 — Integrated acceptance and Stage-E closeout
 
 **E0 is architecture frozen and externally accepted.** It delivered governance only and changed no

@@ -20,7 +20,12 @@ from nervos_core.application.authentication import (
 )
 from nervos_core.application.mcp_connection_service import McpConnectionService
 from nervos_core.application.run_cancellation import RunCancellationService
-from nervos_core.application.webhooks import WebhookDeliveryService
+from nervos_core.application.triggers import TriggerManagementService
+from nervos_core.application.webhooks import (
+    WebhookDeliveryService,
+    WebhookProvisioningService,
+    WebhookSecretService,
+)
 from nervos_core.infrastructure.database import create_session_factory, create_sqlite_engine
 from nervos_core.infrastructure.database.agents import SqlAlchemyAgentPersistence
 from nervos_core.infrastructure.database.authentication import SqlAlchemyAuthenticationPersistence
@@ -32,8 +37,12 @@ from nervos_core.infrastructure.database.mcp_connections import (
     SqlAlchemyMcpConnectionPersistence,
 )
 from nervos_core.infrastructure.database.triggers import SqlAlchemyTriggerPersistence
+from nervos_core.infrastructure.scheduling import create_schedule_evaluator
 from nervos_core.infrastructure.security import Argon2PasswordHasher, SecureSessionTokens
-from nervos_core.infrastructure.webhooks import create_webhook_secret_verifier
+from nervos_core.infrastructure.webhooks import (
+    create_webhook_credential_factory,
+    create_webhook_secret_verifier,
+)
 from nervos_mcp.adapters import OperatorFacts, build_discovery
 from nervos_mcp.operator_config import load_operator_config
 from nervos_mcp.policy.egress import StrictEgressPolicy
@@ -117,6 +126,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         create_builtin_definition_registry(),
         create_webhook_secret_verifier(),
     )
+    # Trigger management: owner-scoped configuration, schedule state, and webhook credentials.
+    # The E2 schedule evaluator is the *only* place schedule arithmetic happens.
+    trigger_persistence = SqlAlchemyTriggerPersistence(
+        engine,
+        max_pending=resolved_settings.max_pending_jobs,
+        max_pending_per_agent=resolved_settings.max_pending_jobs_per_agent,
+        max_pending_per_provider=resolved_settings.max_pending_jobs_per_provider,
+    )
+    schedule_evaluator = create_schedule_evaluator()
+    factory = create_webhook_credential_factory()
+    webhook_provisioning = WebhookProvisioningService(trigger_persistence, factory)
+    webhook_secrets = WebhookSecretService(trigger_persistence, factory)
+    trigger_management_service = TriggerManagementService(
+        trigger_persistence,
+        webhook_provisioning,
+        webhook_secrets,
+        schedule_evaluator,
+        utc_now,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
@@ -139,6 +167,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.model_provider_catalog = known_providers
     app.state.mcp_connection_service = mcp_connection_service
     app.state.webhook_ingress_service = webhook_ingress_service
+    app.state.trigger_management_service = trigger_management_service
     app.add_exception_handler(Exception, unexpected_error_handler)
     app.add_exception_handler(AuthenticationError, authentication_error_handler)
     app.add_exception_handler(InvalidOrigin, authentication_error_handler)

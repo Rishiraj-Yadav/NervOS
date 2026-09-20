@@ -20,8 +20,11 @@ from enum import StrEnum
 from typing import Protocol
 
 from nervos_core.application.agent_definitions import AgentDefinitionResolver
+from nervos_core.application.clock import Clock, require_utc
+from nervos_core.application.scheduling import ScheduleEvaluator
 from nervos_core.domain.agents import AgentDefinitionId
 from nervos_core.domain.runs import RunLimits
+from nervos_core.domain.scheduling import schedule_of
 from nervos_core.domain.triggers import (
     InvalidTrigger,
     MisfirePolicy,
@@ -49,6 +52,15 @@ class TriggerHasHistory(ValueError):
 
 class TriggerNotEditable(ValueError):
     """The requested edit is not permitted for this trigger's current state."""
+
+
+class TriggerConfigConflict(ValueError):
+    """The trigger's defining configuration changed since the caller last read it.
+
+    Raised when a PATCH carries an ``expected_config_revision`` that no longer matches the durable
+    row: exactly one of two concurrent defining edits may commit ``N -> N+1``, and the loser is
+    told rather than silently overwritten.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,7 +209,13 @@ class TriggerPersistence(Protocol):
     ) -> tuple[TriggerDefinition, ...]: ...
 
     def update_trigger(
-        self, owner_user_id: int, trigger_id: int, edit: TriggerEdit, now: datetime
+        self,
+        owner_user_id: int,
+        trigger_id: int,
+        edit: TriggerEdit,
+        now: datetime,
+        *,
+        expected_config_revision: int | None = None,
     ) -> TriggerDefinition: ...
 
     def set_enabled(
@@ -502,3 +520,205 @@ def identity_field_for(kind: TriggerKind) -> str | None:
 
 def occurrence_is_materialized(occurrence: TriggerOccurrence) -> bool:
     return occurrence.status is OccurrenceStatus.RUN_CREATED
+
+
+# ------------------------------------------------------------------------------------------------
+# Trigger management: owner-scoped configuration, schedule state, and webhook credentials
+# ------------------------------------------------------------------------------------------------
+
+
+class WebhookProvisioningPort(Protocol):
+    """Create one webhook trigger, returning its one-time plaintext credential."""
+
+    def create_webhook_trigger(
+        self,
+        *,
+        owner_user_id: int,
+        agent_instance_id: int,
+        display_name: str,
+        input_text: str,
+        enabled: bool,
+        now: datetime,
+    ) -> IssuedWebhookPort: ...
+
+
+class WebhookRotationPort(Protocol):
+    """Replace one webhook trigger's credential, returning the new plaintext once."""
+
+    def rotate_secret(
+        self, *, owner_user_id: int, trigger_id: int, now: datetime
+    ) -> IssuedWebhookPort: ...
+
+
+class IssuedWebhookPort(Protocol):
+    """The two facts a webhook provisioning or rotation returns: the trigger and the secret."""
+
+    @property
+    def trigger(self) -> TriggerDefinition: ...
+
+    @property
+    def secret(self) -> str: ...
+
+
+class TriggerManagementService:
+    """Owner-scoped management of trigger definitions, schedule state, and webhook credentials.
+
+    The service owns the *shape* of a management operation -- which fields may change, when the
+    schedule evaluator is consulted, and which credential service handles a secret -- and nothing
+    durable. Every authoritative write happens inside a persistence transaction that re-reads the
+    row, so a stale read here can never become a stale write there.
+    """
+
+    def __init__(
+        self,
+        persistence: TriggerPersistence,
+        provisioning: WebhookProvisioningPort,
+        secrets: WebhookRotationPort,
+        evaluator: ScheduleEvaluator,
+        clock: Clock,
+    ) -> None:
+        self._persistence = persistence
+        self._provisioning = provisioning
+        self._secrets = secrets
+        self._evaluator = evaluator
+        self._clock = clock
+
+    def list_triggers(
+        self, owner_user_id: int, *, limit: int, before_id: int | None
+    ) -> tuple[TriggerDefinition, ...]:
+        return self._persistence.list_triggers(owner_user_id, limit, before_id)
+
+    def get_trigger(self, owner_user_id: int, trigger_id: int) -> TriggerDefinition:
+        return self._persistence.get_trigger(owner_user_id, trigger_id)
+
+    def list_occurrences(
+        self, owner_user_id: int, trigger_id: int, *, limit: int, before_id: int | None
+    ) -> tuple[TriggerOccurrence, ...]:
+        return self._persistence.list_occurrences(owner_user_id, trigger_id, limit, before_id)
+
+    def create_trigger(
+        self,
+        owner_user_id: int,
+        *,
+        agent_instance_id: int,
+        display_name: str,
+        input_text: str,
+        kind: TriggerKind,
+        schedule: ScheduleSpec | None = None,
+        event_type: str | None = None,
+        enabled: bool = True,
+    ) -> TriggerDefinition:
+        """Create one schedule or event trigger, atomically in its requested enabled state."""
+        now = require_utc(self._clock())
+        draft = TriggerDraft(
+            agent_instance_id=agent_instance_id,
+            display_name=display_name,
+            input_text=input_text,
+            kind=kind,
+            schedule=schedule,
+            event_type=event_type,
+            enabled=enabled,
+            next_fire_at=self._initial_next_fire(schedule, enabled, now),
+        )
+        return self._persistence.create_trigger(owner_user_id, draft, now)
+
+    def create_webhook(
+        self,
+        owner_user_id: int,
+        *,
+        agent_instance_id: int,
+        display_name: str,
+        input_text: str,
+        enabled: bool = True,
+    ) -> IssuedWebhookPort:
+        """Provision one webhook trigger through the E3 service, in its requested enabled state."""
+        return self._provisioning.create_webhook_trigger(
+            owner_user_id=owner_user_id,
+            agent_instance_id=agent_instance_id,
+            display_name=display_name,
+            input_text=input_text,
+            enabled=enabled,
+            now=require_utc(self._clock()),
+        )
+
+    def update_trigger(
+        self,
+        owner_user_id: int,
+        trigger_id: int,
+        *,
+        expected_config_revision: int,
+        display_name: str | None = None,
+        input_text: str | None = None,
+        schedule: ScheduleSpec | None = None,
+        event_type: str | None = None,
+    ) -> TriggerDefinition:
+        """Apply one edit, guarded by the defining revision the caller last saw.
+
+        Absent fields keep their stored values, so a rename never erases a schedule. A schedule
+        edit is defining and recomputes the next fire time through the E2 evaluator when the
+        trigger is enabled; on a disabled trigger the new schedule is validated and stored with a
+        NULL next fire time.
+        """
+        current = self._persistence.get_trigger(owner_user_id, trigger_id)
+        now = require_utc(self._clock())
+        next_fire_at = (
+            self._initial_next_fire(schedule, current.enabled, now)
+            if schedule is not None
+            else None
+        )
+        edit = TriggerEdit(
+            display_name=current.display_name if display_name is None else display_name,
+            input_text=current.input_text if input_text is None else input_text,
+            next_fire_at=next_fire_at,
+            schedule=schedule,
+            event_type=current.event_type if event_type is None else event_type,
+        )
+        return self._persistence.update_trigger(
+            owner_user_id,
+            trigger_id,
+            edit,
+            now,
+            expected_config_revision=expected_config_revision,
+        )
+
+    def set_enabled(self, owner_user_id: int, trigger_id: int, enabled: bool) -> TriggerDefinition:
+        """Enable or disable. Enabling recomputes a schedule's first future fire time."""
+        now = require_utc(self._clock())
+        if not enabled:
+            return self._persistence.set_enabled(owner_user_id, trigger_id, False, now)
+        current = self._persistence.get_trigger(owner_user_id, trigger_id)
+        next_fire_at = self._enable_next_fire(current, now)
+        return self._persistence.set_enabled(
+            owner_user_id, trigger_id, True, now, next_fire_at=next_fire_at
+        )
+
+    def delete_trigger(self, owner_user_id: int, trigger_id: int) -> None:
+        """Delete only a trigger with no occurrence history."""
+        self._persistence.delete_trigger(owner_user_id, trigger_id)
+
+    def rotate_webhook_secret(self, owner_user_id: int, trigger_id: int) -> IssuedWebhookPort:
+        """Replace a webhook trigger's credential atomically, returning the new secret once."""
+        return self._secrets.rotate_secret(
+            owner_user_id=owner_user_id, trigger_id=trigger_id, now=require_utc(self._clock())
+        )
+
+    def _initial_next_fire(
+        self, schedule: ScheduleSpec | None, enabled: bool, now: datetime
+    ) -> datetime | None:
+        """The next fire time a create or edit should store.
+
+        Only an *enabled* schedule has one. A one-time schedule keeps its named instant even in
+        the past -- "due immediately" is expressed by storing the instant, not by moving it. An
+        interval or cron schedule's first future fire is computed by the E2 evaluator, the only
+        schedule calculator in the system.
+        """
+        if schedule is None or not enabled:
+            return None
+        return self._evaluator.initial_next_fire(schedule, now=now)
+
+    def _enable_next_fire(self, current: TriggerDefinition, now: datetime) -> datetime | None:
+        """The next fire time an enable should store, or None for a delivery-driven trigger."""
+        schedule = schedule_of(current)
+        if schedule is None:
+            return None
+        return self._evaluator.initial_next_fire(schedule, now=now)

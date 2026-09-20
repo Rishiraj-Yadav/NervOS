@@ -22,12 +22,20 @@ from sqlalchemy.engine import Connection, RowMapping
 
 from nervos_core.application.agents import DurableSubmissionRejected
 from nervos_core.application.errors import PersistenceUnavailable
+from nervos_core.application.events import (
+    EventDefinitionStale,
+    EventEnvelope,
+    EventMaterializationCommand,
+    EventOccurrenceOutcome,
+    EventOutcomeKind,
+)
 from nervos_core.application.triggers import (
     DueScheduleCandidate,
     ScheduleMaterializationCommand,
     ScheduleMaterializationOutcome,
     ScheduleOutcomeKind,
     StaleReason,
+    TriggerConfigConflict,
     TriggerDraft,
     TriggerEdit,
     TriggerHasHistory,
@@ -44,6 +52,7 @@ from nervos_core.application.webhooks import (
     WebhookPublicIdConflict,
 )
 from nervos_core.domain.agents import AgentDefinitionId
+from nervos_core.domain.events import compose_event_run_input
 from nervos_core.domain.runs import InvalidRun, validate_input_text
 from nervos_core.domain.scheduling import schedule_of
 from nervos_core.domain.triggers import (
@@ -290,20 +299,42 @@ class SqlAlchemyTriggerPersistence:
         return tuple(self._to_definition(row) for row in rows)
 
     def update_trigger(
-        self, owner_user_id: int, trigger_id: int, edit: TriggerEdit, now: datetime
+        self,
+        owner_user_id: int,
+        trigger_id: int,
+        edit: TriggerEdit,
+        now: datetime,
+        *,
+        expected_config_revision: int | None = None,
     ) -> TriggerDefinition:
         """Apply an edit, incrementing `config_revision` only when the change is defining.
 
         A schedule edit must carry the next fire time, because E1 does not compute one: deriving an
-        instant from a cron expression is the schedule evaluator's job and it arrives with E2.
+        instant from a cron expression is the schedule evaluator's job and it arrives with E2. On a
+        **disabled** schedule the next fire time stays NULL, so a configuration change made while
+        disabled does not imply a missed period.
+
+        ``expected_config_revision`` is the E4 management guard: the check happens inside this
+        transaction, which already holds SQLite's write lock, so two concurrent defining edits
+        cannot both pass it. That is what makes exactly one `N -> N+1` possible.
         """
 
         def operation(connection: Connection) -> TriggerDefinition:
             current = self._read_definition(connection, owner_user_id, trigger_id)
-            if current.kind is TriggerKind.ONE_TIME and current.next_fire_at is None:
+            if (
+                expected_config_revision is not None
+                and current.config_revision != expected_config_revision
+            ):
+                raise TriggerConfigConflict("the trigger configuration changed since it was read")
+            if current.kind is TriggerKind.ONE_TIME and self._has_occurrence(
+                connection, trigger_id
+            ):
+                # Completion is the durable occurrence, not the absent next fire time: a one-time
+                # trigger that has never fired but is currently disabled still has no next fire
+                # time, and that is not the same fact.
                 raise TriggerNotEditable("a completed one-time trigger cannot be edited")
-            if edit.schedule is not None and edit.next_fire_at is None:
-                raise TriggerNotEditable("a schedule edit must carry the next fire time")
+            if edit.schedule is not None and edit.next_fire_at is None and current.enabled:
+                raise TriggerNotEditable("an enabled schedule edit must carry the next fire time")
             # An edit that does not restate the schedule keeps the one the trigger already has: a
             # rename must not silently erase a cron expression and break the row's kind shape.
             schedule = edit.schedule if edit.schedule is not None else self._schedule_of(current)
@@ -442,6 +473,48 @@ class SqlAlchemyTriggerPersistence:
         return None if row is None else self._to_occurrence(row)
 
     # ------------------------------------------------------------------------------------------
+    # The internal-event seam: one bounded exact-match read, then one verified materialization
+    # ------------------------------------------------------------------------------------------
+
+    def list_event_matches(
+        self, *, owner_user_id: int, event_type: str, limit: int
+    ) -> tuple[TriggerDefinition, ...]:
+        """The currently enabled event triggers of one owner matching one exact event type.
+
+        The predicate is served by `ix_trigger_definitions_event_lookup`, the partial index `0008`
+        already carries over `(owner_user_id, event_type)`, so an event never scans a table that
+        grows with the owner's triggers. The Agent Instance is joined for the same reason the due
+        scan joins it: the resolved value carries the Agent Definition identity, and a definition
+        read without it could not be resolved into a Run at all.
+
+        Enabled state is part of the predicate rather than a check performed later, because an
+        event is published to *what can currently react to it*: a trigger that is already disabled
+        when a publication begins is not part of that publication's result at all.
+        """
+        query = (
+            select(
+                TriggerDefinitionRecord,
+                AgentInstanceRecord.agent_key.label("agent_key"),
+                AgentInstanceRecord.agent_definition_version.label("agent_definition_version"),
+            )
+            .join(
+                AgentInstanceRecord,
+                AgentInstanceRecord.id == TriggerDefinitionRecord.agent_instance_id,
+            )
+            .where(
+                TriggerDefinitionRecord.owner_user_id == owner_user_id,
+                TriggerDefinitionRecord.kind == TriggerKind.EVENT.value,
+                TriggerDefinitionRecord.enabled.is_(True),
+                TriggerDefinitionRecord.event_type == event_type,
+            )
+            .order_by(TriggerDefinitionRecord.id.asc())
+            .limit(limit)
+        )
+        with self._engine.connect() as connection:
+            rows = connection.execute(query).mappings().all()
+        return tuple(self._to_definition(row) for row in rows)
+
+    # ------------------------------------------------------------------------------------------
     # Atomic materialization
     # ------------------------------------------------------------------------------------------
 
@@ -558,6 +631,187 @@ class SqlAlchemyTriggerPersistence:
             payload_bytes=command.payload_bytes,
             occurred_at=command.occurred_at,
             created_at=command.now,
+        )
+
+    def materialize_event_occurrence(
+        self, command: EventMaterializationCommand
+    ) -> EventOccurrenceOutcome:
+        """One transaction that verifies one event against one trigger, or writes nothing.
+
+        The trigger is re-read so nothing discovered earlier is trusted, the **existing identity is
+        looked up before any fresh authority** (so a trigger disabled after the occurrence committed
+        still answers `duplicate`), and only a fresh identity is required to be enabled, to still
+        carry this event type, and to still resolve to the Agent Definition the caller resolved.
+
+        Capacity is deliberately **not** handled here: the canonical insertion raises it and the
+        caller owns that decision, which is what keeps a busy queue from being recorded as a
+        skipped event.
+        """
+        return self._runner.run(
+            lambda connection: self._materialize_event_once(connection, command)
+        )
+
+    def _materialize_event_once(
+        self, connection: Connection, command: EventMaterializationCommand
+    ) -> EventOccurrenceOutcome:
+        """The event core, in the frozen order: re-read, identity, authority, then act."""
+        envelope = command.envelope
+        definition = self._load_definition(connection, command.trigger_definition_id)
+        if (
+            definition.owner_user_id != envelope.owner_user_id
+            or definition.kind is not TriggerKind.EVENT
+        ):
+            # Discovery was owner- and kind-scoped; a row that no longer satisfies either is a
+            # stale candidate, and consuming nothing is what keeps it retryable.
+            raise EventDefinitionStale("the discovered trigger no longer matches the event")
+
+        existing = self._find_existing(
+            connection,
+            definition.id,
+            nominal_at=None,
+            event_id=envelope.event_id,
+            idempotency_key=None,
+        )
+        if existing is not None:
+            if existing.payload_digest != envelope.payload.digest:
+                # The same identity carrying different bytes is a publisher contract violation:
+                # nothing is written and nothing is overwritten.
+                return EventOccurrenceOutcome(
+                    trigger_id=definition.id, kind=EventOutcomeKind.EVENT_ID_CONFLICT
+                )
+            return EventOccurrenceOutcome(
+                trigger_id=definition.id,
+                kind=EventOutcomeKind.DUPLICATE,
+                occurrence=existing,
+            )
+
+        # Only a fresh identity needs current authority, in the order the authorization fixes.
+        if not definition.enabled:
+            raise EventDefinitionStale("the trigger was disabled before this identity committed")
+        if definition.event_type != envelope.event_type:
+            raise EventDefinitionStale("the trigger's event type changed before this identity")
+        if not self._agent_definition_matches(
+            connection, definition, command.definition.definition_id
+        ):
+            raise EventDefinitionStale("the target agent definition changed before this identity")
+
+        return self._apply_event_occurrence(connection, definition, command)
+
+    def _write_event_occurrence(
+        self,
+        connection: Connection,
+        definition: TriggerDefinition,
+        *,
+        envelope: EventEnvelope,
+        status: OccurrenceStatus,
+        run_id: int | None,
+        skip_reason: SkipReason | None,
+        now: datetime,
+    ) -> TriggerOccurrence:
+        """Write one event occurrence through the one occurrence writer.
+
+        An event carries exactly one identity -- its event id -- plus the canonical payload digest
+        and byte count, recorded for **every** occurrence the publication writes including a
+        skipped one: the event genuinely happened and was evaluated, so those facts explain it.
+        """
+        return self._write_occurrence(
+            connection,
+            definition,
+            status=status,
+            run_id=run_id,
+            skip_code=None if skip_reason is None else skip_reason.value,
+            skip_message=None if skip_reason is None else SKIP_MESSAGES[skip_reason],
+            nominal_at=None,
+            event_id=envelope.event_id,
+            idempotency_key=None,
+            payload_digest=envelope.payload.digest,
+            payload_bytes=envelope.payload.byte_count,
+            occurred_at=envelope.occurred_at,
+            created_at=now,
+        )
+
+    def _apply_event_occurrence(
+        self,
+        connection: Connection,
+        definition: TriggerDefinition,
+        command: EventMaterializationCommand,
+    ) -> EventOccurrenceOutcome:
+        """Act on one fresh event identity: compose the Run input, then create a Run or a skip.
+
+        The instruction always comes from the **durable trigger row**, never from the envelope, and
+        the event is composed as untrusted data inside its own labelled field. An input that the
+        target Run's own bounds refuse is recorded as `skipped / input_too_large` rather than
+        truncated, and the payload digest and byte count are still persisted, because the event did
+        arrive and was evaluated.
+        """
+        envelope = command.envelope
+        composed = compose_event_run_input(
+            definition.input_text, envelope.event_type, envelope.payload.value
+        )
+        try:
+            # Validated explicitly against the target Run's own bounds: the canonical insertion
+            # trusts `limits` and does not check length, so an over-long composition would fail a
+            # shape CHECK instead of recording a clean, durable skip.
+            validate_input_text(composed, command.definition.limits)
+        except InvalidRun:
+            return EventOccurrenceOutcome(
+                trigger_id=definition.id,
+                kind=EventOutcomeKind.SKIPPED,
+                occurrence=self._write_event_occurrence(
+                    connection,
+                    definition,
+                    envelope=envelope,
+                    status=OccurrenceStatus.SKIPPED,
+                    run_id=None,
+                    skip_reason=SkipReason.INPUT_TOO_LARGE,
+                    now=command.now,
+                ),
+            )
+
+        try:
+            run = insert_run_and_job_on_connection(
+                connection,
+                owner_user_id=definition.owner_user_id,
+                agent_instance_id=definition.agent_instance_id,
+                input_text=composed,
+                limits=command.definition.limits,
+                definition_id=command.definition.definition_id,
+                now=command.now,
+                max_attempts=self.max_attempts,
+                capacity=self._capacity,
+                agent_capacity=self._agent_capacity,
+                provider_capacity=self._provider_capacity,
+            )
+        except DurableSubmissionRejected:
+            # Ownership, the definition identity and all three admission dimensions were read on
+            # this connection inside this transaction, so the only predicate left that can fail is
+            # the Agent Instance's enabled state -- the frozen meaning of `agent_disabled`.
+            return EventOccurrenceOutcome(
+                trigger_id=definition.id,
+                kind=EventOutcomeKind.SKIPPED,
+                occurrence=self._write_event_occurrence(
+                    connection,
+                    definition,
+                    envelope=envelope,
+                    status=OccurrenceStatus.SKIPPED,
+                    run_id=None,
+                    skip_reason=SkipReason.AGENT_DISABLED,
+                    now=command.now,
+                ),
+            )
+
+        return EventOccurrenceOutcome(
+            trigger_id=definition.id,
+            kind=EventOutcomeKind.RUN_CREATED,
+            occurrence=self._write_event_occurrence(
+                connection,
+                definition,
+                envelope=envelope,
+                status=OccurrenceStatus.RUN_CREATED,
+                run_id=run.id,
+                skip_reason=None,
+                now=command.now,
+            ),
         )
 
     @staticmethod

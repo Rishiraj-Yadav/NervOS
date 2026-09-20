@@ -52,11 +52,12 @@ CANCEL_INPUT = "hold this call open until cancelled"
 CANCEL_DISCOVERY_TIMEOUT_SECONDS = 40
 # Every provider invocation in the whole journey: one for the recovered Run, one for the
 # OpenAI Run, two for the retried Run (its refused first Attempt and its succeeding second
-# Attempt), one for the cancelled Run, and two for the tool-enabled Run (its tool-requesting turn
-# and its concluding turn). The number is asserted globally on top of the per-prompt counts in
-# `assert_retry_journey` and `assert_cancellation_journey`, so an unexpected extra invocation
-# anywhere — including a cancelled Run being executed again — still fails the journey.
-TOTAL_PROVIDER_CALLS = 7
+# Attempt), one for the cancelled Run, two for the tool-enabled Run (its tool-requesting turn
+# and its concluding turn), and one for the E4 webhook Run. The number is asserted globally on
+# top of the per-prompt counts in `assert_retry_journey` and `assert_cancellation_journey`, so an
+# unexpected extra invocation anywhere — including a cancelled Run being executed again — still
+# fails the journey.
+TOTAL_PROVIDER_CALLS = 8
 
 # Stage-D tool journey. One prompt whose scripted model turn asks for the one tool the supervisor
 # grants, then concludes, so the browser observes a real tool lifecycle on the timeline. No grant
@@ -353,14 +354,21 @@ def run_e2e() -> int:
         pnpm = resolve_required_command("pnpm")
 
         try:
-            subprocess.run(
+            migration = subprocess.run(
                 [sys.executable, "-m", "alembic", "-c", "apps/api/alembic.ini", "upgrade", "head"],
                 cwd=ROOT,
                 env=environment,
-                check=True,
+                capture_output=True,
+                check=False,
                 timeout=30,
                 shell=False,
+                text=True,
             )
+            if migration.returncode != 0:
+                raise RuntimeError(
+                    "E2E migration failed with exit code "
+                    f"{migration.returncode}:\n{migration.stdout}{migration.stderr}"
+                )
             with (
                 api_log_path.open("wb") as api_log,
                 worker_log_path.open("wb") as worker_log,

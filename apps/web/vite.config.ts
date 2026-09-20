@@ -12,6 +12,10 @@ export default defineConfig({
         target: apiOrigin,
         changeOrigin: false,
       },
+      "/hooks": {
+        target: apiOrigin,
+        changeOrigin: false,
+      },
     },
   },
   test: {

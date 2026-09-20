@@ -22,6 +22,16 @@ a { color: inherit; }
 .brand-mark { align-items: center; background: #b9f646; border-radius: .45rem; color: #11160b; display: inline-flex; height: 2rem; justify-content: center; width: 2rem; }
 .centered-page { align-items: center; display: flex; justify-content: center; min-height: 100vh; padding: 2rem max(1rem, 4vw); }
 .panel { background: rgba(24, 27, 25, .9); border: 1px solid #343a35; border-radius: .9rem; box-shadow: 0 1.5rem 5rem rgba(0, 0, 0, .3); }
+.page-shell { margin: 0 auto; max-width: 72rem; padding: 2rem max(1rem, 4vw); }
+.page-card { margin: 1rem 0; padding: 1.25rem; }
+.page-header { margin-bottom: 1.5rem; }
+.section-heading, .button-row { align-items: center; display: flex; flex-wrap: wrap; gap: .75rem; justify-content: space-between; }
+.stack, .form-stack { display: grid; gap: .75rem; }
+.form-stack label { display: grid; gap: .35rem; }
+.form-stack input, .form-stack textarea, .form-stack select { background: #111512; border: 1px solid #414840; border-radius: .45rem; color: #e9ede7; padding: .7rem; }
+.list-row { align-items: center; border-bottom: 1px solid #343a35; display: flex; gap: 1rem; justify-content: space-between; padding: .8rem 0; }
+.secret-banner { background: #202b13; border: 1px solid #749a2d; border-radius: .6rem; display: grid; gap: .75rem; margin-top: 1rem; padding: 1rem; }
+.secret-banner code { overflow-wrap: anywhere; user-select: all; }
 .status-panel { max-width: 35rem; padding: clamp(1.5rem, 5vw, 3rem); text-align: center; }
 .status-panel .brand { justify-content: center; margin-bottom: 2rem; }
 .status-panel h1 { font-size: clamp(2rem, 6vw, 3.5rem); margin: .3rem 0 1rem; }

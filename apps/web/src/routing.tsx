@@ -3,6 +3,8 @@ import { currentUserQuery, setupStatusQuery } from "./api/queries";
 import type { User } from "./api/types";
 import { ErrorState, LoadingState } from "./components/AsyncState";
 import { AgentInstancePage } from "./pages/AgentInstancePage";
+import { AutomationsPage } from "./pages/AutomationsPage";
+import { AutomationPage, NewAutomationPage } from "./pages/AutomationPage";
 import { AgentInstancesPage } from "./pages/AgentInstancesPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { LoginPage } from "./pages/LoginPage";
@@ -15,6 +17,10 @@ import {
   useLocation,
   useOutletContext,
 } from "react-router-dom";
+
+export function AutomationsRoute() { return <SessionView page="automations" />; }
+export function AutomationRoute() { return <SessionView page="automation" />; }
+export function NewAutomationRoute() { return <SessionView page="new-automation" />; }
 
 type Session =
   | { kind: "unconfigured" }
@@ -71,7 +77,7 @@ export function NotFoundRoute() {
   return <NotFoundPage />;
 }
 
-function SessionView({ page }: { page: "home" | "setup" | "login" | "agents" | "agent" }) {
+function SessionView({ page }: { page: "home" | "setup" | "login" | "agents" | "agent" | "automations" | "automation" | "new-automation" }) {
   const session = useOutletContext<Session>();
   const location = useLocation();
 
@@ -89,9 +95,10 @@ function SessionView({ page }: { page: "home" | "setup" | "login" | "agents" | "
   if (page === "agents") {
     return <AgentInstancesPage />;
   }
-  if (page === "agent") {
-    return <AgentInstancePage />;
-  }
+  if (page === "agent") return <AgentInstancePage />;
+  if (page === "automations") return <AutomationsPage />;
+  if (page === "automation") return <AutomationPage />;
+  if (page === "new-automation") return <NewAutomationPage />;
   return <Navigate to="/" replace />;
 }
 
