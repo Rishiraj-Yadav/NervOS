@@ -177,6 +177,51 @@ or frontend surface. The developer default database was accidentally migrated fr
 during an implementation smoke command; no data was lost, it was not downgraded or otherwise touched
 during finalization, and the deviation remains recorded in the E3 implementation report.
 
+**E4 is complete and externally accepted.** Internal events are published through a provider-neutral
+`EventEnvelope` **value** — an owner, an event type, a canonicalized payload and an instant — and
+never through an HTTP ingress: an event is data, not authority, and no public route can create one.
+Publication discovers the owner's currently-enabled event triggers by **exact** event-type equality
+(no wildcard, no substring, no case folding), reads **one row past** the frozen fanout bound of 32 so
+an over-wide event is provable, and refuses the whole publication before any write when the bound is
+exceeded. Each candidate then materializes in its own short transaction through the same
+`TriggerOccurrence` → ordinary Run/Job seam the scheduler and the webhook ingress already use, so an
+event-created Run is an ordinary Run with the same Agent snapshot, grant cutoff, admission control
+and queue as a manual submission.
+
+**Per-candidate isolation is the shape of a publication.** Queue-capacity backpressure rolls back only
+its own candidate and leaves that identity unconsumed and retryable while independent candidates
+proceed; an Agent-disabled target consumes the identity as a static `skipped` occurrence; a target
+whose Agent Definition drifted between discovery and materialization consumes nothing. A
+database-level failure is not a per-trigger outcome — it stops the publication, keeps what already
+committed, and reports `complete = false` so the caller may retry the same envelope. **Event identity
+is the event id, arbitrated before authority:** a repeat of the same id with the same payload answers
+`duplicate` and writes nothing, the same id with a different payload is a caller-contract
+`event_id_conflict`, and a retry after a partial fanout fills only the missing identities. **There is
+no event ledger** — an event exists durably only as the per-trigger occurrences it produced, so there
+is no replay table, no raw-payload store and no global event history.
+
+**The owner-scoped management surface manages every kind.** One trigger resource family lists, reads,
+creates, edits, enables, disables and deletes owner-scoped triggers of all five kinds, paginated by a
+keyset cursor rather than an offset, with a foreign or nonexistent identifier indistinguishable from
+a missing one. An edit that would rewrite a trigger's kind-shaped identity, and a delete of a trigger
+that already has history, are refused rather than silently destructive. Occurrence history exposes
+each occurrence's Run provenance, which is a join rather than a column on `runs`. The minimal
+`/automations` surface manages triggers and presents a webhook's secret exactly once, at creation or
+rotation: plaintext never enters mutation state, browser storage or a later read.
+
+**E4 added no migration, no index and no dependency.** `0008` already carried every access path the
+management surface and the event seam need, and the six hot-path reads — the owner list and its keyset
+page, the owner-scoped detail read, one trigger's occurrence history, exact event discovery, the
+event-identity lookup and the webhook locator lookup — are each proven, by planning the statement the
+composed method actually ran against a populated database, to be an index seek over `0008`'s own
+indexes rather than a scan of a table that grows with the owner's data. E4 added **no EventRecord, no
+replay, no public event ingress and no second execution seam**. It did add provider-neutral
+application ports — an exact-match event-discovery read, an event-materialization write and the
+owner-scoped management operations — but each is a `Protocol` over values implemented by the
+persistence adapter: no SQLAlchemy type, session or ORM row crosses into the application layer, and a
+trigger-created Run travels the same canonical insertion as a manual one. Its authority remains
+ADRs 0018–0020, which it did not amend.
+
 D0 is **architecture frozen and externally accepted**. It fixed: the MCP protocol target
 (`2026-07-28`, modern era only, Streamable HTTP and stdio, official SDK v2 with no custom protocol
 stack); the capability model (per-Agent Instance grants held as explicit ALLOW rows, default not
@@ -931,9 +976,8 @@ deployment is made.
 
 C7 and C8 are complete and externally accepted, and Stage C — the persistent execution engine — is **complete**.
 
-E0 through E3 are complete and externally accepted. The next milestone is **E4 — internal events,
-trigger management and occurrence observability, and the minimal Automations UI**; E5 remains the
-integrated Stage-E acceptance and closeout milestone.
+E0 through E4 are complete and externally accepted. The next milestone is **E5 — integrated Stage-E
+acceptance, security, recovery, and documentation closeout**.
 
 C7 makes the kernel legible without giving it any new authority. An owner can read their Run's durable execution timeline through one owner-scoped, read-only endpoint, ordered by the Run-local `sequence` the writers allocated, paginated by a keyset cursor rather than an offset so a concurrent append can never be skipped. Run responses additionally carry a derived execution phase — the Job's own durable status, verbatim, with a retry instant only while one is pending — which is what finally distinguishes "executing now" from "waiting to retry". Both are computed per read and never persisted, and no module that mutates execution reads them: observability is a projection, never a control. The dashboard gains an expandable timeline, incremental polling, and a polling lifetime that no longer abandons a live Run after roughly 300 seconds. C7 added **no migration**: the existing `UNIQUE(run_id, sequence)` index already serves the pagination predicate as a bounded range seek, so the migration head remains `0006_stage_c6_queue_partitions`.
 

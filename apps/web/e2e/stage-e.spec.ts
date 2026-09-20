@@ -20,7 +20,7 @@ test("manages a webhook automation and records its Run", async ({ page }) => {
   const agent = await page.evaluate(async () => {
     const response = await fetch("/api/v1/agent-instances", {
       method: "POST",
-      headers: { "Content-Type": "application/json", Origin: window.location.origin },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         agent_key: "nervos.chat",
         agent_definition_version: "1",
@@ -54,7 +54,7 @@ test("manages a webhook automation and records its Run", async ({ page }) => {
   await page.getByRole("link", { name: /open automation/i }).click();
   await expect(page.getByRole("heading", { name: "E4 inbound webhook" })).toBeVisible();
   const delivery = await page.evaluate(async ({ path, token }) => {
-    const response = await fetch(`${window.location.origin}${path}`, {
+    const response = await fetch(path, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ source: "stage-e", value: 42 }),
@@ -67,5 +67,14 @@ test("manages a webhook automation and records its Run", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "E4 inbound webhook" })).toBeVisible();
   await expect(page.getByText(secret, { exact: true })).toHaveCount(0);
   await expect(page.getByText(/run \d+/i)).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator("a").filter({ hasText: /run \d+/i })).toHaveAttribute("href", `/agents/${agent.id}`);
+  const runLink = page.locator("a").filter({ hasText: /run \d+/i });
+  await expect(runLink).toHaveAttribute("href", `/agents/${agent.id}`);
+
+  // A delivery is asynchronous: the ingress commits the Run and answers 202 immediately, while the
+  // Worker picks it up on its own poll. Follow the recorded Run to its terminal state so the
+  // journey is not over until the Run this trigger created has actually executed -- otherwise the
+  // journey can end with the Run still queued, and the supervisor reads its provider-invocation
+  // ledger before the Worker has claimed it.
+  await runLink.click();
+  await expect(page.locator(".run-status-succeeded")).toHaveText("Succeeded", { timeout: 30_000 });
 });
