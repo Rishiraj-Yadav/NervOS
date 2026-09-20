@@ -1403,16 +1403,255 @@ def test_the_occurrence_status_vocabulary_matches_the_frozen_schema() -> None:
     assert "status IN ('run_created','skipped')" in models
 
 
-def test_stage_e_exposes_no_route_and_no_frontend_surface() -> None:
-    """E1 is persistence only; the management API and the Automations surface come later."""
+def test_stage_e_exposes_only_the_delivery_ingress_and_no_management_surface() -> None:
+    """E3 activates delivery only; the trigger *management* surface is still E4's, and is absent.
+
+    This replaces the E1-era guard that asserted `/hooks/` did not exist yet. A guard whose subject
+    is "the next milestone has not landed" is retired by the milestone that lands it -- so, exactly
+    as the `0009` guard was, it becomes a *narrower and stronger* assertion rather than being
+    deleted: the ingress is now pinned to one POST on one path, the management router is pinned
+    unchanged, and the frontend stays empty.
+    """
+    # The management router is untouched: no Stage-E word entered `/api/v1`, and the webhook
+    # namespace is a sibling rather than a branch inside it.
     router_text = (API_SOURCE / "api" / "router.py").read_text(encoding="utf-8").lower()
-    for forbidden in ("trigger", "schedule", "cron", "webhook", "automation"):
+    for forbidden in ("trigger", "schedule", "cron", "webhook", "automation", "hook"):
         assert forbidden not in router_text, forbidden
     assert not (API_ROUTES / "triggers.py").exists()
-    assert not (ROOT / "apps" / "api" / "src" / "nervos_api" / "hooks").exists()
+    assert not (API_ROUTES / "hooks.py").exists()
+
+    hooks = API_SOURCE / "hooks"
+    assert sorted(path.name for path in python_files(hooks)) == [
+        "__init__.py",
+        "dependencies.py",
+        "errors.py",
+        "router.py",
+        "schemas.py",
+    ]
+    hooks_router = (hooks / "router.py").read_text(encoding="utf-8")
+    # Exactly one route, and it is a POST on a locator path.
+    assert hooks_router.count("@router.post(") == 1
+    assert '"/{public_id}"' in hooks_router
+    for verb in ("@router.get(", "@router.put(", "@router.patch(", "@router.delete("):
+        assert verb not in hooks_router, verb
+    # The ingress never re-enters the branch that protects the browser API.
+    assert '"/api/v1"' not in hooks_router
+    assert "include_in_schema=True" not in hooks_router
+
+    # No frontend surface, exactly as before.
     frontend = "\n".join(
         path.read_text(encoding="utf-8")
         for path in python_files(FRONTEND_SOURCE)
         if path.suffix == ".py"
     )
     assert frontend == ""
+
+
+# ------------------------------------------------------------------------------------------------
+# Stage E (E3) -- the webhook ingress, and the boundaries it must not cross
+# ------------------------------------------------------------------------------------------------
+
+#: The one namespace a webhook may be delivered to, and the only module that may serve it.
+WEBHOOK_INGRESS_MODULES = (
+    "apps/api/src/nervos_api/hooks/__init__.py",
+    "apps/api/src/nervos_api/hooks/dependencies.py",
+    "apps/api/src/nervos_api/hooks/errors.py",
+    "apps/api/src/nervos_api/hooks/router.py",
+    "apps/api/src/nervos_api/hooks/schemas.py",
+    "packages/nervos-core/src/nervos_core/application/webhooks.py",
+    "packages/nervos-core/src/nervos_core/domain/webhooks.py",
+)
+
+
+def _ingress_paths() -> list[Path]:
+    return [ROOT / name for name in WEBHOOK_INGRESS_MODULES]
+
+
+def test_the_webhook_ingress_reaches_no_execution_or_model_plane() -> None:
+    """A delivery causes a Run; it never runs one.
+
+    The ingress authenticates a caller and materializes an occurrence. Everything that executes --
+    the model, the tool loop, the MCP gateway, the claim/lease machinery -- is unreachable from it,
+    so "a webhook cannot execute anything" is a structural property of the import graph rather than
+    a promise about what the code chooses to call.
+    """
+    forbidden = (
+        "RunExecutor",
+        "RunCoordinator",
+        "ModelCompletion",
+        "JobExecutionService",
+        "LeaseReclaimer",
+        "ToolLoop",
+        "claim_next",
+        "start_attempt",
+        "renew_lease",
+        "close_legacy",
+        "nervos_mcp",
+        "nervos_models",
+        "nervos_worker",
+        "nervos_scheduler",
+        "anthropic",
+        "openai",
+    )
+    for path in _ingress_paths():
+        source = path.read_text(encoding="utf-8")
+        for name in forbidden:
+            assert name not in source, (path.name, name)
+        modules = imported_modules(path)
+        assert not any(module.startswith("nervos_mcp") for module in modules), path.name
+        assert not any(module.startswith("nervos_models") for module in modules), path.name
+
+
+def test_the_webhook_modules_carry_no_http_or_persistence_type() -> None:
+    """A port that names a connection has made the persistence technology part of its interface.
+
+    ADR 0020's whole point is that the application layer keeps saying "materialize this delivery"
+    rather than "write these rows", and ADR 0019's is that the ingress is a value boundary rather
+    than a transport. `Request` is a forbidden *token* here, which is why the command value is
+    named `WebhookDelivery` -- a name that would otherwise have leaked the transport into the
+    application layer without anyone noticing.
+    """
+    for name in (
+        "packages/nervos-core/src/nervos_core/application/webhooks.py",
+        "packages/nervos-core/src/nervos_core/domain/webhooks.py",
+    ):
+        path = ROOT / name
+        modules = imported_modules(path)
+        for forbidden in ("sqlalchemy", "fastapi", "starlette", "uvicorn"):
+            assert not any(
+                module == forbidden or module.startswith(f"{forbidden}.") for module in modules
+            ), (path.name, forbidden)
+        source = path.read_text(encoding="utf-8")
+        for forbidden in ("Connection", "Session", "Engine", "Request", "select(", "insert("):
+            assert forbidden not in source, (path.name, forbidden)
+
+
+def test_no_webhook_queue_or_attempt_primitive_exists() -> None:
+    """A delivery is consumed by the existing engine; it adds no second execution primitive.
+
+    A webhook-specific queue, worker, attempt or retry loop would be a new durable execution
+    primitive beside the one Job and one Attempt the engine already runs. Stage E says a missed
+    delivery is the sender's problem, and C3/C4 own everything after the Run exists.
+    """
+    forbidden = (
+        "WebhookJob",
+        "WebhookQueue",
+        "WebhookWorker",
+        "WebhookAttempt",
+        "webhook_queue",
+        "webhook_scheduler",
+        "webhook_cursor",
+        "delivery_attempt",
+        "replay_event",
+        "reprocess_delivery",
+    )
+    for path in python_files(CORE_SOURCE):
+        source = path.read_text(encoding="utf-8")
+        for name in forbidden:
+            assert name not in source, (path.name, name)
+
+
+def test_no_run_event_type_was_added_for_ingress() -> None:
+    """The ingress writes no RunEvent at all: `trigger_occurrences` is the ingress history.
+
+    ADR 0018 rejects `webhook.received` and `run.triggered` as duplicates of what the occurrence
+    already records, and the event vocabulary is a frozen `CHECK` that SQLite cannot alter. So the
+    enum is compared against the schema that accepts it, and the ingress modules are checked for
+    any reference to the event model.
+    """
+    migrations = (ROOT / "apps" / "api" / "alembic" / "versions").glob("*.py")
+    declared = "\n".join(path.read_text(encoding="utf-8") for path in migrations)
+    for member in RunEventType:
+        assert f"'{member.value}'" in declared, member.value
+    assert not any(
+        member.value.startswith(("webhook", "trigger", "schedule")) for member in RunEventType
+    )
+    for path in _ingress_paths():
+        source = path.read_text(encoding="utf-8")
+        for forbidden in ("RunEventType", "RunEvent", "run_events", "_append_event"):
+            assert forbidden not in source, (path.name, forbidden)
+
+
+def test_the_webhook_secret_is_never_stored_or_compared_in_plaintext() -> None:
+    """Verification is constant-time, in one place, and the column holds a digest.
+
+    Three things have to be true at once for a credential boundary to be worth anything: the
+    plaintext is never persisted, the comparison is never `==`, and there is exactly one module
+    that performs it -- so a second, weaker comparison cannot be introduced somewhere else without
+    this failing.
+    """
+    migration = (
+        ROOT / "apps" / "api" / "alembic" / "versions" / "0008_stage_e1_trigger_scheduling.py"
+    ).read_text(encoding="utf-8")
+    models = ORM_MODELS.read_text(encoding="utf-8")
+    assert "secret_digest" in migration and "secret_digest" in models
+    assert "secret_digest_shape" in migration
+
+    # The only module that compares digests is the one that owns the primitive.
+    owners = {
+        path.relative_to(ROOT).as_posix()
+        for path in python_files(CORE_SOURCE)
+        if "compare_digest" in path.read_text(encoding="utf-8")
+    }
+    assert owners == {
+        "packages/nervos-core/src/nervos_core/infrastructure/security/webhook_secrets.py"
+    }, owners
+
+    # And the transaction reaches the comparison through that primitive, never by equality.
+    triggers = (CORE_INFRASTRUCTURE / "triggers.py").read_text(encoding="utf-8")
+    assert "secret_matches_digest(" in triggers
+    assert "secret_digest ==" not in triggers
+    assert "== definition.secret_digest" not in triggers
+
+
+def test_no_raw_webhook_payload_is_stored_separately() -> None:
+    """Only a digest and a byte count reach the occurrence; the body has no durable home of its own.
+
+    The canonical rendering does become part of the Run's immutable input, because that is the only
+    way a payload can reach an agent at all. What is forbidden is a *separate* store -- a table or
+    a column holding the raw body, which would be a second record of one fact.
+    """
+    migration = (
+        ROOT / "apps" / "api" / "alembic" / "versions" / "0008_stage_e1_trigger_scheduling.py"
+    ).read_text(encoding="utf-8")
+    models = ORM_MODELS.read_text(encoding="utf-8")
+    for forbidden in (
+        "webhook_payload",
+        "raw_body",
+        "request_body",
+        "payload_text",
+        "payload_json",
+    ):
+        assert forbidden not in migration, forbidden
+        assert forbidden not in models, forbidden
+    assert "payload_digest" in models and "payload_bytes" in models
+
+
+def test_both_materializers_write_occurrences_through_one_writer() -> None:
+    """Two orderings, one writer. A second insertion path would be a second source of occurrence
+    truth, and the schedule ordering and the webhook ordering differ precisely because their
+    subjects differ -- so the writer is what they must still share."""
+    triggers = (CORE_INFRASTRUCTURE / "triggers.py").read_text(encoding="utf-8")
+    assert triggers.count("def _write_occurrence(") == 1
+    assert triggers.count("TriggerOccurrenceRecord).values(") == 1
+    assert triggers.count("def _materialize_webhook_once(") == 1
+    assert triggers.count("def _materialize_once(") == 1
+    # Both orderings exist, and they are different: the webhook core authenticates before it looks
+    # up an identity, and the shared scheduler core does the opposite.
+    webhook = triggers.split("def _materialize_webhook_once(", 1)[1].split(
+        "def _refresh_existing", 1
+    )[0]
+    assert webhook.index("secret_matches_digest(") < webhook.index("_find_existing(")
+    scheduler = triggers.split("def _materialize_once(", 1)[1].split("def _materialize_new(", 1)[0]
+    assert scheduler.index("_find_existing(") < scheduler.index("not definition.enabled")
+
+
+def test_the_ingress_sets_no_store_and_never_redirects() -> None:
+    """The management header middleware is scoped to `/api/v1`, so the ingress carries its own."""
+    errors = (API_SOURCE / "hooks" / "errors.py").read_text(encoding="utf-8")
+    assert '"Cache-Control": "no-store"' in errors
+    assert "Retry-After" in errors
+    router = (API_SOURCE / "hooks" / "router.py").read_text(encoding="utf-8")
+    for forbidden in ("RedirectResponse", "status_code=301", "status_code=302", "status_code=307"):
+        assert forbidden not in router, forbidden
+    assert "no-store" not in router  # the header lives in one place

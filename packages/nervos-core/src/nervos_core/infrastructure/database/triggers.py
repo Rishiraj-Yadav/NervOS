@@ -36,7 +36,15 @@ from nervos_core.application.triggers import (
     TriggerNotEditable,
     TriggerNotFound,
 )
+from nervos_core.application.webhooks import (
+    WebhookDefinitionDrifted,
+    WebhookDeliveryCommand,
+    WebhookDeliveryKind,
+    WebhookDeliveryResult,
+    WebhookPublicIdConflict,
+)
 from nervos_core.domain.agents import AgentDefinitionId
+from nervos_core.domain.runs import InvalidRun, validate_input_text
 from nervos_core.domain.scheduling import schedule_of
 from nervos_core.domain.triggers import (
     SCHEDULE_KINDS,
@@ -50,6 +58,7 @@ from nervos_core.domain.triggers import (
     TriggerKind,
     TriggerOccurrence,
 )
+from nervos_core.domain.webhooks import compose_run_input
 from nervos_core.infrastructure.database.jobs import (
     insert_run_and_job_on_connection,
     validate_pending_cap,
@@ -60,6 +69,7 @@ from nervos_core.infrastructure.database.models import (
     TriggerOccurrenceRecord,
 )
 from nervos_core.infrastructure.database.transaction import TransactionRunner
+from nervos_core.infrastructure.security.webhook_secrets import secret_matches_digest
 
 #: The fields whose change makes an edit *defining*, and therefore increments `config_revision`.
 #: A rename is not one of them: the revision means "the configuration that determines what fires",
@@ -126,37 +136,141 @@ class SqlAlchemyTriggerPersistence:
         self, owner_user_id: int, draft: TriggerDraft, now: datetime
     ) -> TriggerDefinition:
         """Create one trigger targeting an Agent Instance the caller owns."""
+        return self._runner.run(
+            lambda connection: self._insert_definition(connection, owner_user_id, draft, now)
+        )
+
+    def create_webhook_trigger(
+        self, owner_user_id: int, draft: TriggerDraft, now: datetime
+    ) -> TriggerDefinition:
+        """Create a webhook trigger, refusing an already-taken locator with a **typed** signal.
+
+        The uniqueness of `public_id` is enforced by `ux_trigger_definitions_public_id`, but a
+        caller that has to *retry* on collision must not learn that by reading a driver's exception
+        text or matching a constraint name — string-inspecting an error message is exactly the
+        fragile classification this repository refuses. So the locator is checked inside this
+        transaction, which already holds the write lock, and a collision becomes
+        :class:`WebhookPublicIdConflict`.
+
+        The check is authoritative rather than merely optimistic: `BEGIN IMMEDIATE` takes SQLite's
+        write lock before the check runs, so no other writer can commit a competing locator between
+        the check and the insert.
+        """
+        if draft.public_id is None:
+            raise InvalidTrigger("a webhook trigger requires a locator")
 
         def operation(connection: Connection) -> TriggerDefinition:
-            self._require_owned_instance(connection, owner_user_id, draft.agent_instance_id)
-            candidate = self._candidate(
-                id=0,
-                owner=owner_user_id,
-                agent_instance_id=draft.agent_instance_id,
-                kind=draft.kind,
-                display_name=draft.display_name,
-                enabled=draft.enabled,
-                input_text=draft.input_text,
-                config_revision=1,
-                misfire_policy=draft.misfire_policy,
-                schedule=draft.schedule,
-                next_fire_at=draft.next_fire_at,
-                public_id=draft.public_id,
-                secret_digest=draft.secret_digest,
-                secret_created_at=draft.secret_created_at,
-                event_type=draft.event_type,
-                created_at=now,
-                updated_at=now,
+            existing = connection.scalar(
+                select(TriggerDefinitionRecord.id).where(
+                    TriggerDefinitionRecord.public_id == draft.public_id
+                )
             )
-            result = connection.execute(
-                insert(TriggerDefinitionRecord).values(**self._column_values(candidate))
-            )
-            primary_key = result.inserted_primary_key
-            if primary_key is None or primary_key[0] is None:
-                raise PersistenceUnavailable
-            return self._read_definition(connection, owner_user_id, int(primary_key[0]))
+            if existing is not None:
+                raise WebhookPublicIdConflict("the webhook locator is already taken")
+            return self._insert_definition(connection, owner_user_id, draft, now)
 
         return self._runner.run(operation)
+
+    def rotate_webhook_secret(
+        self, owner_user_id: int, trigger_id: int, secret_digest: bytes, now: datetime
+    ) -> TriggerDefinition:
+        """Replace a webhook trigger's credential in one statement.
+
+        `secret_digest` and `secret_created_at` are written **together**, because the `secret_pair`
+        check makes a partial write unrepresentable. `public_id` and `config_revision` are
+        untouched: the endpoint keeps its identity, and a credential determines who may ask rather
+        than what fires, so it is not a defining change.
+
+        One `UPDATE` rather than a read-modify-write, so a rotation racing a delivery is a single
+        serialized step and the previous secret is invalid the moment this commits — there is no
+        grace window, and the delivery transaction's own comparison is what enforces that.
+        """
+
+        def operation(connection: Connection) -> TriggerDefinition:
+            current = self._read_definition(connection, owner_user_id, trigger_id)
+            if current.kind is not TriggerKind.WEBHOOK:
+                raise TriggerNotEditable("only a webhook trigger carries a secret")
+            connection.execute(
+                update(TriggerDefinitionRecord)
+                .where(
+                    TriggerDefinitionRecord.id == trigger_id,
+                    TriggerDefinitionRecord.owner_user_id == owner_user_id,
+                )
+                .values(secret_digest=secret_digest, secret_created_at=now, updated_at=now)
+            )
+            return self._read_definition(connection, owner_user_id, trigger_id)
+
+        return self._runner.run(operation)
+
+    def _insert_definition(
+        self,
+        connection: Connection,
+        owner_user_id: int,
+        draft: TriggerDraft,
+        now: datetime,
+    ) -> TriggerDefinition:
+        """Insert one draft on the caller's connection. The one definition writer."""
+        self._require_owned_instance(connection, owner_user_id, draft.agent_instance_id)
+        candidate = self._candidate(
+            id=0,
+            owner=owner_user_id,
+            agent_instance_id=draft.agent_instance_id,
+            kind=draft.kind,
+            display_name=draft.display_name,
+            enabled=draft.enabled,
+            input_text=draft.input_text,
+            config_revision=1,
+            misfire_policy=draft.misfire_policy,
+            schedule=draft.schedule,
+            next_fire_at=draft.next_fire_at,
+            public_id=draft.public_id,
+            secret_digest=draft.secret_digest,
+            secret_created_at=draft.secret_created_at,
+            event_type=draft.event_type,
+            created_at=now,
+            updated_at=now,
+        )
+        result = connection.execute(
+            insert(TriggerDefinitionRecord).values(**self._column_values(candidate))
+        )
+        primary_key = result.inserted_primary_key
+        if primary_key is None or primary_key[0] is None:
+            raise PersistenceUnavailable
+        return self._read_definition(connection, owner_user_id, int(primary_key[0]))
+
+    def find_webhook_by_public_id(self, public_id: str) -> TriggerDefinition | None:
+        """The webhook trigger a locator names.
+
+        A row of any other kind answers ``None``: the locator is only an identifier for a webhook,
+        so a stray value that happens to match some other kind's column is not a match. The lookup
+        is one index seek on `ux_trigger_definitions_public_id`.
+
+        The Agent Instance is joined for the same reason the due scan joins it: the resolved value
+        carries the Agent Definition identity, and a definition read without it could not be
+        resolved into a Run at all. The join is on a `RESTRICT` foreign key to a primary key, so it
+        adds no row and cannot multiply one.
+        """
+        row = (
+            self._engine.connect()
+            .execute(
+                select(
+                    TriggerDefinitionRecord,
+                    AgentInstanceRecord.agent_key.label("agent_key"),
+                    AgentInstanceRecord.agent_definition_version.label("agent_definition_version"),
+                )
+                .join(
+                    AgentInstanceRecord,
+                    AgentInstanceRecord.id == TriggerDefinitionRecord.agent_instance_id,
+                )
+                .where(
+                    TriggerDefinitionRecord.public_id == public_id,
+                    TriggerDefinitionRecord.kind == TriggerKind.WEBHOOK.value,
+                )
+            )
+            .mappings()
+            .first()
+        )
+        return None if row is None else self._to_definition(row)
 
     def get_trigger(self, owner_user_id: int, trigger_id: int) -> TriggerDefinition:
         with self._engine.connect() as connection:
@@ -361,9 +475,20 @@ class SqlAlchemyTriggerPersistence:
         only stops a duplicate from being mistaken for one.
         """
         definition = self._load_definition(connection, command.trigger_definition_id)
-        self._require_identity_matches_kind(definition.kind, command)
+        self._require_identity_matches_kind(
+            definition.kind,
+            nominal_at=command.nominal_at,
+            event_id=command.event_id,
+            idempotency_key=command.idempotency_key,
+        )
 
-        existing = self._find_existing(connection, definition, command)
+        existing = self._find_existing(
+            connection,
+            definition.id,
+            nominal_at=command.nominal_at,
+            event_id=command.event_id,
+            idempotency_key=command.idempotency_key,
+        )
         if existing is not None:
             # A duplicate identity refers to an occurrence that already exists. Nothing is written:
             # the original terminal outcome, whichever status it has, is authoritative.
@@ -395,7 +520,10 @@ class SqlAlchemyTriggerPersistence:
         # is re-checked here against it. Without this, a drift between the two would be recorded as
         # an `agent_disabled` skip — consuming a scheduled occurrence, and telling the operator
         # something untrue, since the Agent is neither disabled nor at fault.
-        self._require_agent_definition_unchanged(connection, definition, command)
+        if not self._agent_definition_matches(
+            connection, definition, command.definition.definition_id
+        ):
+            raise TriggerNotEditable("the target agent instance changed definition")
         try:
             run = insert_run_and_job_on_connection(
                 connection,
@@ -419,27 +547,36 @@ class SqlAlchemyTriggerPersistence:
         return self._write_occurrence(
             connection,
             definition,
-            command,
             status=OccurrenceStatus.RUN_CREATED,
             run_id=run.id,
             skip_code=None,
             skip_message=None,
+            nominal_at=command.nominal_at,
+            event_id=command.event_id,
+            idempotency_key=command.idempotency_key,
+            payload_digest=command.payload_digest,
+            payload_bytes=command.payload_bytes,
+            occurred_at=command.occurred_at,
+            created_at=command.now,
         )
 
     @staticmethod
-    def _require_agent_definition_unchanged(
+    def _agent_definition_matches(
         connection: Connection,
         definition: TriggerDefinition,
-        command: TriggerMaterializationCommand,
-    ) -> None:
-        """Fail closed when the target Agent Instance no longer matches the resolved definition.
+        expected: AgentDefinitionId,
+    ) -> bool:
+        """Whether the target Agent Instance still resolves to the definition that was resolved.
 
         The canonical helper enforces the same predicate, but it reports every refusal as one
-        undifferentiated error. Checking here first is what lets the two refusals be told apart: a
-        definition change is a race that must consume nothing, while a disabled Agent is an outcome
-        that must be recorded.
+        undifferentiated error. Answering the question separately here is what lets the two
+        refusals be told apart: a definition change is a race that must consume nothing, while a
+        disabled Agent is an outcome that must be recorded.
+
+        A boolean rather than a raise, because the two callers answer drift differently — the
+        scheduler discards a decision, the webhook ingress refuses retryably — and each needs its
+        own typed signal rather than one shared exception they would have to interpret.
         """
-        expected = command.definition.definition_id
         row = (
             connection.execute(
                 select(
@@ -450,11 +587,10 @@ class SqlAlchemyTriggerPersistence:
             .mappings()
             .one_or_none()
         )
-        if row is None or (
+        return row is not None and (
             str(row["agent_key"]),
             str(row["agent_definition_version"]),
-        ) != (expected.agent_key, expected.agent_definition_version):
-            raise TriggerNotEditable("the target agent instance changed definition")
+        ) == (expected.agent_key, expected.agent_definition_version)
 
     def _write_skipped(
         self,
@@ -467,16 +603,26 @@ class SqlAlchemyTriggerPersistence:
         return self._write_occurrence(
             connection,
             definition,
-            command,
             status=OccurrenceStatus.SKIPPED,
             run_id=None,
             skip_code=reason.value,
             skip_message=SKIP_MESSAGES[reason],
+            nominal_at=command.nominal_at,
+            event_id=command.event_id,
+            idempotency_key=command.idempotency_key,
+            payload_digest=command.payload_digest,
+            payload_bytes=command.payload_bytes,
+            occurred_at=command.occurred_at,
+            created_at=command.now,
         )
 
     @staticmethod
     def _require_identity_matches_kind(
-        kind: TriggerKind, command: TriggerMaterializationCommand
+        kind: TriggerKind,
+        *,
+        nominal_at: datetime | None,
+        event_id: str | None,
+        idempotency_key: str | None,
     ) -> None:
         """The occurrence's identity must be the one this kind of trigger actually dedupes on.
 
@@ -485,9 +631,9 @@ class SqlAlchemyTriggerPersistence:
         schedule occurrence could be written with an `event_id`, and because SQLite treats NULLs as
         distinct under a UNIQUE index, that row would silently escape schedule dedupe entirely.
         """
-        has_nominal = command.nominal_at is not None
-        has_event = command.event_id is not None
-        has_key = command.idempotency_key is not None
+        has_nominal = nominal_at is not None
+        has_event = event_id is not None
+        has_key = idempotency_key is not None
         if kind in SCHEDULE_KINDS:
             valid = has_nominal and not has_event and not has_key
         elif kind is TriggerKind.EVENT:
@@ -711,18 +857,27 @@ class SqlAlchemyTriggerPersistence:
     def _find_existing(
         self,
         connection: Connection,
-        definition: TriggerDefinition,
-        command: TriggerMaterializationCommand,
+        trigger_definition_id: int,
+        *,
+        nominal_at: datetime | None,
+        event_id: str | None,
+        idempotency_key: str | None,
     ) -> TriggerOccurrence | None:
+        """The occurrence this identity already names, or ``None``.
+
+        One lookup for all three kinds: which column is consulted is exactly which identity the
+        kind carries, and a delivery carrying none of the three has no deterministic identity at
+        all, so there is nothing to find and it is never deduped.
+        """
         query = select(TriggerOccurrenceRecord).where(
-            TriggerOccurrenceRecord.trigger_definition_id == definition.id
+            TriggerOccurrenceRecord.trigger_definition_id == trigger_definition_id
         )
-        if command.nominal_at is not None:
-            query = query.where(TriggerOccurrenceRecord.nominal_at == command.nominal_at)
-        elif command.event_id is not None:
-            query = query.where(TriggerOccurrenceRecord.event_id == command.event_id)
-        elif command.idempotency_key is not None:
-            query = query.where(TriggerOccurrenceRecord.idempotency_key == command.idempotency_key)
+        if nominal_at is not None:
+            query = query.where(TriggerOccurrenceRecord.nominal_at == nominal_at)
+        elif event_id is not None:
+            query = query.where(TriggerOccurrenceRecord.event_id == event_id)
+        elif idempotency_key is not None:
+            query = query.where(TriggerOccurrenceRecord.idempotency_key == idempotency_key)
         else:
             return None
         row = (
@@ -736,17 +891,24 @@ class SqlAlchemyTriggerPersistence:
         self,
         connection: Connection,
         definition: TriggerDefinition,
-        command: TriggerMaterializationCommand,
         *,
         status: OccurrenceStatus,
         run_id: int | None,
         skip_code: str | None,
         skip_message: str | None,
+        nominal_at: datetime | None,
+        event_id: str | None,
+        idempotency_key: str | None,
+        payload_digest: bytes | None,
+        payload_bytes: int | None,
+        occurred_at: datetime,
+        created_at: datetime,
     ) -> TriggerOccurrence:
+        """Insert one occurrence row. **The one occurrence writer**, for every trigger kind."""
         occurrence = TriggerOccurrence(
             id=0,
             trigger_definition_id=definition.id,
-            # Owner, target and revision come from the re-read definition, never from the command:
+            # Owner, target and revision come from the re-read definition, never from the caller:
             # they have exactly one authority, and it is the durable row.
             owner_user_id=definition.owner_user_id,
             agent_instance_id=definition.agent_instance_id,
@@ -755,13 +917,13 @@ class SqlAlchemyTriggerPersistence:
             run_id=run_id,
             skip_code=skip_code,
             skip_message=skip_message,
-            nominal_at=command.nominal_at,
-            event_id=command.event_id,
-            idempotency_key=command.idempotency_key,
-            payload_digest=command.payload_digest,
-            payload_bytes=command.payload_bytes,
-            occurred_at=command.occurred_at,
-            created_at=command.now,
+            nominal_at=nominal_at,
+            event_id=event_id,
+            idempotency_key=idempotency_key,
+            payload_digest=payload_digest,
+            payload_bytes=payload_bytes,
+            occurred_at=occurred_at,
+            created_at=created_at,
         )
         result = connection.execute(
             insert(TriggerOccurrenceRecord).values(
@@ -786,6 +948,201 @@ class SqlAlchemyTriggerPersistence:
         if primary_key is None or primary_key[0] is None:
             raise PersistenceUnavailable
         return self._read_occurrence(connection, int(primary_key[0]))
+
+    # ------------------------------------------------------------------------------------------
+    # The webhook ingress seam: locate by locator, then one verified, atomic materialization
+    # ------------------------------------------------------------------------------------------
+
+    def materialize_webhook_delivery(
+        self, command: WebhookDeliveryCommand
+    ) -> WebhookDeliveryResult:
+        """One transaction that verifies an authenticated delivery and applies it, or writes none.
+
+        The ordering is **deliberately the inverse of the scheduler's**, and the difference is the
+        whole point. A schedule resolves identity before authority, because a duplicate decision
+        describes work already done and must not become an error for whichever racing scheduler
+        arrived second. A webhook delivery authenticates *before* it looks up an identity, because
+        releasing an existing occurrence's outcome to a credential that has since been rotated away
+        would leak both the existence and the result of a delivery the caller no longer holds any
+        authority over.
+
+        So the trigger is re-read, the presented credential is compared against the **current**
+        stored digest, and only then is an existing identity consulted. A rotation that commits
+        first fails the delivery closed, exactly as a disable that commits first does.
+        """
+        return self._runner.run(
+            lambda connection: self._materialize_webhook_once(connection, command)
+        )
+
+    def _materialize_webhook_once(
+        self, connection: Connection, command: WebhookDeliveryCommand
+    ) -> WebhookDeliveryResult:
+        """The webhook core, in the frozen order: authenticate, look up, then apply."""
+        definition = self._load_definition(connection, command.trigger_definition_id)
+
+        # A locator is an identifier for one kind only, so a row of any other kind is not a match.
+        if definition.kind is not TriggerKind.WEBHOOK:
+            return WebhookDeliveryResult(kind=WebhookDeliveryKind.UNAUTHENTICATED)
+
+        # The call-time authority rule: the check outside this transaction produced a candidate,
+        # not a decision, and the digest it is compared against is the one that exists *now*.
+        # A malformed or absent credential cannot reach here -- the ingress refuses it before the
+        # transaction opens -- so this is the single comparison the ingress ever makes, and it is
+        # constant-time.
+        stored_digest = definition.secret_digest
+        if stored_digest is None or not secret_matches_digest(
+            command.candidate_secret_digest, stored_digest
+        ):
+            # No occurrence lookup happens before this point, so an invalidated credential learns
+            # nothing: not whether an identity exists, and not what it produced.
+            return WebhookDeliveryResult(kind=WebhookDeliveryKind.UNAUTHENTICATED)
+
+        self._require_identity_matches_kind(
+            definition.kind,
+            nominal_at=None,
+            event_id=None,
+            idempotency_key=command.idempotency_key,
+        )
+
+        existing = self._find_existing(
+            connection,
+            definition.id,
+            nominal_at=None,
+            event_id=None,
+            idempotency_key=command.idempotency_key,
+        )
+        if existing is not None:
+            return self._refresh_existing(existing, command)
+
+        # Only a *fresh* delivery needs the trigger to be enabled: returning an occurrence that
+        # already exists creates nothing, so a disable does not retroactively un-answer it.
+        if not definition.enabled:
+            return WebhookDeliveryResult(kind=WebhookDeliveryKind.DISABLED)
+
+        # Drift is a race that must consume nothing, so it refuses retryably rather than being
+        # recorded as an `agent_disabled` skip about an Agent that is neither disabled nor at fault.
+        if not self._agent_definition_matches(
+            connection, definition, command.definition.definition_id
+        ):
+            raise WebhookDefinitionDrifted("the webhook target agent changed definition")
+
+        # The composed input is validated explicitly against the target Run's own bounds. This is
+        # load-bearing rather than defensive: the canonical insertion trusts `limits` and does not
+        # check length, so an over-long composed input would fail the `runs.input_bounds` check and
+        # surface as a generic persistence failure instead of a clean, recorded skip.
+        composed = compose_run_input(definition.input_text, command.payload)
+        try:
+            validate_input_text(composed, command.definition.limits)
+        except InvalidRun:
+            return WebhookDeliveryResult(
+                kind=WebhookDeliveryKind.SKIPPED,
+                occurrence=self._write_webhook_occurrence(
+                    connection,
+                    definition,
+                    command,
+                    status=OccurrenceStatus.SKIPPED,
+                    run_id=None,
+                    skip_code=SkipReason.INPUT_TOO_LARGE.value,
+                    skip_message=SKIP_MESSAGES[SkipReason.INPUT_TOO_LARGE],
+                ),
+            )
+
+        try:
+            run = insert_run_and_job_on_connection(
+                connection,
+                owner_user_id=definition.owner_user_id,
+                agent_instance_id=definition.agent_instance_id,
+                input_text=composed,
+                limits=command.definition.limits,
+                definition_id=command.definition.definition_id,
+                now=command.occurred_at,
+                max_attempts=self.max_attempts,
+                capacity=self._capacity,
+                agent_capacity=self._agent_capacity,
+                provider_capacity=self._provider_capacity,
+            )
+        except DurableSubmissionRejected:
+            # The definition identity was verified immediately above, on this connection, inside
+            # this transaction, so the remaining way the canonical helper's predicates can fail is
+            # that the Agent Instance is disabled. The webhook trigger itself is never disabled for
+            # this: a delivery-driven trigger's history explains itself.
+            return WebhookDeliveryResult(
+                kind=WebhookDeliveryKind.SKIPPED,
+                occurrence=self._write_webhook_occurrence(
+                    connection,
+                    definition,
+                    command,
+                    status=OccurrenceStatus.SKIPPED,
+                    run_id=None,
+                    skip_code=SkipReason.AGENT_DISABLED.value,
+                    skip_message=SKIP_MESSAGES[SkipReason.AGENT_DISABLED],
+                ),
+            )
+
+        return WebhookDeliveryResult(
+            kind=WebhookDeliveryKind.MATERIALIZED,
+            occurrence=self._write_webhook_occurrence(
+                connection,
+                definition,
+                command,
+                status=OccurrenceStatus.RUN_CREATED,
+                run_id=run.id,
+                skip_code=None,
+                skip_message=None,
+            ),
+        )
+
+    @staticmethod
+    def _refresh_existing(
+        existing: TriggerOccurrence, command: WebhookDeliveryCommand
+    ) -> WebhookDeliveryResult:
+        """Answer a repeated identity once authentication has already succeeded.
+
+        A key that arrives with **different bytes** is refused rather than answered. Returning the
+        first occurrence would tell the sender its event had been accepted when a different event
+        was, which is a false statement about what happened; a conflict is a true one. Nothing is
+        written either way.
+        """
+        if existing.payload_digest != command.payload.digest:
+            return WebhookDeliveryResult(kind=WebhookDeliveryKind.CONFLICT)
+        return WebhookDeliveryResult(
+            kind=WebhookDeliveryKind.DUPLICATE, occurrence=existing, duplicate=True
+        )
+
+    def _write_webhook_occurrence(
+        self,
+        connection: Connection,
+        definition: TriggerDefinition,
+        command: WebhookDeliveryCommand,
+        *,
+        status: OccurrenceStatus,
+        run_id: int | None,
+        skip_code: str | None,
+        skip_message: str | None,
+    ) -> TriggerOccurrence:
+        """Write a webhook occurrence through the one occurrence writer.
+
+        A webhook carries no scheduled instant and no event id, so the identity it may carry is
+        exactly its idempotency key -- or none at all, which is the keyless case that is never
+        deduped. The payload digest and byte count describe the **raw** body that was received, and
+        are recorded for every occurrence the ingress writes, including a skipped one: the delivery
+        genuinely arrived and was evaluated, so those facts explain it.
+        """
+        return self._write_occurrence(
+            connection,
+            definition,
+            status=status,
+            run_id=run_id,
+            skip_code=skip_code,
+            skip_message=skip_message,
+            nominal_at=None,
+            event_id=None,
+            idempotency_key=command.idempotency_key,
+            payload_digest=command.payload.digest,
+            payload_bytes=command.payload.byte_count,
+            occurred_at=command.occurred_at,
+            created_at=command.occurred_at,
+        )
 
     # ------------------------------------------------------------------------------------------
     # Reads and row mapping

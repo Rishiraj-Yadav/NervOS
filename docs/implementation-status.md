@@ -4,17 +4,21 @@
 
 **Stage D — the tool and MCP layer — is COMPLETE.** **Stage E — scheduling, events, and triggers —
 has begun**: its **E0 architecture freeze** is complete and externally accepted, **E1 — the durable
-trigger/occurrence domain and migration `0008` — is complete and accepted**, and **E2 — the scheduler
-engine — is complete and accepted.** Stage E decides when a Run comes into existence, who may cause
-one, and the single acceptance path every Run travels, in ADRs 0018–0020.
+trigger/occurrence domain and migration `0008` — is complete and accepted**, **E2 — the scheduler
+engine — is complete and accepted**, and **E3 — secure webhook ingress, secret authentication,
+rotation and idempotency — is complete and accepted.** Stage E decides when a Run comes into
+existence, who may cause one, and the single acceptance path every Run travels, in ADRs 0018–0020.
 
-**Schedule triggers now fire.** A dedicated Scheduler process evaluates one-time, interval and cron
-schedules, resolves them in their own IANA timezone under the frozen DST contract, and turns a due
-schedule into an **ordinary Run** through the same submission primitive a person uses. **Nothing else
-in Stage E is active:** there is no webhook or event ingress, no trigger management or
-occurrence-history API, and no Automations UI, so a trigger still cannot be created through the
-product — the scheduler acts on triggers that exist durably. Nothing in Stage E may be described as
-implemented until its own milestone lands and is accepted.
+**Schedule and webhook triggers now fire.** A dedicated Scheduler process evaluates one-time,
+interval and cron schedules, resolves them in their own IANA timezone under the frozen DST contract,
+and turns a due schedule into an **ordinary Run** through the same submission primitive a person
+uses. The sibling `POST /hooks/v1/{public_id}` ingress authenticates a Bearer capability secret,
+re-checks the current secret transactionally, bounds and canonicalises JSON payloads, applies
+Idempotency-Key semantics and turns accepted deliveries into ordinary Runs/Jobs through that same
+seam. E3 also provides provider-neutral provisioning and secret-rotation application services.
+**Nothing else in Stage E is active:** there is no internal event ingress or fanout, no general
+trigger-management or occurrence-history API, and no Automations UI. E4 and E5 remain unimplemented,
+and nothing in either milestone may be described as implemented until separately accepted.
 
 Stage C — Persistent execution engine is COMPLETE. The C0 architecture freeze, the C1 durable execution foundation, C2 — asynchronous submission and minimal durable Worker execution — C3 — Worker registry/health, expired-lease reconciliation, and fencing hardening — C4 — the safe execution retry engine — C5 — owner cancellation and Attempt execution-timeout orchestration — C6 — authoritative global/per-Agent/per-provider execution concurrency, durable Agent fairness, and full admission backpressure — C7 — public read-only execution observability, the Run Events API, the execution timeline, and the polling model — and C8 — integrated deterministic Stage C acceptance and closeout — are implemented, externally reviewed, and accepted.
 
@@ -48,7 +52,7 @@ The next milestone is **Stage E — Scheduling, events, and triggers**.
 - [x] E0 — Architecture, protocol, and safety freeze (documentation/governance only; no schema, no dependency, no runtime code)
 - [x] E1 — Durable trigger/occurrence domain, migration `0008`, and the shared Run-submission foundation
 - [x] E2 — Scheduler: one-time / interval / cron, timezone, misfire, multi-instance, restart
-- [ ] E3 — Webhook ingress, secret authentication and rotation, idempotency
+- [x] E3 — Webhook ingress, secret authentication and rotation, idempotency
 - [ ] E4 — Internal events, trigger management and occurrence history, minimal Automations surface
 - [ ] E5 — Integrated acceptance and Stage-E closeout
 
@@ -159,6 +163,21 @@ tables, the partial due index and the `next_fire_alignment` invariant were alrea
 **one dependency, `cronsim>=2.7,<3`**, as a calculation library with no scheduler framework behind it.
 **E2 added no webhook or event ingress, no trigger management or occurrence-history API, and no
 frontend surface.** Its authority remains ADRs 0018–0020, which it did not amend.
+
+**E3 is complete and externally accepted.** The sibling `POST /hooks/v1/{public_id}` ingress uses a
+Bearer capability secret whose SHA-256 digest is compared in constant time and re-checked against the
+current durable secret inside the materialization transaction. Raw bodies are streamed under the
+frozen 65,536-byte bound before parsing; accepted top-level JSON objects are validated and rendered
+canonically as untrusted data in an ordinary Run input envelope. Optional `Idempotency-Key` values
+provide durable same-key deduplication, with a same-key/different-body conflict and distinct keyless
+deliveries. Accepted deliveries use the shared atomic TriggerOccurrence → ordinary Run/Job seam;
+Agent-disabled deliveries become static skips, queue capacity rolls back for sender retry, and
+Agent-definition drift consumes nothing. Provider-neutral provisioning and secret-rotation services
+return plaintext credentials only once; rotation leaves the public locator stable and does not change
+`config_revision`. The ingress adds no migration, queue, Run Event, raw-payload table, management API
+or frontend surface. The developer default database was accidentally migrated from `0007` to `0008`
+during an implementation smoke command; no data was lost, it was not downgraded or otherwise touched
+during finalization, and the deviation remains recorded in the E3 implementation report.
 
 D0 is **architecture frozen and externally accepted**. It fixed: the MCP protocol target
 (`2026-07-28`, modern era only, Streamable HTTP and stdio, official SDK v2 with no custom protocol
@@ -913,6 +932,10 @@ deployment is made.
 ## Next action
 
 C7 and C8 are complete and externally accepted, and Stage C — the persistent execution engine — is **complete**.
+
+E0 through E3 are complete and externally accepted. The next milestone is **E4 — internal events,
+trigger management and occurrence observability, and the minimal Automations UI**; E5 remains the
+integrated Stage-E acceptance and closeout milestone.
 
 C7 makes the kernel legible without giving it any new authority. An owner can read their Run's durable execution timeline through one owner-scoped, read-only endpoint, ordered by the Run-local `sequence` the writers allocated, paginated by a keyset cursor rather than an offset so a concurrent append can never be skipped. Run responses additionally carry a derived execution phase — the Job's own durable status, verbatim, with a retry instant only while one is pending — which is what finally distinguishes "executing now" from "waiting to retry". Both are computed per read and never persisted, and no module that mutates execution reads them: observability is a projection, never a control. The dashboard gains an expandable timeline, incremental polling, and a polling lifetime that no longer abandons a live Run after roughly 300 seconds. C7 added **no migration**: the existing `UNIQUE(run_id, sequence)` index already serves the pagination predicate as a bounded range seek, so the migration head remains `0006_stage_c6_queue_partitions`.
 

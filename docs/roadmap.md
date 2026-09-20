@@ -50,11 +50,9 @@ occurrence submits an ordinary Run through the one existing acceptance seam. The
 `scheduler-to-job` path that mints execution obligations directly, and Stage E adds no queue, no retry
 engine and no second worker.
 
-The remaining milestones are **E1** (durable trigger/occurrence domain, migration `0008`, and the
-shared Run-submission foundation), **E2** (scheduler: one-time, interval, cron, timezone, misfire,
-multi-instance and restart), **E3** (webhook ingress, secret authentication and rotation, idempotency),
-**E4** (internal events, trigger management and occurrence history, and a minimal Automations surface)
-and **E5** (integrated acceptance and closeout). None of them is implemented yet.
+The remaining milestones are **E4** (internal events, trigger management and occurrence history,
+and a minimal Automations surface) and **E5** (integrated acceptance and closeout). **E0 through E3
+are complete and externally accepted.**
 
 ## Stage F — Agent sessions and memory
 

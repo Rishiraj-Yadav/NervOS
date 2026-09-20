@@ -20,6 +20,7 @@ from nervos_core.application.authentication import (
 )
 from nervos_core.application.mcp_connection_service import McpConnectionService
 from nervos_core.application.run_cancellation import RunCancellationService
+from nervos_core.application.webhooks import WebhookDeliveryService
 from nervos_core.infrastructure.database import create_session_factory, create_sqlite_engine
 from nervos_core.infrastructure.database.agents import SqlAlchemyAgentPersistence
 from nervos_core.infrastructure.database.authentication import SqlAlchemyAuthenticationPersistence
@@ -30,7 +31,9 @@ from nervos_core.infrastructure.database.jobs import (
 from nervos_core.infrastructure.database.mcp_connections import (
     SqlAlchemyMcpConnectionPersistence,
 )
+from nervos_core.infrastructure.database.triggers import SqlAlchemyTriggerPersistence
 from nervos_core.infrastructure.security import Argon2PasswordHasher, SecureSessionTokens
+from nervos_core.infrastructure.webhooks import create_webhook_secret_verifier
 from nervos_mcp.adapters import OperatorFacts, build_discovery
 from nervos_mcp.operator_config import load_operator_config
 from nervos_mcp.policy.egress import StrictEgressPolicy
@@ -48,6 +51,7 @@ from nervos_api.api.errors import (
 from nervos_api.api.middleware import ApiSecurityHeadersMiddleware, AuthenticationBoundaryMiddleware
 from nervos_api.api.router import api_router
 from nervos_api.config import Settings, get_settings
+from nervos_api.hooks.router import router as hooks_router
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -99,6 +103,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         agent_service,
         utc_now,
     )
+    # The webhook ingress composes the trigger store and the credential verifier, and nothing else.
+    # It is bound here -- in the composition root -- so the ingress module never names the concrete
+    # persistence or the security primitives, and this process gains the ability to turn one
+    # authenticated delivery into one ordinary Run, with no ability to execute it.
+    webhook_ingress_service = WebhookDeliveryService(
+        SqlAlchemyTriggerPersistence(
+            engine,
+            max_pending=resolved_settings.max_pending_jobs,
+            max_pending_per_agent=resolved_settings.max_pending_jobs_per_agent,
+            max_pending_per_provider=resolved_settings.max_pending_jobs_per_provider,
+        ),
+        create_builtin_definition_registry(),
+        create_webhook_secret_verifier(),
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
@@ -120,6 +138,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.run_cancellation_service = run_cancellation_service
     app.state.model_provider_catalog = known_providers
     app.state.mcp_connection_service = mcp_connection_service
+    app.state.webhook_ingress_service = webhook_ingress_service
     app.add_exception_handler(Exception, unexpected_error_handler)
     app.add_exception_handler(AuthenticationError, authentication_error_handler)
     app.add_exception_handler(InvalidOrigin, authentication_error_handler)
@@ -130,4 +149,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         validation_error_handler,  # pyright: ignore[reportArgumentType]
     )
     app.include_router(api_router)
+    # A second, sibling include. The management router above is untouched: the ingress is a
+    # different contract with a different credential, so it is composed beside `/api/v1` rather
+    # than added to it, and the `Origin`/CSRF boundary that guards `/api/v1` never sees this path.
+    app.include_router(hooks_router)
     return app
