@@ -156,7 +156,11 @@ class PlanRig:
         )
 
     def publish(
-        self, *, event_id: str = "evt-1", payload: EventPayload = PAYLOAD, event_type: str = EVENT_TYPE
+        self,
+        *,
+        event_id: str = "evt-1",
+        payload: EventPayload = PAYLOAD,
+        event_type: str = EVENT_TYPE,
     ):
         return self.service.publish(
             EventEnvelope(
