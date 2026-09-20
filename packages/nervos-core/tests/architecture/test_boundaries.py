@@ -37,10 +37,11 @@ EXPECTED_TABLES = {
     "tool_definitions",
     "agent_tool_grants",
     "tool_invocations",
-    # E1 adds the two Stage E durable tables. They are *persistence only*: no scheduler loop, no
-    # webhook ingress, no event publication and no management API exists yet, so nothing in the
-    # repository reads or writes them outside their own persistence module and its tests. The
-    # `schedule`/`cron`/`webhook` route-surface words stay forbidden in `router.py`.
+    # E1 adds the two Stage E durable tables. E2-E4 then landed the scheduler loop, the webhook
+    # ingress and the event-publication seam that read and write them, and E4 added the management
+    # API over the same rows; every one of those paths still reaches the tables only through their
+    # own persistence module. The `schedule`/`cron`/`webhook` route-surface words stay forbidden in
+    # `router.py`: the management surface is one `triggers` resource, not a router per kind.
     "trigger_definitions",
     "trigger_occurrences",
 }
@@ -616,6 +617,8 @@ def test_c7_adds_only_the_reviewed_observability_surface() -> None:
         "mcp_connections.py",
         "runs.py",
         "setup.py",
+        # E4 is authorized exactly one new control-plane resource family: triggers.
+        "triggers.py",
     ]
     runs_route = (API_ROUTES / "runs.py").read_text(encoding="utf-8")
     # Exactly one new route, and it is a read.
@@ -1403,23 +1406,56 @@ def test_the_occurrence_status_vocabulary_matches_the_frozen_schema() -> None:
     assert "status IN ('run_created','skipped')" in models
 
 
-def test_stage_e_exposes_only_the_delivery_ingress_and_no_management_surface() -> None:
-    """E3 activates delivery only; the trigger *management* surface is still E4's, and is absent.
+#: The complete, reviewed E4 control-plane surface: nine routes on one owner-scoped resource.
+#: Pinned as (verb, path) pairs, so neither an added route nor a changed verb can slip in unnoticed.
+E4_TRIGGER_ROUTES = [
+    ("delete", "/{trigger_id}"),
+    ("get", ""),
+    ("get", "/{trigger_id}"),
+    ("get", "/{trigger_id}/occurrences"),
+    ("patch", "/{trigger_id}"),
+    ("post", ""),
+    ("post", "/{trigger_id}/disable"),
+    ("post", "/{trigger_id}/enable"),
+    ("post", "/{trigger_id}/rotate-secret"),
+]
 
-    This replaces the E1-era guard that asserted `/hooks/` did not exist yet. A guard whose subject
-    is "the next milestone has not landed" is retired by the milestone that lands it -- so, exactly
-    as the `0009` guard was, it becomes a *narrower and stronger* assertion rather than being
-    deleted: the ingress is now pinned to one POST on one path, the management router is pinned
-    unchanged, and the frontend stays empty.
+#: The decorator shape every module in `api/routes` uses, tolerant of the multi-line form
+#: `@router.post(\n    "",` that a route carrying a response model and a status code produces.
+_ROUTE_DECORATOR = re.compile(r'@router\.(get|post|patch|put|delete)\(\s*"([^"]*)"')
+
+
+def test_e4_exposes_only_the_reviewed_management_surface_and_the_delivery_ingress() -> None:
+    """E4 lands the trigger *management* surface; the delivery ingress stays a sibling namespace.
+
+    This replaces the E3-era guard that asserted the management router did not exist yet. A guard
+    whose subject is "the next milestone has not landed" is retired by the milestone that lands it
+    -- so, exactly as the `0009` guard was, it becomes a *narrower and stronger* assertion rather
+    than being deleted: the management surface is now pinned to its nine reviewed routes, the
+    delivery ingress is still pinned to one POST on one path, and the control plane is proved
+    unable to reach the execution plane at all.
     """
-    # The management router is untouched: no Stage-E word entered `/api/v1`, and the webhook
-    # namespace is a sibling rather than a branch inside it.
-    router_text = (API_SOURCE / "api" / "router.py").read_text(encoding="utf-8").lower()
-    for forbidden in ("trigger", "schedule", "cron", "webhook", "automation", "hook"):
-        assert forbidden not in router_text, forbidden
-    assert not (API_ROUTES / "triggers.py").exists()
-    assert not (API_ROUTES / "hooks.py").exists()
+    # -- The management surface is exactly the reviewed route set -----------------------------
+    triggers_path = API_ROUTES / "triggers.py"
+    assert triggers_path.exists()
+    triggers_route = triggers_path.read_text(encoding="utf-8")
+    assert 'APIRouter(prefix="/triggers")' in triggers_route
+    assert sorted(_ROUTE_DECORATOR.findall(triggers_route)) == E4_TRIGGER_ROUTES
 
+    # There is no HTTP ingress for an internal event, and no occurrence *detail* read: an event is
+    # published through the application seam, never over a route, and history is list-only.
+    for forbidden in ('"/events', '"/event/', '"/internal', "/occurrences/{"):
+        assert forbidden not in triggers_route, forbidden
+
+    # The control plane mounts one resource family, and its kinds are sub-concepts of that
+    # resource rather than a router each, so those words stay out of the versioned router.
+    router_text = (API_SOURCE / "api" / "router.py").read_text(encoding="utf-8").lower()
+    for forbidden in ("schedule", "cron", "webhook", "automation", "hook"):
+        assert forbidden not in router_text, forbidden
+    assert router_text.count("include_router(triggers_router)") == 1
+
+    # -- The delivery ingress stays a sibling namespace, unchanged ----------------------------
+    assert not (API_ROUTES / "hooks.py").exists()
     hooks = API_SOURCE / "hooks"
     assert sorted(path.name for path in python_files(hooks)) == [
         "__init__.py",
@@ -1437,6 +1473,47 @@ def test_stage_e_exposes_only_the_delivery_ingress_and_no_management_surface() -
     # The ingress never re-enters the branch that protects the browser API.
     assert '"/api/v1"' not in hooks_router
     assert "include_in_schema=True" not in hooks_router
+
+    # -- The control plane cannot reach the execution plane -----------------------------------
+    # A trigger decides *what may cause* a Run; it never runs one. Creation, editing, enablement,
+    # deletion, credential rotation and history are owner-scoped application-service calls, so the
+    # model providers, the tool loop, the MCP gateway and the claim/lease machinery are
+    # unreachable from the management route module.
+    forbidden_tokens = (
+        "RunExecutor",
+        "RunCoordinator",
+        "ModelCompletion",
+        "JobExecutionService",
+        "LeaseReclaimer",
+        "ToolLoop",
+        "claim_next",
+        "start_attempt",
+        "renew_lease",
+        "close_legacy",
+        "nervos_mcp",
+        "nervos_models",
+        "nervos_worker",
+        "nervos_scheduler",
+        "anthropic",
+        "openai",
+        "sqlalchemy",
+    )
+    for name in forbidden_tokens:
+        assert name not in triggers_route, name
+    modules = imported_modules(triggers_path)
+    for prefix in (
+        "nervos_mcp",
+        "nervos_models",
+        "nervos_worker",
+        "nervos_scheduler",
+        "sqlalchemy",
+        "anthropic",
+        "openai",
+    ):
+        assert not any(module == prefix or module.startswith(f"{prefix}.") for module in modules), (
+            prefix,
+            sorted(modules),
+        )
 
     # No frontend surface, exactly as before.
     frontend = "\n".join(

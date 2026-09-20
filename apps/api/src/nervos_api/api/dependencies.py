@@ -15,6 +15,7 @@ from nervos_core.application.authentication import (
 from nervos_core.application.mcp_connection_service import McpConnectionService
 from nervos_core.application.model_providers import ModelProviderCatalog
 from nervos_core.application.run_cancellation import RunCancellationService
+from nervos_core.application.triggers import TriggerManagementService
 
 from nervos_api.api.cookies import SESSION_COOKIE_NAME
 from nervos_api.api.errors import InvalidOrigin
@@ -54,6 +55,11 @@ def get_run_cancellation_service(request: Request) -> RunCancellationService:
 def get_mcp_connection_service(request: Request) -> McpConnectionService:
     """Return the owner-scoped MCP connection service; routes never build one."""
     return cast(McpConnectionService, request.app.state.mcp_connection_service)
+
+
+def get_trigger_management_service(request: Request) -> TriggerManagementService:
+    """Return the owner-scoped trigger management service; routes never build one."""
+    return cast(TriggerManagementService, request.app.state.trigger_management_service)
 
 
 def get_model_provider_catalog(request: Request) -> ModelProviderCatalog:
@@ -98,6 +104,10 @@ ModelProviderCatalogDependency = Annotated[
 McpConnectionServiceDependency = Annotated[
     McpConnectionService,
     Depends(get_mcp_connection_service),
+]
+TriggerManagementDependency = Annotated[
+    TriggerManagementService,
+    Depends(get_trigger_management_service),
 ]
 OriginDependency = Annotated[None, Depends(require_configured_origin)]
 CurrentUserDependency = Annotated[PublicUser, Depends(get_current_user)]

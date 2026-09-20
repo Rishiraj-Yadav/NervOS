@@ -31,9 +31,17 @@ from nervos_core.application.model_providers import (
 )
 from nervos_core.application.run_cancellation import RunNotCancellable
 from nervos_core.application.tool_permissions import McpConnectionNotFound
+from nervos_core.application.triggers import (
+    TriggerConfigConflict,
+    TriggerHasHistory,
+    TriggerNotEditable,
+    TriggerNotFound,
+)
 from nervos_core.application.trusted_chat import UnknownAgentHandler
 from nervos_core.domain.agents import InvalidAgentDefinitionId, InvalidAgentInstance
 from nervos_core.domain.runs import InvalidRun
+from nervos_core.domain.scheduling import ScheduleCalculationError
+from nervos_core.domain.triggers import InvalidTrigger
 
 from nervos_api.api.schemas import ErrorDetail, ErrorResponse
 
@@ -156,6 +164,28 @@ AGENT_ERROR_MAP: dict[type[Exception], tuple[int, str, str]] = {
         503,
         "service_unavailable",
         "NervOS storage is temporarily unavailable.",
+    ),
+    TriggerNotFound: (404, "trigger_not_found", "The trigger was not found."),
+    TriggerHasHistory: (
+        409,
+        "trigger_has_history",
+        "This trigger has occurrences and cannot be deleted.",
+    ),
+    TriggerNotEditable: (
+        409,
+        "trigger_not_editable",
+        "This change is not permitted for the trigger's current state.",
+    ),
+    TriggerConfigConflict: (
+        409,
+        "stale_trigger",
+        "The trigger changed since it was read; re-read it and retry.",
+    ),
+    InvalidTrigger: (422, "invalid_trigger", "The trigger configuration is invalid."),
+    ScheduleCalculationError: (
+        422,
+        "invalid_schedule",
+        "The schedule could not be evaluated.",
     ),
 }
 

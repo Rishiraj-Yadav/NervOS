@@ -7,6 +7,7 @@ from nervos_core.application.mcp_connections import McpConnectionRow
 from nervos_core.domain.agents import AgentInstance, InvalidAgentInstance
 from nervos_core.domain.jobs import JobStatus, RunEvent, RunEventType
 from nervos_core.domain.runs import ModelUsage, Run, RunStatus
+from nervos_core.domain.triggers import TriggerDefinition, TriggerOccurrence
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 
@@ -378,3 +379,234 @@ class McpConnectionDeletedResponse(BaseModel):
     """Confirmation that a connection and its private definitions were removed."""
 
     deleted: Literal[True] = True
+
+
+# ------------------------------------------------------------------------------------------------
+# Stage E4 trigger management
+# ------------------------------------------------------------------------------------------------
+
+TriggerKindLiteral = Literal["one_time", "interval", "cron", "webhook", "event"]
+
+_TRIGGER_KIND_FIELDS = (
+    "run_at",
+    "interval_seconds",
+    "cron_expression",
+    "timezone",
+    "event_type",
+)
+
+
+class TriggerCreateRequest(BaseModel):
+    """One discriminated trigger creation request.
+
+    The discriminator is ``kind``; each kind accepts exactly its own fields and every other
+    kind-specific field must be absent. All server-controlled fields -- identifiers, owner,
+    revisions, timestamps, next fire time, webhook locator, secret material -- are structurally
+    impossible to supply, because ``extra="forbid"`` rejects them before any handler runs.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: TriggerKindLiteral
+    agent_instance_id: Annotated[int, Field(gt=0)]
+    display_name: Annotated[str, Field(min_length=1, max_length=400)]
+    input_text: Annotated[str, Field(min_length=1, max_length=4000)]
+    enabled: bool = True
+    run_at: datetime | None = None
+    interval_seconds: Annotated[int | None, Field(ge=60, le=31_536_000)] = None
+    cron_expression: Annotated[str | None, Field(min_length=1, max_length=128)] = None
+    timezone: Annotated[str | None, Field(min_length=1, max_length=64)] = None
+    event_type: Annotated[str | None, Field(min_length=1, max_length=64)] = None
+
+    @model_validator(mode="after")
+    def _kind_shape(self) -> "TriggerCreateRequest":
+        if self.kind == "one_time":
+            self._require_exactly("run_at")
+        elif self.kind == "interval":
+            self._require_exactly("interval_seconds")
+        elif self.kind == "cron":
+            if self.cron_expression is None:
+                raise ValueError("a cron trigger requires cron_expression")
+            if self.timezone is None:
+                raise ValueError("a cron trigger requires a timezone")
+            for field in _TRIGGER_KIND_FIELDS:
+                if (
+                    field not in {"cron_expression", "timezone"}
+                    and getattr(self, field) is not None
+                ):
+                    raise ValueError(f"a {self.kind} trigger carries no {field}")
+        elif self.kind == "webhook":
+            self._require_none()
+        else:
+            self._require_exactly("event_type")
+        return self
+
+    def _require_exactly(self, name: str) -> None:
+        if getattr(self, name) is None:
+            raise ValueError(f"a {self.kind} trigger requires {name}")
+        for other in _TRIGGER_KIND_FIELDS:
+            if other != name and getattr(self, other) is not None:
+                raise ValueError(f"a {self.kind} trigger carries no {other}")
+
+    def _require_none(self) -> None:
+        for field in _TRIGGER_KIND_FIELDS:
+            if getattr(self, field) is not None:
+                raise ValueError(f"a webhook trigger carries no {field}")
+
+
+class TriggerUpdateRequest(BaseModel):
+    """One partial trigger edit, guarded by the defining revision the caller last saw.
+
+    ``display_name`` and ``input_text`` are independently optional. The kind-specific defining
+    configuration is validated against the trigger's own kind by the route, because a body cannot
+    name its target's kind; a schedule edit supplies that kind's complete field set or none of it,
+    so a partial schedule change can never silently erase a field.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_config_revision: Annotated[int, Field(gt=0)]
+    display_name: Annotated[str | None, Field(min_length=1, max_length=400)] = None
+    input_text: Annotated[str | None, Field(min_length=1, max_length=4000)] = None
+    run_at: datetime | None = None
+    interval_seconds: Annotated[int | None, Field(ge=60, le=31_536_000)] = None
+    cron_expression: Annotated[str | None, Field(min_length=1, max_length=128)] = None
+    timezone: Annotated[str | None, Field(min_length=1, max_length=64)] = None
+    event_type: Annotated[str | None, Field(min_length=1, max_length=64)] = None
+
+
+class TriggerSummaryResponse(BaseModel):
+    """The compact owner-safe representation a trigger list row carries.
+
+    There is deliberately no ``input_text`` here -- a list of automations does not need every
+    instruction -- and there is never a secret digest, a plaintext secret, or any credential
+    material.
+    """
+
+    id: int
+    agent_instance_id: int
+    kind: str
+    display_name: str
+    enabled: bool
+    config_revision: int
+    next_fire_at: datetime | None
+    event_type: str | None
+    webhook_path: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_domain(cls, trigger: TriggerDefinition) -> "TriggerSummaryResponse":
+        return cls(
+            id=trigger.id,
+            agent_instance_id=trigger.agent_instance_id,
+            kind=trigger.kind.value,
+            display_name=trigger.display_name,
+            enabled=trigger.enabled,
+            config_revision=trigger.config_revision,
+            next_fire_at=trigger.next_fire_at,
+            event_type=trigger.event_type,
+            webhook_path=None if trigger.public_id is None else f"/hooks/v1/{trigger.public_id}",
+            created_at=trigger.created_at,
+            updated_at=trigger.updated_at,
+        )
+
+
+class TriggerDetailResponse(TriggerSummaryResponse):
+    """The full owner-safe representation: everything the owner configured, nothing hidden."""
+
+    input_text: str
+    run_at: datetime | None = None
+    interval_seconds: int | None = None
+    cron_expression: str | None = None
+    timezone: str | None = None
+    secret_created_at: datetime | None = None
+
+    @classmethod
+    def from_domain(cls, trigger: TriggerDefinition) -> "TriggerDetailResponse":  # type: ignore[override]
+        return cls(
+            id=trigger.id,
+            agent_instance_id=trigger.agent_instance_id,
+            kind=trigger.kind.value,
+            display_name=trigger.display_name,
+            enabled=trigger.enabled,
+            config_revision=trigger.config_revision,
+            next_fire_at=trigger.next_fire_at,
+            event_type=trigger.event_type,
+            webhook_path=None if trigger.public_id is None else f"/hooks/v1/{trigger.public_id}",
+            created_at=trigger.created_at,
+            updated_at=trigger.updated_at,
+            input_text=trigger.input_text,
+            run_at=trigger.run_at,
+            interval_seconds=trigger.interval_seconds,
+            cron_expression=trigger.cron_expression,
+            timezone=trigger.timezone,
+            secret_created_at=trigger.secret_created_at,
+        )
+
+
+class TriggerPageResponse(BaseModel):
+    """One newest-first page of owned triggers."""
+
+    items: list[TriggerSummaryResponse]
+    next_before_id: int | None
+
+
+class TriggerOccurrenceResponse(BaseModel):
+    """One safe occurrence-history row.
+
+    It exposes the materialization outcome and its Run link, and never the payload or its digest,
+    the instruction, a secret, or an internal error message.
+    """
+
+    id: int
+    trigger_definition_id: int
+    trigger_revision: int
+    status: str
+    run_id: int | None
+    skip_code: str | None
+    nominal_at: datetime | None
+    event_id: str | None
+    payload_bytes: int | None
+    occurred_at: datetime
+    created_at: datetime
+
+    @classmethod
+    def from_domain(cls, occurrence: TriggerOccurrence) -> "TriggerOccurrenceResponse":
+        return cls(
+            id=occurrence.id,
+            trigger_definition_id=occurrence.trigger_definition_id,
+            trigger_revision=occurrence.trigger_revision,
+            status=occurrence.status.value,
+            run_id=occurrence.run_id,
+            skip_code=occurrence.skip_code,
+            nominal_at=occurrence.nominal_at,
+            event_id=occurrence.event_id,
+            payload_bytes=occurrence.payload_bytes,
+            occurred_at=occurrence.occurred_at,
+            created_at=occurrence.created_at,
+        )
+
+
+class TriggerOccurrencePageResponse(BaseModel):
+    """One newest-first page of one trigger's occurrence history."""
+
+    items: list[TriggerOccurrenceResponse]
+    next_before_id: int | None
+
+
+class TriggerDeletedResponse(BaseModel):
+    """Confirmation that a trigger with no history was removed."""
+
+    deleted: Literal[True] = True
+
+
+class IssuedWebhookResponse(BaseModel):
+    """The one response that ever carries a plaintext webhook secret.
+
+    ``secret`` is returned exactly once, on create and on rotate; every other representation of
+    this trigger excludes it. The route answers with ``Cache-Control: no-store``.
+    """
+
+    trigger: TriggerDetailResponse
+    secret: str
