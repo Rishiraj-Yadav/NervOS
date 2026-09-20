@@ -278,9 +278,7 @@ def test_event_discovery_is_one_index_seek(rig: PlanRig) -> None:
         )
 
     assert len(matches) == 1
-    plan = plan_for(
-        rig.engine, captured.one("trigger_definitions.event_type = ?", "SELECT")
-    )
+    plan = plan_for(rig.engine, captured.one("trigger_definitions.event_type = ?", "SELECT"))
     assert "ix_trigger_definitions_event_lookup" in plan, plan
     assert "SCAN trigger_definitions" not in plan, plan
 

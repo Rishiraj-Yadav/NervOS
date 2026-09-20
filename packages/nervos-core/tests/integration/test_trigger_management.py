@@ -104,9 +104,7 @@ def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Rig]:
         built.engine.dispose()
 
 
-def one_time(
-    rig: Rig, *, enabled: bool = True, run_at: datetime = ONCE
-):
+def one_time(rig: Rig, *, enabled: bool = True, run_at: datetime = ONCE):
     return rig.service.create_trigger(
         OWNER,
         agent_instance_id=AGENT,
