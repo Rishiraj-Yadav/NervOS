@@ -14,6 +14,8 @@ import pytest
 from nervos_core.application.webhooks import (
     WebhookDelivery,
     WebhookDeliveryKind,
+    WebhookDeliveryResult,
+    WebhookDeliveryService,
 )
 from nervos_core.infrastructure.database import create_sqlite_engine
 from nervos_core.infrastructure.database.triggers import SqlAlchemyTriggerPersistence
@@ -34,13 +36,13 @@ def _counts(engine: Engine) -> dict[str, int]:
 
 
 def _deliver(
-    service,
+    service: WebhookDeliveryService,
     *,
     public_id: str,
     secret: str,
     body: bytes,
     idempotency_key: str,
-):
+) -> WebhookDeliveryResult:
     return service.receive(
         WebhookDelivery(
             public_id=public_id,
