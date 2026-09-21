@@ -510,3 +510,60 @@ def test_listing_is_newest_first_and_keyset_continuable(rig: Rig) -> None:
     assert [trigger.id for trigger in listed] == [second.id, first.id]
     assert rig.service.list_triggers(OWNER, limit=1, before_id=None)[0].id == second.id
     assert rig.service.list_triggers(OWNER, limit=20, before_id=second.id)[0].id == first.id
+
+
+def test_e5_management_matrix_keeps_all_five_kinds_owner_scoped(rig: Rig) -> None:
+    """The integrated management surface exposes every kind without crossing owners."""
+    one_time_trigger = one_time(rig)
+    interval_trigger = rig.service.create_trigger(
+        OWNER,
+        agent_instance_id=AGENT,
+        display_name="Interval",
+        input_text="interval work",
+        kind=TriggerKind.INTERVAL,
+        schedule=ScheduleSpec.interval(INTERVAL),
+    )
+    cron_trigger = rig.service.create_trigger(
+        OWNER,
+        agent_instance_id=AGENT,
+        display_name="Cron",
+        input_text="cron work",
+        kind=TriggerKind.CRON,
+        schedule=ScheduleSpec.cron("0 9 * * *", "UTC"),
+    )
+    webhook = rig.service.create_webhook(
+        OWNER,
+        agent_instance_id=AGENT,
+        display_name="Webhook",
+        input_text="webhook work",
+    )
+    event_trigger = rig.service.create_trigger(
+        OWNER,
+        agent_instance_id=AGENT,
+        display_name="Event",
+        input_text="event work",
+        kind=TriggerKind.EVENT,
+        event_type="device.reading",
+    )
+
+    listed = rig.service.list_triggers(OWNER, limit=10, before_id=None)
+    assert {trigger.kind for trigger in listed} == {
+        TriggerKind.ONE_TIME,
+        TriggerKind.INTERVAL,
+        TriggerKind.CRON,
+        TriggerKind.WEBHOOK,
+        TriggerKind.EVENT,
+    }
+    assert {trigger.id for trigger in listed} == {
+        one_time_trigger.id,
+        interval_trigger.id,
+        cron_trigger.id,
+        webhook.trigger.id,
+        event_trigger.id,
+    }
+    for trigger in listed:
+        assert rig.service.get_trigger(OWNER, trigger.id).id == trigger.id
+
+    assert rig.service.list_triggers(OTHER_OWNER, limit=10, before_id=None) == ()
+    with pytest.raises(TriggerNotFound):
+        rig.service.get_trigger(OTHER_OWNER, event_trigger.id)
