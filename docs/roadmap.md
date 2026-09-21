@@ -54,9 +54,11 @@ engine and no second worker.
 owner-scoped trigger management, occurrence history, secure webhook delivery, scheduler recovery,
 and integrated acceptance/closeout without adding a second execution path.
 
-## Stage F — Agent sessions and memory
+## Stage F — Conversations, context, and memory
 
-Conversation sessions, messages, session summaries, agent-private memory, user profile memory, retrieval/writing policy, memory UI.
+Conversations, messages, deterministic context assembly, agent-private memory, user profile memory, retrieval/writing policy, memory UI. The canonical plan and frozen architecture are `docs/stage-f/README.md` with ADRs 0021–0023.
+
+**F0 — architecture, protocol, safety, and lifecycle freeze — is complete and externally accepted.** F1 (durable Conversations, Turns, Messages, and Run linkage) is next; no Stage-F runtime feature is implemented yet.
 
 Outcome: persistent useful agent context.
 

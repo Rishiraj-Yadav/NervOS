@@ -46,15 +46,12 @@ Do not implement any feature belonging to a future stage or milestone without ex
 authorization for that milestone. A capability absent from the current status document
 is not implemented, regardless of how the target architecture describes it.
 
-Capabilities that remain outside every authorized milestone so far, and are therefore
-still unimplemented:
+`docs/implementation-status.md` is the single authoritative statement of delivered
+state for every capability: what is implemented, accepted, and current. Do not keep a
+static list of "unimplemented capabilities" here — it goes stale as stages land. Before
+claiming a feature exists or is missing, verify it against that document (and, for Stage F,
+the Stage-F master plan) rather than guessing from target architecture.
 
-- agent runtime, durable jobs, workers, queues, scheduling, and event triggers
-- MCP gateway and tool execution
-- scoped memory and conversation sessions
-- marketplace and agent package installation
-- multi-agent execution, IoT, and multi-user management
-- persistent secret management
 
 ## Architecture
 
@@ -64,10 +61,10 @@ Major boundaries:
 
 - `apps/api` — HTTP/control-plane interface
 - `apps/web` — local NervOS dashboard
-- `apps/worker` — execution worker entrypoint later
+- `apps/worker` — execution worker entrypoint
 - `packages/nervos-core` — core domain/application logic
 - `packages/nervos-sdk` — third-party Agent SDK later
-- `packages/nervos-mcp` — MCP integration later
+- `packages/nervos-mcp` — MCP integration
 - `packages/nervos-models` — concrete model-provider adapters (currently `anthropic` and `openai`)
 
 The API layer may depend on nervos-core.
@@ -196,3 +193,17 @@ Read `docs/implementation-status.md` before starting major work.
 Update it after completing a milestone.
 
 Do not mark a milestone complete until its acceptance criteria actually pass.
+
+## Stage F
+
+Stage F is governed by the frozen master plan `docs/stage-f/README.md` and accepted
+ADRs 0021–0023. Before any Stage-F change:
+
+1. Read `docs/stage-f/README.md` and the accepted Stage-F ADRs.
+2. Run `git hash-object docs/stage-f/README.md` and report `Stage-F plan blob: <hash>`.
+3. Verify the current milestone and that its predecessor is complete.
+
+Do not start a Stage-F milestone without explicit authorization for that milestone.
+On any conflict with the frozen Stage-F architecture, stop and report
+`STAGE F ARCHITECTURE CHANGE REQUEST — <issue>` rather than silently deviating from
+the accepted plan.
