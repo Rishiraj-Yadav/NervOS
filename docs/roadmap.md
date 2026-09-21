@@ -50,9 +50,9 @@ occurrence submits an ordinary Run through the one existing acceptance seam. The
 `scheduler-to-job` path that mints execution obligations directly, and Stage E adds no queue, no retry
 engine and no second worker.
 
-The remaining milestones are **E4** (internal events, trigger management and occurrence history,
-and a minimal Automations surface) and **E5** (integrated acceptance and closeout). **E0 through E3
-are complete and externally accepted.**
+**E0 through E5 are complete and externally accepted.** Stage E now provides bounded internal events,
+owner-scoped trigger management, occurrence history, secure webhook delivery, scheduler recovery,
+and integrated acceptance/closeout without adding a second execution path.
 
 ## Stage F — Agent sessions and memory
 

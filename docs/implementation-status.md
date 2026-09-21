@@ -52,7 +52,7 @@ The next milestone is **E5 — integrated Stage-E acceptance, security, recovery
 - [x] E2 — Scheduler: one-time / interval / cron, timezone, misfire, multi-instance, restart
 - [x] E3 — Webhook ingress, secret authentication and rotation, idempotency
 - [x] E4 — Internal events, trigger management and occurrence history, minimal Automations surface
-- [ ] E5 — Integrated acceptance and Stage-E closeout
+- [x] E5 — Integrated acceptance and Stage-E closeout
 
 **E0 is architecture frozen and externally accepted.** It delivered governance only and changed no
 runtime behaviour. It fixed: that **Stage E decides when a Run exists while Stages C and D continue to
@@ -976,8 +976,8 @@ deployment is made.
 
 C7 and C8 are complete and externally accepted, and Stage C — the persistent execution engine — is **complete**.
 
-E0 through E4 are complete and externally accepted. The next milestone is **E5 — integrated Stage-E
-acceptance, security, recovery, and documentation closeout**.
+E0 through E5 are complete and externally accepted. Stage E is closed: integrated acceptance,
+security, recovery, and documentation verification preserve the one ordinary Run/Job execution seam.
 
 C7 makes the kernel legible without giving it any new authority. An owner can read their Run's durable execution timeline through one owner-scoped, read-only endpoint, ordered by the Run-local `sequence` the writers allocated, paginated by a keyset cursor rather than an offset so a concurrent append can never be skipped. Run responses additionally carry a derived execution phase — the Job's own durable status, verbatim, with a retry instant only while one is pending — which is what finally distinguishes "executing now" from "waiting to retry". Both are computed per read and never persisted, and no module that mutates execution reads them: observability is a projection, never a control. The dashboard gains an expandable timeline, incremental polling, and a polling lifetime that no longer abandons a live Run after roughly 300 seconds. C7 added **no migration**: the existing `UNIQUE(run_id, sequence)` index already serves the pagination predicate as a bounded range seek, so the migration head remains `0006_stage_c6_queue_partitions`.
 
