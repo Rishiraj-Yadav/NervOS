@@ -26,8 +26,8 @@ from sqlalchemy import Engine
 
 from nervos_scheduler.config import SchedulerSettings
 
-#: The one migration revision this process understands. F1 ships migration 0009.
-EXPECTED_SCHEMA_REVISION = "0009_stage_f1_conversations"
+#: The one migration revision this process understands. F2 ships migration 0010.
+EXPECTED_SCHEMA_REVISION = "0010_stage_f2_context_snapshots_and_compactions"
 
 
 def utc_now() -> datetime:

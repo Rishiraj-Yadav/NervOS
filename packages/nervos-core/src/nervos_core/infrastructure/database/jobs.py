@@ -26,7 +26,7 @@ import os
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import ColumnElement, Connection, Engine, and_, func, insert, or_, select, update
@@ -68,6 +68,11 @@ from nervos_core.application.tool_invocations import (
     InvocationStatus,
 )
 from nervos_core.domain.agents import AgentDefinitionId
+from nervos_core.domain.context import (
+    ContextSnapshotData,
+    deserialize_history_messages,
+    deserialize_id_list,
+)
 from nervos_core.domain.jobs import (
     AttemptStatus,
     JobStatus,
@@ -87,9 +92,11 @@ from nervos_core.domain.runs import (
 from nervos_core.infrastructure.database.models import (
     AgentInstanceRecord,
     AgentToolGrantRecord,
+    ConversationRunLinkRecord,
     JobAttemptRecord,
     JobRecord,
     QueuePartitionRecord,
+    RunContextSnapshotRecord,
     RunEventRecord,
     RunRecord,
     ToolInvocationRecord,
@@ -101,6 +108,15 @@ from nervos_core.infrastructure.database.run_events import (
     sequence_base,
 )
 from nervos_core.infrastructure.database.transaction import TransactionRunner
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=datetime.now().astimezone().tzinfo or UTC)
+    return value.astimezone(UTC)
+
 
 # Job states that occupy durable queue capacity. C2 reserved `retry_wait` here before anything
 # wrote it, so C4 activating that state cannot raise the pending ceiling by accident.
@@ -2458,6 +2474,77 @@ class SqlAlchemyJobExecutionPersistence:
             created_at=now,
         )
         return self._reclaimed(ReclamationKind.POST_START_AMBIGUOUS, candidate)
+
+    # -- F2 context snapshot and link loading ------------------------------------------
+
+    def load_run_context_snapshot(self, run_id: int) -> ContextSnapshotData | None:
+        def operation(connection: Connection) -> ContextSnapshotData | None:
+            row = (
+                connection.execute(
+                    select(RunContextSnapshotRecord).where(
+                        RunContextSnapshotRecord.run_id == run_id
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
+                return None
+            created = _as_utc(row["created_at"])
+            assert created is not None
+            comp_ver = row["compaction_version"]
+            comp_start = row["compaction_source_start"]
+            comp_end = row["compaction_source_end"]
+            inj_comp = row["injected_compaction_text"]
+            return ContextSnapshotData(
+                run_id=int(row["run_id"]),
+                turn_id=int(row["turn_id"]),
+                schema_version=int(row["schema_version"]),
+                builder_version=str(row["builder_version"]),
+                current_user_text=str(row["current_user_text"]),
+                history_messages=deserialize_history_messages(str(row["history_messages"])),
+                selected_turn_ids=deserialize_id_list(str(row["selected_turn_ids"])),
+                selected_message_ids=deserialize_id_list(str(row["selected_message_ids"])),
+                compaction_version=int(comp_ver) if comp_ver is not None else None,
+                compaction_source_start=int(comp_start) if comp_start is not None else None,
+                compaction_source_end=int(comp_end) if comp_end is not None else None,
+                injected_compaction_text=str(inj_comp) if inj_comp is not None else None,
+                agent_key=str(row["agent_key"]),
+                agent_definition_version=str(row["agent_definition_version"]),
+                max_total_bytes=int(row["max_total_bytes"]),
+                max_total_code_points=int(row["max_total_code_points"]),
+                actual_total_bytes=int(row["actual_total_bytes"]),
+                actual_total_code_points=int(row["actual_total_code_points"]),
+                rendered_context=str(row["rendered_context"]),
+                content_digest=bytes(row["content_digest"]),
+                created_at=created,
+            )
+
+        return self._runner.run(operation)
+
+    def load_conversation_run_link(self, run_id: int) -> tuple[int, int, int, int, str, str] | None:
+        def operation(connection: Connection) -> tuple[int, int, int, int, str, str] | None:
+            row = (
+                connection.execute(
+                    select(ConversationRunLinkRecord).where(
+                        ConversationRunLinkRecord.run_id == run_id
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
+                return None
+            return (
+                int(row["id"]),
+                int(row["turn_id"]),
+                int(row["run_id"]),
+                int(row["ordinal"]),
+                str(row["role"]),
+                str(row["context_mode"]),
+            )
+
+        return self._runner.run(operation)
 
     def _append_recovery_events(
         self,

@@ -46,12 +46,14 @@ APPLICATION_TABLES = {
     # webhook ingress and no event publication reads or writes them yet.
     "trigger_definitions",
     "trigger_occurrences",
-    # Stage F (F1): the durable conversation execution-protocol tables. Durable records only -- no
-    # ContextBuilder, compaction, snapshot, or memory tables yet.
+    # Stage F (F1): the durable conversation execution-protocol tables.
     "conversations",
     "conversation_turns",
     "conversation_messages",
     "conversation_run_links",
+    # Stage F (F2): context snapshots and compactions.
+    "run_context_snapshots",
+    "conversation_compactions",
 }
 DEFAULT_DATABASE = (Path.home() / ".nervos" / "nervos.db").resolve(strict=False)
 
@@ -113,7 +115,7 @@ def test_upgrade_drift_downgrade_and_reupgrade(
         assert application_tables(engine) == APPLICATION_TABLES
         with engine.connect() as connection:
             current_revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
-            assert current_revision == "0009_stage_f1_conversations"
+            assert current_revision == F2_REVISION
             assert connection.scalar(text("PRAGMA foreign_keys")) == 1
             assert connection.scalar(text("PRAGMA busy_timeout")) == 5000
         command.check(config)
@@ -1242,7 +1244,7 @@ def test_the_c5_downgrade_is_clean_when_nothing_needs_cancellation(
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM runs")) == 1
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                "0009_stage_f1_conversations"
+                F2_REVISION
             )
     finally:
         engine.dispose()
@@ -1328,7 +1330,7 @@ def test_migration_0006_creates_only_the_fairness_table(
         assert "queue_partitions" in application_tables(engine)
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                "0009_stage_f1_conversations"
+                F2_REVISION
             )
             columns = [
                 str(row[1])
@@ -1468,6 +1470,7 @@ REVIEWED_MIGRATIONS = [
     "0007_stage_d1_tool_capability_audit.py",
     "0008_stage_e1_trigger_scheduling.py",
     "0009_stage_f1_conversations.py",
+    "0010_stage_f2_context_snapshots_and_compactions.py",
 ]
 
 
@@ -1482,15 +1485,15 @@ def test_c7_consumed_no_migration_number() -> None:
 
     Stage D's D1 later consumed `0007` for the tool, capability and audit schema, and Stage E's E1
     has since consumed `0008` for the trigger tables. F1 later consumed `0009` for the conversation
-    tables. Neither weakens this claim, and the claim is not rewritten to accommodate them: the
-    migrations that follow C6's are exactly D1's, E1's, and F1's, and the number C7 could have taken
-    is provably still not C7's.
+    tables, and F2 consumed `0010` for context snapshots and compactions. None weakens this claim,
+    and the claim is not rewritten to accommodate them: the migrations that follow C6's are exactly
+    D1's, E1's, F1's, and F2's, and the number C7 could have taken is provably still not C7's.
     """
     names = sorted(path.name for path in VERSIONS.glob("*.py"))
 
     assert names == REVIEWED_MIGRATIONS
-    assert names[-1] == "0009_stage_f1_conversations.py"
-    assert not any(name.startswith("0010") for name in names)
+    assert names[-1] == "0010_stage_f2_context_snapshots_and_compactions.py"
+    assert not any(name.startswith("0011") for name in names)
 
 
 def test_the_run_event_index_set_is_the_same_one_c6_shipped(
@@ -1525,6 +1528,7 @@ def test_the_run_event_index_set_is_the_same_one_c6_shipped(
 
 E1_REVISION = "0008_stage_e1_trigger_scheduling"
 F1_REVISION = "0009_stage_f1_conversations"
+F2_REVISION = "0010_stage_f2_context_snapshots_and_compactions"
 # The E1 downgrade lands at D1, not at C6: `0008`'s `down_revision` is `0007`, so downgrading E1
 # exercises exactly one migration's downgrade. Asking for `0006` would additionally run D1's own
 # downgrade, which is D1's contract to prove (see `test_migrations_d1.py`) and not E1's.
@@ -1683,7 +1687,189 @@ def test_the_stage_e_downgrade_is_clean_when_nothing_needs_keeping(
     engine = create_sqlite_engine(database_path)
     try:
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == F1_REVISION
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == F2_REVISION
+    finally:
+        engine.dispose()
+
+
+def test_migration_0010_creates_snapshots_and_compactions_and_context_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """0010 adds run_context_snapshots, conversation_compactions, and context_mode on links."""
+    database_path = tmp_path / "f2-migration.db"
+    config = alembic_config(database_path, monkeypatch)
+
+    # 1. Upgrade to 0009
+    command.upgrade(config, F1_REVISION)
+    engine = create_sqlite_engine(database_path)
+    try:
+        assert "run_context_snapshots" not in application_tables(engine)
+        assert "conversation_compactions" not in application_tables(engine)
+
+        # Seed F1 conversation, turn, run, and link
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO users(username,password_hash,role,is_active,created_at,updated_at)"
+                    " VALUES('owner',X'00','admin',1,'2026-09-22 12:00:00','2026-09-22 12:00:00')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO agent_instances(owner_user_id,agent_key,agent_definition_version,"
+                    "display_name,enabled,model_provider,model_name,created_at,updated_at)"
+                    " VALUES(1,'nervos.chat','1','Agent',1,'anthropic','opaque/model',"
+                    "'2026-09-22 12:00:00','2026-09-22 12:00:00')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO conversations(owner_user_id,agent_instance_id,"
+                    "title,created_at,updated_at)"
+                    " VALUES(1,1,'F1 Conversation',"
+                    "'2026-09-22 12:00:00','2026-09-22 12:00:00')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO conversation_turns(conversation_id,sequence,state,"
+                    "client_message_id,content_digest,created_at,started_at)"
+                    " VALUES(1,1,'running','msg-1',"
+                    "X'0000000000000000000000000000000000000000000000000000000000000000',"
+                    "'2026-09-22 12:00:00','2026-09-22 12:00:00')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO runs(agent_instance_id,status,agent_key,"
+                    "agent_definition_version,"
+                    "model_provider,model_name,input_text,input_max_bytes,"
+                    "input_max_code_points,"
+                    "output_max_bytes,output_max_code_points,provider_timeout_ms,"
+                    "max_output_tokens,"
+                    "max_model_calls,created_at)"
+                    " VALUES(1,'created','nervos.chat','1','anthropic','opaque/model',"
+                    "'hello',8000,4000,"
+                    "32000,16000,60000,1024,1,'2026-09-22 12:00:00')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO conversation_run_links"
+                    "(turn_id,run_id,ordinal,role,created_at)"
+                    " VALUES(1,1,1,'initial','2026-09-22 12:00:00')"
+                )
+            )
+    finally:
+        engine.dispose()
+
+    # 2. Upgrade to 0010 (head)
+    command.upgrade(config, "head")
+    engine = create_sqlite_engine(database_path)
+    try:
+        assert application_tables(engine) == APPLICATION_TABLES
+        assert "run_context_snapshots" in application_tables(engine)
+        assert "conversation_compactions" in application_tables(engine)
+
+        with engine.connect() as conn:
+            assert conn.scalar(text("SELECT version_num FROM alembic_version")) == F2_REVISION
+
+            # Verify existing link backfilled with f1_single_turn
+            mode = conn.scalar(text("SELECT context_mode FROM conversation_run_links WHERE id = 1"))
+            assert mode == "f1_single_turn"
+
+            # Insert an F2 run + link + snapshot
+            conn.execute(
+                text(
+                    "INSERT INTO runs(agent_instance_id,status,agent_key,"
+                    "agent_definition_version,"
+                    "model_provider,model_name,input_text,input_max_bytes,input_max_code_points,"
+                    "output_max_bytes,output_max_code_points,provider_timeout_ms,max_output_tokens,"
+                    "max_model_calls,created_at)"
+                    " VALUES(1,'created','nervos.chat','1','anthropic','opaque/model','hello 2',"
+                    "8000,4000,"
+                    "32000,16000,60000,1024,1,'2026-09-22 12:00:00')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO conversation_run_links"
+                    "(turn_id,run_id,ordinal,role,context_mode,created_at)"
+                    " VALUES(1,2,2,'retry','f2_context_snapshot','2026-09-22 12:00:00')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO run_context_snapshots(run_id,turn_id,schema_version,"
+                    "builder_version,"
+                    "current_user_text,history_messages,selected_turn_ids,selected_message_ids,"
+                    "agent_key,agent_definition_version,max_total_bytes,max_total_code_points,"
+                    "actual_total_bytes,actual_total_code_points,rendered_context,"
+                    "content_digest,created_at)"
+                    " VALUES(2,1,1,'nervos.context.v1','hello 2','[]','[]','[]','nervos.chat','1',"
+                    "8000,4000,7,7,'hello 2',"
+                    "X'0000000000000000000000000000000000000000000000000000000000000000',"
+                    "'2026-09-22 12:00:00')"
+                )
+            )
+            # Insert a compaction
+            conn.execute(
+                text(
+                    "INSERT INTO conversation_compactions(conversation_id,version,"
+                    "source_start_sequence,"
+                    "source_end_sequence,content,content_digest,is_current,created_at)"
+                    " VALUES(1,1,1,1,'[Conversation Compaction v1]',"
+                    "X'0000000000000000000000000000000000000000000000000000000000000000',"
+                    "1,'2026-09-22 12:00:00')"
+                )
+            )
+
+            # Assert composite foreign key prevents mismatched turn_id on snapshot
+            with pytest.raises(IntegrityError):
+                conn.execute(
+                    text(
+                        "INSERT INTO conversation_turns(conversation_id,sequence,"
+                        "state,client_message_id,content_digest,created_at)"
+                        " VALUES(1,2,'running','msg-2',"
+                        "X'0000000000000000000000000000000000000000000000000000000000000000',"
+                        "'2026-09-22 12:00:00')"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "INSERT INTO run_context_snapshots(run_id,turn_id,"
+                        "schema_version,builder_version,"
+                        "current_user_text,history_messages,selected_turn_ids,"
+                        "selected_message_ids,"
+                        "agent_key,agent_definition_version,max_total_bytes,"
+                        "max_total_code_points,"
+                        "actual_total_bytes,actual_total_code_points,rendered_context,"
+                        "content_digest,created_at)"
+                        " VALUES(2,2,1,'nervos.context.v1','hello 2','[]','[]','[]',"
+                        "'nervos.chat','1',8000,4000,7,7,'hello 2',"
+                        "X'0000000000000000000000000000000000000000000000000000000000000000',"
+                        "'2026-09-22 12:00:00')"
+                    )
+                )
+
+            assert conn.exec_driver_sql("PRAGMA integrity_check").scalar() == "ok"
+            assert conn.exec_driver_sql("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        engine.dispose()
+
+    # 3. Test downgrade to 0009 and re-upgrade to 0010
+    command.downgrade(config, F1_REVISION)
+    engine = create_sqlite_engine(database_path)
+    try:
+        assert "run_context_snapshots" not in application_tables(engine)
+        assert "conversation_compactions" not in application_tables(engine)
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_sqlite_engine(database_path)
+    try:
+        assert application_tables(engine) == APPLICATION_TABLES
     finally:
         engine.dispose()
 

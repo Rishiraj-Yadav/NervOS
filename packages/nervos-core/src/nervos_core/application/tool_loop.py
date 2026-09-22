@@ -73,6 +73,7 @@ from nervos_core.application.tool_registry import (
 )
 from nervos_core.application.tool_schema import validate_instance
 from nervos_core.application.trusted_chat import ChatOutcome, final_chat_outcome
+from nervos_core.domain.context import ContextSnapshotData
 from nervos_core.domain.runs import Run, RunStatus
 from nervos_core.domain.tools import JsonValue, ToolSourceRef, canonical_json_text
 
@@ -269,6 +270,7 @@ class ToolLoop:
         run: Run,
         claim: ClaimHandle,
         elapsed_ms: int,
+        snapshot: ContextSnapshotData | None = None,
     ) -> ChatOutcome:
         """Run the loop and return the Run's final answer, or raise a normalized failure."""
         del elapsed_ms  # Measured by the coordinator; part of the handler contract only.
@@ -281,7 +283,7 @@ class ToolLoop:
         catalog = await self._assemble_catalog(run)
         state = _LoopState()
         while True:
-            response = await self._model_turn(completion, run, catalog, state)
+            response = await self._model_turn(completion, run, catalog, state, snapshot)
             state.usage = merge_usage(state.usage, response.usage)
             await self._persist_usage(claim, state)
 
@@ -329,6 +331,7 @@ class ToolLoop:
         run: Run,
         catalog: ToolCatalog,
         state: _LoopState,
+        snapshot: ContextSnapshotData | None = None,
     ) -> ModelResponse:
         """Issue one model turn, consuming model-call budget once per real provider request.
 
@@ -345,14 +348,20 @@ class ToolLoop:
         if state.model_calls >= limits.max_model_calls:
             raise ModelProviderError(TOOL_LOOP_LIMIT, usage=state.usage)
 
+        user_text = snapshot.current_user_text if snapshot is not None else run.input_text
+        history = snapshot.history_messages if snapshot is not None else ()
+        compaction = snapshot.injected_compaction_text if snapshot is not None else None
+
         request = ModelRequest(
             self._system_instruction,
-            run.input_text,
+            user_text,
             run.model_name,
             limits.max_output_tokens,
             limits.provider_timeout_ms,
             tools=catalog.schemas(),
             turns=tuple(state.turns),
+            history=history,
+            compaction_context=compaction,
         )
         retries = 0
         last_usage = state.usage

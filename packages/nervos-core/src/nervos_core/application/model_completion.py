@@ -6,6 +6,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Protocol
 
+from nervos_core.domain.context import HistoricalMessage
 from nervos_core.domain.runs import WORKER_RECOVERY_EXHAUSTED, ModelUsage
 from nervos_core.domain.tools import JsonValue
 
@@ -312,6 +313,8 @@ class ModelRequest:
     # Both default to empty, so a tool-free request is exactly the Stage B/C request it always was.
     tools: tuple[ToolSchema, ...] = ()
     turns: tuple[ConversationTurn, ...] = ()
+    history: tuple[HistoricalMessage, ...] = ()
+    compaction_context: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

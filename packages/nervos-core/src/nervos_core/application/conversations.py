@@ -9,6 +9,7 @@ from typing import Protocol
 from nervos_core.application.agents import AgentService
 from nervos_core.application.clock import Clock, require_utc
 from nervos_core.domain.agents import AgentDefinitionId
+from nervos_core.domain.context import ContextSnapshotData
 from nervos_core.domain.conversations import (
     Conversation,
     ConversationMessage,
@@ -126,6 +127,14 @@ class ConversationPersistence(Protocol):
     ) -> bool: ...
 
     def reconcile_unprojected_terminal_runs(self, now: datetime, limit: int = 50) -> int: ...
+
+    def load_run_context_snapshot(self, run_id: int) -> ContextSnapshotData | None: ...
+
+    def load_conversation_run_link(
+        self, run_id: int
+    ) -> tuple[int, int, int, int, str, str] | None: ...
+
+    def refresh_compaction(self, conversation_id: int, now: datetime) -> bool: ...
 
 
 class ConversationService:
@@ -267,3 +276,7 @@ class ConversationService:
     def reconcile_unprojected_terminal_runs(self, limit: int = 50) -> int:
         now = require_utc(self._clock())
         return self._persistence.reconcile_unprojected_terminal_runs(now, limit=limit)
+
+    def refresh_compaction(self, conversation_id: int) -> bool:
+        now = require_utc(self._clock())
+        return self._persistence.refresh_compaction(conversation_id, now=now)

@@ -24,6 +24,7 @@ from nervos_core.application.model_completion import (
 from nervos_core.application.tool_invocations import ClaimHandle
 from nervos_core.application.trusted_chat import ChatOutcome, TrustedAgentHandlerResolver
 from nervos_core.domain.agents import AgentDefinitionId
+from nervos_core.domain.context import ContextSnapshotData
 from nervos_core.domain.runs import ModelUsage, Run
 
 # Upper bound accepted by the signed 64-bit integer column used for elapsed milliseconds.
@@ -88,7 +89,12 @@ class ToolLoopHandler(Protocol):
     """
 
     async def run(
-        self, completion: ModelCompletion, run: Run, claim: ClaimHandle, elapsed_ms: int
+        self,
+        completion: ModelCompletion,
+        run: Run,
+        claim: ClaimHandle,
+        elapsed_ms: int,
+        snapshot: ContextSnapshotData | None = None,
     ) -> ChatOutcome: ...
 
 
@@ -106,7 +112,11 @@ class RunExecutor:
         self._tool_loop = tool_loop
 
     async def execute(
-        self, run: Run, completion: ModelCompletion, claim: ClaimHandle | None = None
+        self,
+        run: Run,
+        completion: ModelCompletion,
+        claim: ClaimHandle | None = None,
+        snapshot: ContextSnapshotData | None = None,
     ) -> ExecutionOutcome:
         """Run one bounded provider call and normalize its result or failure.
 
@@ -120,7 +130,7 @@ class RunExecutor:
         start = self._monotonic()
         try:
             async with asyncio.timeout(run.limits.provider_timeout_ms / 1000):
-                outcome: ChatOutcome = await self._invoke(run, completion, claim)
+                outcome: ChatOutcome = await self._invoke(run, completion, claim, snapshot)
         except TimeoutError:
             return self._failed(ModelProviderError(MODEL_TIMED_OUT), start)
         except ModelProviderError as error:
@@ -138,7 +148,11 @@ class RunExecutor:
         )
 
     async def _invoke(
-        self, run: Run, completion: ModelCompletion, claim: ClaimHandle | None
+        self,
+        run: Run,
+        completion: ModelCompletion,
+        claim: ClaimHandle | None,
+        snapshot: ContextSnapshotData | None = None,
     ) -> ChatOutcome:
         """Resolve the one handler this Run's snapshot selects.
 
@@ -150,10 +164,10 @@ class RunExecutor:
             handler = self._handlers.resolve(
                 AgentDefinitionId(run.agent_key, run.agent_definition_version)
             )
-            return await handler.run(completion, run, 0)
+            return await handler.run(completion, run, 0, snapshot=snapshot)
         if self._tool_loop is None or claim is None:
             raise ModelProviderError(INTERNAL_EXECUTION_ERROR)
-        return await self._tool_loop.run(completion, run, claim, 0)
+        return await self._tool_loop.run(completion, run, claim, 0, snapshot=snapshot)
 
     def _failed(self, error: ModelProviderError, start: int) -> ExecutionOutcome:
         return ExecutionOutcome(
