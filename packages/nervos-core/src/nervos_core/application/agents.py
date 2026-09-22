@@ -226,6 +226,22 @@ class AgentService:
         self._persistence.get_run(owner_user_id, run_id)
         return self._persistence.list_run_events(run_id, after_sequence, limit)
 
+    def prepare_submission(
+        self, owner_user_id: int, instance_id: int, input_text: str
+    ) -> tuple[AgentInstance, RunLimits]:
+        """Validate ownership, definition, provider, and input limits without submitting.
+
+        Shared by manual chat submission and conversational turn submission.
+        """
+        instance = self._persistence.get_instance(owner_user_id, instance_id)
+        definition = self._definitions.resolve(instance.definition_id)
+        if self._providers is None:
+            raise RuntimeError("agent execution resolvers are not configured")
+        if not self._providers.is_known(instance.model_provider):
+            raise UnknownModelProvider(instance.model_provider)
+        validate_input_text(input_text, definition.limits)
+        return instance, definition.limits
+
     def submit_run(self, owner_user_id: int, instance_id: int, input_text: str) -> Run:
         """Durably accept one Run without executing anything.
 
@@ -240,13 +256,7 @@ class AgentService:
         `BEGIN IMMEDIATE` transaction, so a rejected submission leaves no partial state and
         consumes no identifier.
         """
-        instance = self._persistence.get_instance(owner_user_id, instance_id)
-        definition = self._definitions.resolve(instance.definition_id)
-        if self._providers is None:
-            raise RuntimeError("agent execution resolvers are not configured")
-        if not self._providers.is_known(instance.model_provider):
-            raise UnknownModelProvider(instance.model_provider)
-        validate_input_text(input_text, definition.limits)
+        instance, limits = self.prepare_submission(owner_user_id, instance_id, input_text)
         if self._submissions is None:
             raise RuntimeError("durable submission is not configured")
         try:
@@ -254,7 +264,7 @@ class AgentService:
                 owner_user_id=owner_user_id,
                 agent_instance_id=instance_id,
                 input_text=input_text,
-                limits=definition.limits,
+                limits=limits,
                 definition_id=instance.definition_id,
                 now=require_utc(self._clock()),
             )

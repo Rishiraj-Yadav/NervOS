@@ -64,6 +64,7 @@ data/
 
 # Other local tools
 .serena/
+.agents/
 
 # Graphify: the generated code-graph report is a shared project artifact, but its
 # derived extraction caches are local state and are rebuilt on demand.

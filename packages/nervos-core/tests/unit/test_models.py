@@ -28,6 +28,10 @@ def test_metadata_contains_exact_application_tables() -> None:
         "tool_invocations",
         "trigger_definitions",
         "trigger_occurrences",
+        "conversations",
+        "conversation_turns",
+        "conversation_messages",
+        "conversation_run_links",
     }
 
 

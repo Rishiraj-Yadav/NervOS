@@ -6,6 +6,8 @@ import { AgentInstancePage } from "./pages/AgentInstancePage";
 import { AutomationsPage } from "./pages/AutomationsPage";
 import { AutomationPage, NewAutomationPage } from "./pages/AutomationPage";
 import { AgentInstancesPage } from "./pages/AgentInstancesPage";
+import { ConversationPage } from "./pages/ConversationPage";
+import { ConversationsPage } from "./pages/ConversationsPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { LoginPage } from "./pages/LoginPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
@@ -21,6 +23,8 @@ import {
 export function AutomationsRoute() { return <SessionView page="automations" />; }
 export function AutomationRoute() { return <SessionView page="automation" />; }
 export function NewAutomationRoute() { return <SessionView page="new-automation" />; }
+export function ConversationsRoute() { return <SessionView page="conversations" />; }
+export function ConversationRoute() { return <SessionView page="conversation" />; }
 
 type Session =
   | { kind: "unconfigured" }
@@ -77,7 +81,7 @@ export function NotFoundRoute() {
   return <NotFoundPage />;
 }
 
-function SessionView({ page }: { page: "home" | "setup" | "login" | "agents" | "agent" | "automations" | "automation" | "new-automation" }) {
+function SessionView({ page }: { page: "home" | "setup" | "login" | "agents" | "agent" | "automations" | "automation" | "new-automation" | "conversations" | "conversation" }) {
   const session = useOutletContext<Session>();
   const location = useLocation();
 
@@ -99,6 +103,8 @@ function SessionView({ page }: { page: "home" | "setup" | "login" | "agents" | "
   if (page === "automations") return <AutomationsPage />;
   if (page === "automation") return <AutomationPage />;
   if (page === "new-automation") return <NewAutomationPage />;
+  if (page === "conversations") return <ConversationsPage />;
+  if (page === "conversation") return <ConversationPage />;
   return <Navigate to="/" replace />;
 }
 

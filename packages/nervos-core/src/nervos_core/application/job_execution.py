@@ -273,6 +273,7 @@ class JobExecutionService:
         lease_duration: timedelta = LEASE_DURATION,
         heartbeat_interval: timedelta = HEARTBEAT_INTERVAL,
         drain_timeout: timedelta = LOCAL_TASK_DRAIN_TIMEOUT,
+        conversation_projection: Callable[..., object] | None = None,
     ) -> None:
         self._persistence = persistence
         self._executor = executor
@@ -283,6 +284,7 @@ class JobExecutionService:
         self._lease_duration = lease_duration
         self._heartbeat_interval = heartbeat_interval
         self._drain_timeout = drain_timeout
+        self._conversation_projection = conversation_projection
         # Local tasks this Worker stopped waiting for but could not terminate. They are held
         # only so their eventual result or exception is consumed rather than reported as an
         # unretrieved task exception; they carry no authority to persist anything.
@@ -509,6 +511,15 @@ class JobExecutionService:
                     return  # authority lost or state inconsistent: discard and strand
                 committed = None  # proven still ours and still uncommitted
             if committed is not None:
+                if self._conversation_projection is not None:
+                    with contextlib.suppress(Exception):
+                        await self._offload(
+                            self._conversation_projection,
+                            run_id=claim.run_id,
+                            status="succeeded",
+                            output_text=outcome.output_text,
+                            error_code=None,
+                        )
                 return
             if attempt + 1 < PERSISTENCE_FINALIZATION_ATTEMPTS:
                 await self._sleep(PERSISTENCE_FINALIZATION_BACKOFF_SECONDS[attempt])
@@ -558,6 +569,15 @@ class JobExecutionService:
                 if attempt + 1 < PERSISTENCE_FINALIZATION_ATTEMPTS:
                     await self._sleep(PERSISTENCE_FINALIZATION_BACKOFF_SECONDS[attempt])
                 continue
+            if self._conversation_projection is not None:
+                with contextlib.suppress(Exception):
+                    await self._offload(
+                        self._conversation_projection,
+                        run_id=claim.run_id,
+                        status="failed",
+                        output_text=None,
+                        error_code=outcome.error_code,
+                    )
             return
         # Bounded retries exhausted, or an unexplainable durable shape: strand exactly as C2
         # does, leaving the rows for C3 rather than fabricating an outcome.

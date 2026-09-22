@@ -46,6 +46,12 @@ APPLICATION_TABLES = {
     # webhook ingress and no event publication reads or writes them yet.
     "trigger_definitions",
     "trigger_occurrences",
+    # Stage F (F1): the durable conversation execution-protocol tables. Durable records only -- no
+    # ContextBuilder, compaction, snapshot, or memory tables yet.
+    "conversations",
+    "conversation_turns",
+    "conversation_messages",
+    "conversation_run_links",
 }
 DEFAULT_DATABASE = (Path.home() / ".nervos" / "nervos.db").resolve(strict=False)
 
@@ -107,7 +113,7 @@ def test_upgrade_drift_downgrade_and_reupgrade(
         assert application_tables(engine) == APPLICATION_TABLES
         with engine.connect() as connection:
             current_revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
-            assert current_revision == "0008_stage_e1_trigger_scheduling"
+            assert current_revision == "0009_stage_f1_conversations"
             assert connection.scalar(text("PRAGMA foreign_keys")) == 1
             assert connection.scalar(text("PRAGMA busy_timeout")) == 5000
         command.check(config)
@@ -1236,7 +1242,7 @@ def test_the_c5_downgrade_is_clean_when_nothing_needs_cancellation(
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM runs")) == 1
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                "0008_stage_e1_trigger_scheduling"
+                "0009_stage_f1_conversations"
             )
     finally:
         engine.dispose()
@@ -1322,7 +1328,7 @@ def test_migration_0006_creates_only_the_fairness_table(
         assert "queue_partitions" in application_tables(engine)
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                "0008_stage_e1_trigger_scheduling"
+                "0009_stage_f1_conversations"
             )
             columns = [
                 str(row[1])
@@ -1461,6 +1467,7 @@ REVIEWED_MIGRATIONS = [
     "0006_stage_c6_queue_partitions.py",
     "0007_stage_d1_tool_capability_audit.py",
     "0008_stage_e1_trigger_scheduling.py",
+    "0009_stage_f1_conversations.py",
 ]
 
 
@@ -1474,26 +1481,22 @@ def test_c7_consumed_no_migration_number() -> None:
     benefit, and a permanently wider reviewed schema.
 
     Stage D's D1 later consumed `0007` for the tool, capability and audit schema, and Stage E's E1
-    has since consumed `0008` for the trigger tables. Neither weakens this claim, and the claim is
-    not rewritten to accommodate them: the migrations that follow C6's are exactly D1's and E1's,
-    and the number C7 could have taken is provably still not C7's.
+    has since consumed `0008` for the trigger tables. F1 later consumed `0009` for the conversation
+    tables. Neither weakens this claim, and the claim is not rewritten to accommodate them: the
+    migrations that follow C6's are exactly D1's, E1's, and F1's, and the number C7 could have taken
+    is provably still not C7's.
     """
     names = sorted(path.name for path in VERSIONS.glob("*.py"))
 
     assert names == REVIEWED_MIGRATIONS
-    assert names[-1] == "0008_stage_e1_trigger_scheduling.py"
-    assert not any(name.startswith("0009") for name in names)
+    assert names[-1] == "0009_stage_f1_conversations.py"
+    assert not any(name.startswith("0010") for name in names)
 
 
 def test_the_run_event_index_set_is_the_same_one_c6_shipped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """C7 reads the implicit unique index rather than adding one of its own.
-
-    SQLAlchemy's inspector does not report SQLite's implicit autoindexes, which is exactly why the
-    Event read asserts its query *plan* instead: the index exists and is used, and it is not an
-    explicit object anyone can accidentally duplicate.
-    """
+    # C7 reads the implicit unique index rather than adding one of its own.
     database_path = tmp_path / "event-indexes.db"
     config = alembic_config(database_path, monkeypatch)
     command.upgrade(config, "head")
@@ -1521,6 +1524,7 @@ def test_the_run_event_index_set_is_the_same_one_c6_shipped(
 # ---------------------------------------------------------------------------------------
 
 E1_REVISION = "0008_stage_e1_trigger_scheduling"
+F1_REVISION = "0009_stage_f1_conversations"
 # The E1 downgrade lands at D1, not at C6: `0008`'s `down_revision` is `0007`, so downgrading E1
 # exercises exactly one migration's downgrade. Asking for `0006` would additionally run D1's own
 # downgrade, which is D1's contract to prove (see `test_migrations_d1.py`) and not E1's.
@@ -1528,7 +1532,7 @@ D1_REVISION = "0007_stage_d1_tool_capability_audit"
 
 
 def _seed_stage_e(engine: Engine, *, trigger: bool, occurrence: bool) -> None:
-    """Seed the minimum Stage E state a downgrade must refuse to destroy."""
+    # Seed the minimum Stage E state a downgrade must refuse to destroy.
     with engine.begin() as connection:
         connection.execute(
             text(
@@ -1569,11 +1573,7 @@ def _seed_stage_e(engine: Engine, *, trigger: bool, occurrence: bool) -> None:
 def test_the_stage_e_downgrade_refuses_while_stage_e_state_exists(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A refusal must happen *before* any DDL, so a refused downgrade leaves nothing half-dropped.
-
-    Every row counts, including a disabled trigger and a skipped occurrence: a disabled trigger is
-    still configuration a user authored, and a skip is a fact the user may already have seen.
-    """
+    # A refusal must happen before any DDL, so a refused downgrade leaves nothing half-dropped.
     database_path = tmp_path / "stage-e-downgrade.db"
     _, engine = migrate_database(database_path, monkeypatch)
     try:
@@ -1600,7 +1600,7 @@ def test_the_stage_e_downgrade_refuses_while_stage_e_state_exists(
 def test_the_stage_e_downgrade_refuses_for_a_trigger_with_no_occurrence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Configuration alone is enough to refuse: a disabled trigger is still authored state."""
+    # Configuration alone is enough to refuse: a disabled trigger is still authored state.
     database_path = tmp_path / "stage-e-trigger-only.db"
     _, engine = migrate_database(database_path, monkeypatch)
     try:
@@ -1616,9 +1616,7 @@ def test_the_stage_e_downgrade_refuses_for_a_trigger_with_no_occurrence(
 def test_an_occurrence_cannot_exist_without_its_trigger(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The FK is RESTRICT, so "an occurrence with no definition" is unrepresentable rather than a
-    state the downgrade preflight would have to consider separately.
-    """
+    # The FK is RESTRICT, so an occurrence with no definition is unrepresentable.
     database_path = tmp_path / "stage-e-orphan.db"
     _, engine = migrate_database(database_path, monkeypatch)
     try:
@@ -1640,12 +1638,6 @@ def test_an_occurrence_cannot_exist_without_its_trigger(
 def test_the_stage_e_downgrade_is_clean_when_nothing_needs_keeping(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Downgrading E1 lands at `0007` and removes only what E1 added.
-
-    `0008`'s `down_revision` is `0007`, so one downgrade step is `0008 -> 0007`. The D1 schema --
-    the four Stage D tables and the columns D1 added to `runs`, `job_attempts` and `run_events` --
-    must come through untouched, because E1 never wrote to it.
-    """
     database_path = tmp_path / "stage-e-clean-down.db"
     config, engine = migrate_database(database_path, monkeypatch)
     try:
@@ -1691,7 +1683,7 @@ def test_the_stage_e_downgrade_is_clean_when_nothing_needs_keeping(
     engine = create_sqlite_engine(database_path)
     try:
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == E1_REVISION
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == F1_REVISION
     finally:
         engine.dispose()
 

@@ -1053,7 +1053,7 @@ def test_the_tool_definition_columns_are_unchanged_by_d4(engine: Engine) -> None
         revisions = list(
             connection.execute(text("SELECT version_num FROM alembic_version")).scalars()
         )
-    assert revisions == ["0008_stage_e1_trigger_scheduling"]
+    assert revisions == ["0009_stage_f1_conversations"]
 
 
 def test_a_tool_source_ref_for_builtins_carries_no_connection(tmp_path: Path) -> None:

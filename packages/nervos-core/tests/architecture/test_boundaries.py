@@ -44,9 +44,13 @@ EXPECTED_TABLES = {
     # `router.py`: the management surface is one `triggers` resource, not a router per kind.
     "trigger_definitions",
     "trigger_occurrences",
+    # F1 adds the four durable conversation execution-protocol tables.
+    "conversations",
+    "conversation_turns",
+    "conversation_messages",
+    "conversation_run_links",
 }
 FORBIDDEN_SUBSYSTEMS = (
-    "conversation",
     "message",
     "thread",
     "job",
@@ -67,9 +71,10 @@ FORBIDDEN_SUBSYSTEMS = (
 )
 
 # C1 legitimately introduces the durable Job and Attempt execution records, so those two module
-# names are no longer forbidden in core. Every later-stage subsystem below stays absent: the
-# durable foundation is not a licence for conversation, session, worker, or streaming modules.
-FORBIDDEN_CORE_MODULE_NAMES = ("conversation", "message", "worker", "stream")
+# names are no longer forbidden in core. F1 introduces the conversation execution-protocol modules,
+# so `conversation` is no longer forbidden either. Every later-stage subsystem below stays absent:
+# worker and streaming modules remain out of scope.
+FORBIDDEN_CORE_MODULE_NAMES = ("worker", "stream")
 
 
 def imported_modules(path: Path) -> set[str]:
@@ -197,6 +202,7 @@ def test_b3_route_surface_and_migration_freeze() -> None:
     assert "agent_instances_router" in router_text
     assert "runs_router" in router_text
     assert "mcp_connections_router" in router_text
+    assert "conversations_router" in router_text
 
     migrations = sorted((ROOT / "apps" / "api" / "alembic" / "versions").glob("*.py"))
     assert [path.name for path in migrations] == [
@@ -210,6 +216,8 @@ def test_b3_route_surface_and_migration_freeze() -> None:
         # E1 adds the two Stage E durable tables. The scheduler, the ingress and the management
         # API do not exist yet, so this migration adds no route and no execution primitive.
         "0008_stage_e1_trigger_scheduling.py",
+        # F1 adds the four durable conversation execution-protocol tables and no F2/F3 surface.
+        "0009_stage_f1_conversations.py",
     ]
     # The Worker refuses to run against a schema it does not expect, so the pinned revision and
     # the migration head are one fact in two places. Letting them drift bricks the supervised
@@ -612,12 +620,14 @@ def test_c7_adds_only_the_reviewed_observability_surface() -> None:
     assert sorted(path.name for path in python_files(API_ROUTES) if path.name != "__init__.py") == [
         "agent_instances.py",
         "auth.py",
+        "conversations.py",
         "health.py",
         # D5 is authorized exactly one new control-plane resource family: MCP connections.
         "mcp_connections.py",
         "runs.py",
         "setup.py",
         # E4 is authorized exactly one new control-plane resource family: triggers.
+        # F1 adds the conversation resource family.
         "triggers.py",
     ]
     runs_route = (API_ROUTES / "runs.py").read_text(encoding="utf-8")
@@ -1074,8 +1084,8 @@ def test_the_migration_head_is_exactly_0008_and_no_0009_exists() -> None:
     """
     versions = ROOT / "apps" / "api" / "alembic" / "versions"
     discovered = sorted(path.name for path in versions.glob("*.py"))
-    assert discovered[-1] == "0008_stage_e1_trigger_scheduling.py"
-    assert not any(name.startswith("0009") for name in discovered), discovered
+    assert discovered[-1] == "0009_stage_f1_conversations.py"
+    assert not any(name.startswith("0010") for name in discovered), discovered
 
 
 def test_nervos_mcp_depends_only_on_public_sdk_surfaces() -> None:
@@ -1197,7 +1207,7 @@ def test_there_is_exactly_one_run_and_job_insertion_implementation() -> None:
         for path in python_files(CORE_INFRASTRUCTURE)
         if "insert_run_and_job_on_connection(" in path.read_text(encoding="utf-8")
     }
-    assert callers == {"jobs.py", "triggers.py"}, callers
+    assert callers == {"jobs.py", "conversations.py", "triggers.py"}, callers
 
 
 def test_trigger_provenance_is_never_read_to_decide_execution() -> None:
@@ -1343,7 +1353,7 @@ def test_the_scheduler_declares_its_own_schema_expectation() -> None:
     scheduler_app = (ROOT / "apps" / "scheduler" / "src" / "nervos_scheduler" / "app.py").read_text(
         encoding="utf-8"
     )
-    assert 'EXPECTED_SCHEMA_REVISION = "0008_stage_e1_trigger_scheduling"' in scheduler_app
+    assert 'EXPECTED_SCHEMA_REVISION = "0009_stage_f1_conversations"' in scheduler_app
     assert "nervos_worker" not in scheduler_app
     main = (ROOT / "apps" / "scheduler" / "src" / "nervos_scheduler" / "main.py").read_text(
         encoding="utf-8"
@@ -1387,7 +1397,7 @@ def test_the_due_scan_is_bounded_ordered_and_keyset_continuable() -> None:
 def test_the_scheduler_cursor_has_no_durable_representation() -> None:
     """Scan fairness state is process-local by design and must never become a table."""
     names = {path.name for path in python_files(ROOT / "apps" / "api" / "alembic" / "versions")}
-    assert "0009" not in " ".join(names)
+    assert "scheduler_cursor" not in " ".join(names)
     models = (CORE_SOURCE / "infrastructure" / "database" / "models.py").read_text(encoding="utf-8")
     assert "scheduler_cursor" not in models.lower()
     assert "_ = migrations"  # keep the migration set in scope for the assertion above
@@ -1522,6 +1532,59 @@ def test_e4_exposes_only_the_reviewed_management_surface_and_the_delivery_ingres
         if path.suffix == ".py"
     )
     assert frontend == ""
+
+
+#: The exact reviewed F1 conversation control-plane surface, as (verb, path) pairs.
+F1_CONVERSATION_ROUTES = [
+    ("get", ""),
+    ("get", "/{conversation_id}"),
+    ("get", "/{conversation_id}/turns"),
+    ("post", ""),
+    ("post", "/{conversation_id}/messages"),
+    ("post", "/{conversation_id}/turns/{turn_id}/retry"),
+]
+
+
+def test_f1_exposes_only_the_reviewed_conversation_surface() -> None:
+    """F1 is one owner-scoped resource family with exactly the reviewed route set.
+
+    It has no archive/delete route (that is F4), no `/memories` (F3), no streaming, and no
+    direct provider or storage reach: the control plane accepts work and never executes it.
+    """
+    route_path = API_ROUTES / "conversations.py"
+    assert route_path.exists()
+    source = route_path.read_text(encoding="utf-8")
+    assert 'APIRouter(prefix="/conversations")' in source
+    assert sorted(_ROUTE_DECORATOR.findall(source)) == F1_CONVERSATION_ROUTES
+    for forbidden in (
+        '"archive"',
+        '"delete"',
+        '"memories"',
+        "RunExecutor",
+        "RunCoordinator",
+        "ModelCompletion",
+        "JobExecutionService",
+        "ToolLoop",
+        "claim_next",
+        "start_attempt",
+        "nervos_models",
+        "nervos_worker",
+        "nervos_scheduler",
+        "anthropic",
+        "openai",
+        "sqlalchemy",
+    ):
+        assert forbidden not in source, forbidden
+    modules = imported_modules(route_path)
+    for prefix in (
+        "nervos_models",
+        "nervos_worker",
+        "nervos_scheduler",
+        "sqlalchemy",
+        "anthropic",
+        "openai",
+    ):
+        assert not any(module == prefix or module.startswith(f"{prefix}.") for module in modules)
 
 
 # ------------------------------------------------------------------------------------------------

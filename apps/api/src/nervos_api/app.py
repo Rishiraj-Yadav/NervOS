@@ -18,6 +18,7 @@ from nervos_core.application.authentication import (
     AuthenticationError,
     AuthenticationService,
 )
+from nervos_core.application.conversations import ConversationService
 from nervos_core.application.mcp_connection_service import McpConnectionService
 from nervos_core.application.run_cancellation import RunCancellationService
 from nervos_core.application.triggers import TriggerManagementService
@@ -29,6 +30,7 @@ from nervos_core.application.webhooks import (
 from nervos_core.infrastructure.database import create_session_factory, create_sqlite_engine
 from nervos_core.infrastructure.database.agents import SqlAlchemyAgentPersistence
 from nervos_core.infrastructure.database.authentication import SqlAlchemyAuthenticationPersistence
+from nervos_core.infrastructure.database.conversations import SqlAlchemyConversationPersistence
 from nervos_core.infrastructure.database.jobs import (
     SqlAlchemyJobPersistence,
     SqlAlchemyRunCancellationPersistence,
@@ -145,6 +147,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         schedule_evaluator,
         utc_now,
     )
+    conversation_persistence = SqlAlchemyConversationPersistence(
+        engine,
+        max_pending=resolved_settings.max_pending_jobs,
+        max_pending_per_agent=resolved_settings.max_pending_jobs_per_agent,
+        max_pending_per_provider=resolved_settings.max_pending_jobs_per_provider,
+    )
+    conversation_service = ConversationService(
+        conversation_persistence,
+        agent_service,
+        clock=utc_now,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
@@ -168,6 +181,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.mcp_connection_service = mcp_connection_service
     app.state.webhook_ingress_service = webhook_ingress_service
     app.state.trigger_management_service = trigger_management_service
+    app.state.conversation_service = conversation_service
     app.add_exception_handler(Exception, unexpected_error_handler)
     app.add_exception_handler(AuthenticationError, authentication_error_handler)
     app.add_exception_handler(InvalidOrigin, authentication_error_handler)
