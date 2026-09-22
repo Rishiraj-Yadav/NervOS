@@ -1084,6 +1084,10 @@ class ConversationRunLinkRecord(Base):
     __table_args__ = (
         CheckConstraint("ordinal >= 1", name="ordinal_positive"),
         CheckConstraint("role IN ('initial','retry')", name="link_role_value"),
+        CheckConstraint(
+            "context_mode IN ('f1_single_turn','f2_context_snapshot')",
+            name="context_mode_value",
+        ),
         ForeignKeyConstraint(["run_id"], ["runs.id"], ondelete="RESTRICT"),
         ForeignKeyConstraint(["turn_id"], ["conversation_turns.id"], ondelete="RESTRICT"),
         PrimaryKeyConstraint("id"),
@@ -1098,6 +1102,107 @@ class ConversationRunLinkRecord(Base):
     run_id: Mapped[int] = mapped_column(Integer, nullable=False)
     ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
     role: Mapped[str] = mapped_column(String(16), nullable=False)
+    context_mode: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="f1_single_turn"
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class RunContextSnapshotRecord(Base):
+    """Immutable provider-neutral context snapshot for an F2 conversational Run."""
+
+    __tablename__ = "run_context_snapshots"
+    __table_args__ = (
+        ForeignKeyConstraint(["run_id"], ["runs.id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(["turn_id"], ["conversation_turns.id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(
+            ["turn_id", "run_id"],
+            ["conversation_run_links.turn_id", "conversation_run_links.run_id"],
+            ondelete="RESTRICT",
+        ),
+        PrimaryKeyConstraint("run_id"),
+        CheckConstraint("schema_version > 0", name="schema_version_positive"),
+        CheckConstraint("length(builder_version) BETWEEN 1 AND 64", name="builder_version_length"),
+        CheckConstraint(
+            "max_total_bytes > 0 AND max_total_code_points > 0", name="max_bounds_positive"
+        ),
+        CheckConstraint(
+            "actual_total_bytes >= 0 AND actual_total_code_points >= 0",
+            name="actual_counts_nonnegative",
+        ),
+        CheckConstraint(
+            "actual_total_bytes <= max_total_bytes AND actual_total_code_points <= max_total_code_points",
+            name="actual_within_bounds",
+        ),
+        CheckConstraint(
+            "compaction_version IS NULL OR (compaction_source_start IS NOT NULL AND compaction_source_end IS NOT NULL AND compaction_source_start <= compaction_source_end AND compaction_source_start > 0)",
+            name="compaction_provenance_valid",
+        ),
+        CheckConstraint("length(content_digest) = 32", name="content_digest_length"),
+        Index("ix_run_context_snapshots_turn_id", "turn_id"),
+        {"sqlite_autoincrement": False},
+    )
+
+    run_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    turn_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    builder_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    current_user_text: Mapped[str] = mapped_column(Text, nullable=False)
+    history_messages: Mapped[str] = mapped_column(Text, nullable=False)
+    selected_turn_ids: Mapped[str] = mapped_column(Text, nullable=False)
+    selected_message_ids: Mapped[str] = mapped_column(Text, nullable=False)
+    compaction_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    compaction_source_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    compaction_source_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    injected_compaction_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    agent_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    agent_definition_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    max_total_bytes: Mapped[int] = mapped_column(Integer, nullable=False, server_default="8000")
+    max_total_code_points: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="4000"
+    )
+    actual_total_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    actual_total_code_points: Mapped[int] = mapped_column(Integer, nullable=False)
+    rendered_context: Mapped[str] = mapped_column(Text, nullable=False)
+    content_digest: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class ConversationCompactionRecord(Base):
+    """Deterministic non-model compaction of older committed conversation turns."""
+
+    __tablename__ = "conversation_compactions"
+    __table_args__ = (
+        ForeignKeyConstraint(["conversation_id"], ["conversations.id"], ondelete="RESTRICT"),
+        PrimaryKeyConstraint("id"),
+        UniqueConstraint("conversation_id", "version", name="uq_conversation_compactions_version"),
+        CheckConstraint("version > 0", name="compaction_version_positive"),
+        CheckConstraint(
+            "source_start_sequence > 0 AND source_end_sequence >= source_start_sequence",
+            name="compaction_sequence_range",
+        ),
+        CheckConstraint(
+            "length(content) BETWEEN 1 AND 32000 AND length(CAST(content AS BLOB)) <= 32000",
+            name="compaction_content_bounds",
+        ),
+        CheckConstraint("length(content_digest) = 32", name="compaction_digest_length"),
+        Index(
+            "uq_conversation_compactions_one_current",
+            "conversation_id",
+            unique=True,
+            sqlite_where=text("is_current = 1"),
+        ),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    conversation_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_start_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_end_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    content_digest: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="1")
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 

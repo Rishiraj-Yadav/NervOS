@@ -130,3 +130,34 @@ def test_turn_history_query_uses_sequence_index(rig: PlanRig) -> None:
         or "uq_conversation_turns" in plan_text
         or "USING INDEX" in plan_text
     )
+
+
+def test_snapshot_lookup_uses_primary_key(rig: PlanRig) -> None:
+    conv = rig.service.create_conversation(OWNER, AGENT, "Snap Conv")
+    detail, _ = rig.service.send_message(OWNER, conv.id, "cmid-1", "Query")
+    run_id = detail.latest_run_id
+    assert run_id is not None
+
+    with Captured(rig.engine) as captured:
+        rig.conv_persistence.load_run_context_snapshot(run_id)
+
+    selects = captured.selects("run_context_snapshots")
+    assert len(selects) >= 1
+    plan_text = plan_for(rig.engine, selects[0])
+    assert any(
+        target in plan_text for target in ("PRIMARY KEY", "pk_run_context_snapshots", "SEARCH")
+    )
+
+
+def test_current_compaction_lookup_uses_partial_index(rig: PlanRig) -> None:
+    conv = rig.service.create_conversation(OWNER, AGENT, "Compaction Conv")
+    with Captured(rig.engine) as captured:
+        rig.service.send_message(OWNER, conv.id, "cmid-1", "Msg 1")
+
+    selects = captured.selects("conversation_compactions")
+    assert len(selects) >= 1
+    plan_text = plan_for(rig.engine, selects[0])
+    assert any(
+        target in plan_text
+        for target in ("uq_conversation_compactions_one_current", "USING INDEX", "SEARCH")
+    )

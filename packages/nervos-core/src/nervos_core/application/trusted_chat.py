@@ -20,6 +20,7 @@ from nervos_core.application.model_completion import (
     StopOutcome,
 )
 from nervos_core.domain.agents import AgentDefinitionId
+from nervos_core.domain.context import ContextSnapshotData
 from nervos_core.domain.runs import Run, RunStatus, is_blank_text
 
 # Only a normalized natural stop is representable as a succeeded Run. Every other
@@ -116,7 +117,13 @@ class ChatOutcome:
 
 
 class TrustedAgentHandler(Protocol):
-    async def run(self, completion: ModelCompletion, run: Run, elapsed_ms: int) -> ChatOutcome: ...
+    async def run(
+        self,
+        completion: ModelCompletion,
+        run: Run,
+        elapsed_ms: int,
+        snapshot: ContextSnapshotData | None = None,
+    ) -> ChatOutcome: ...
 
 
 class TrustedAgentHandlerResolver(Protocol):
@@ -126,18 +133,29 @@ class TrustedAgentHandlerResolver(Protocol):
 class NervosChatHandler:
     """One-shot Chat behavior for exactly the version-1 built-in definition."""
 
-    async def run(self, completion: ModelCompletion, run: Run, elapsed_ms: int) -> ChatOutcome:
+    async def run(
+        self,
+        completion: ModelCompletion,
+        run: Run,
+        elapsed_ms: int,
+        snapshot: ContextSnapshotData | None = None,
+    ) -> ChatOutcome:
         del elapsed_ms  # Measured by the coordinator; part of the handler contract only.
         if run.status is not RunStatus.RUNNING:
             raise ModelResponseInvalidError
         if run.limits.max_model_calls != 1:
             raise ModelResponseInvalidError
+        user_text = snapshot.current_user_text if snapshot is not None else run.input_text
+        history = snapshot.history_messages if snapshot is not None else ()
+        compaction = snapshot.injected_compaction_text if snapshot is not None else None
         request = ModelRequest(
-            NERVOS_CHAT_SYSTEM_INSTRUCTION,
-            run.input_text,
-            run.model_name,
-            run.limits.max_output_tokens,
-            run.limits.provider_timeout_ms,
+            system_instruction=NERVOS_CHAT_SYSTEM_INSTRUCTION,
+            user_text=user_text,
+            model_name=run.model_name,
+            max_output_tokens=run.limits.max_output_tokens,
+            timeout_ms=run.limits.provider_timeout_ms,
+            history=history,
+            compaction_context=compaction,
         )
         response = await completion.complete(request)
         return final_chat_outcome(response, run, response.usage)

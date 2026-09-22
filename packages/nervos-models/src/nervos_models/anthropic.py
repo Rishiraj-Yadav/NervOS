@@ -19,6 +19,7 @@ from nervos_core.application.model_completion import (
     ToolCall,
     ToolResultTurn,
 )
+from nervos_core.domain.conversations import MessageRole
 from nervos_core.domain.tools import JsonValue, canonical_json_text
 
 PROVIDER_ID = "anthropic"
@@ -244,7 +245,7 @@ def _normalized_response(message: Any, *, tools_enabled: bool) -> ModelResponse:
 
 
 def _messages(request: ModelRequest) -> list[dict[str, Any]]:
-    """Build the wire message list: the user's request, then any accepted multi-turn history.
+    """Build the wire message list: multi-turn history, the current user request, and tool turns.
 
     Consecutive tool results are gathered into one user message, which is the shape the Messages
     API uses for tool results, and a pending run is flushed **before** the next assistant turn --
@@ -252,7 +253,35 @@ def _messages(request: ModelRequest) -> list[dict[str, Any]]:
     dropped: an assistant turn's prose is carried beside its tool uses, because the model will be
     asked to continue from exactly this conversation.
     """
-    messages: list[dict[str, Any]] = [{"role": _USER_ROLE, "content": request.user_text}]
+    messages: list[dict[str, Any]] = []
+
+    compaction_prefix = (
+        f"[Earlier Conversation Context]\n{request.compaction_context}"
+        if request.compaction_context
+        else None
+    )
+
+    if request.history:
+        for idx, hist in enumerate(request.history):
+            if hist.role == MessageRole.USER:
+                content = hist.content
+                if idx == 0 and compaction_prefix is not None:
+                    content = f"{compaction_prefix}\n\n{content}"
+                    compaction_prefix = None
+                messages.append({"role": _USER_ROLE, "content": content})
+            else:
+                messages.append(
+                    {
+                        "role": _ASSISTANT_ROLE,
+                        "content": [{"type": _TEXT_BLOCK_TYPE, "text": hist.content}],
+                    }
+                )
+
+    current_user_content = request.user_text
+    if compaction_prefix is not None:
+        current_user_content = f"{compaction_prefix}\n\n{current_user_content}"
+    messages.append({"role": _USER_ROLE, "content": current_user_content})
+
     pending: list[dict[str, Any]] = []
     for turn in request.turns:
         if isinstance(turn, AssistantTurn):

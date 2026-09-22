@@ -21,13 +21,17 @@ seam. E3 also provides provider-neutral provisioning and secret-rotation applica
 **Stage F — Conversations, Context, and Memory — has begun.** Its **F0 architecture, protocol,
 safety, and lifecycle freeze is complete and externally accepted**, and its authority is
 `docs/stage-f/README.md` together with accepted ADRs 0021–0023. **F1 — durable Conversations, Turns,
-Messages, and Run linkage — is complete and accepted.** F1 delivers the durable Conversation, Turn,
-Message, and Run-link model under migration `0009_stage_f1_conversations`, `client_message_id`
-idempotency, one active Turn per Conversation, ordinary Run+Job submission, terminal Conversation
-projection and crash-safe reconciliation, latest FAILED/CANCELLED manual retry, owner-scoped
-management and history APIs (`/api/v1/conversations`), and a minimal Conversation UI. F1 model execution
-remains single-turn (current USER message only). **F2 ContextBuilder is NOT implemented;
-RunContextSnapshot is NOT implemented; compaction is NOT implemented; memory is NOT implemented.**
+Messages, and Run linkage — is complete and accepted.** **F2 — ContextBuilder, mandatory
+RunContextSnapshot, deterministic compaction, and context bounds — is complete and accepted.**
+F2 delivers provider-neutral multi-turn ContextBuilder assembly, canonical bounded assembled
+`Run.input_text`, immutable 1:1 `RunContextSnapshot`, legacy F1 `context_mode` compatibility,
+bounded multi-turn `SUCCEEDED` history (contiguous suffix ≤ 20 messages), deterministic non-model
+`ConversationCompaction` (max 32KB stored, zero provider calls), compaction injection trimming,
+snapshot reuse across Stage-C Attempts, Worker execution from immutable snapshot without live
+table reconstruction, Stage-D tool compatibility, Stage-E non-conversational run compatibility,
+and migration `0010_stage_f2_context_snapshots_and_compactions`. **F3 memory (memory_items,
+memory_versions, memory_fts) is NOT implemented; MemoryRetrievalPort active retrieval is NOT
+implemented; FTS/vector/embedding is NOT implemented; F4 lifecycle is NOT implemented.**
 
 Stage C — Persistent execution engine is COMPLETE. The C0 architecture freeze, the C1 durable execution foundation, C2 — asynchronous submission and minimal durable Worker execution — C3 — Worker registry/health, expired-lease reconciliation, and fencing hardening — C4 — the safe execution retry engine — C5 — owner cancellation and Attempt execution-timeout orchestration — C6 — authoritative global/per-Agent/per-provider execution concurrency, durable Agent fairness, and full admission backpressure — C7 — public read-only execution observability, the Run Events API, the execution timeline, and the polling model — and C8 — integrated deterministic Stage C acceptance and closeout — are implemented, externally reviewed, and accepted.
 
@@ -43,7 +47,7 @@ no runtime behaviour. **D1 — durable tool, capability, and audit schema is com
 **D5 — MCP client/gateway and connection lifecycle is complete and accepted**.
 **D6 — tool audit, failure semantics, and C3–C6 integration is complete and accepted**.
 **D7 — integrated acceptance and Stage-D closeout is complete and accepted**.
-The next milestone is **F2 — ContextBuilder, mandatory RunContextSnapshot, deterministic compaction, context bounds**.
+The next milestone is **F3 — AGENT/USER scoped memory, provenance, and deterministic retrieval**.
 
 ## Stage D milestones
 
@@ -69,7 +73,7 @@ The next milestone is **F2 — ContextBuilder, mandatory RunContextSnapshot, det
 
 - [x] F0 — Architecture, protocol, safety, and lifecycle freeze (documentation/governance only; no schema, no dependency, no runtime code)
 - [x] F1 — Durable Conversations, Turns, Messages, Run linkage, idempotency, assistant finalization, API and minimal UI
-- [ ] F2 — ContextBuilder, mandatory RunContextSnapshot, deterministic compaction, context bounds
+- [x] F2 — ContextBuilder, mandatory RunContextSnapshot, deterministic compaction, context bounds
 - [ ] F3 — AGENT/USER scoped memory, provenance, and deterministic retrieval
 - [ ] F4 — Conversation and memory lifecycle, delete, and minimal UI
 - [ ] F5 — Integrated acceptance and Stage-F closeout

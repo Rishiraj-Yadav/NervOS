@@ -19,6 +19,7 @@ from nervos_core.application.model_completion import (
     ToolCall,
     ToolResultTurn,
 )
+from nervos_core.domain.conversations import MessageRole
 from nervos_core.domain.tools import JsonValue, canonical_json_text
 from openai import AsyncOpenAI, Omit
 
@@ -222,17 +223,46 @@ def _normalized_error(error: openai.OpenAIError) -> ModelProviderError:
 
 
 def _input_items(request: ModelRequest) -> Any:
-    """Build the request input: the user's request, then any accepted multi-turn history.
+    """Build the request input: multi-turn history, the current user request, and tool turns.
 
-    A tool-free request keeps the exact string input Stage B/C used, so the tool-free wire path is
-    unchanged. A tool-enabled request with history sends explicit items, because a continuation must
-    address its results back to the calls that produced them.
+    A tool-free request with no history keeps the exact string input Stage B/C used, so the
+    tool-free wire path is unchanged. A request with history or tools sends explicit items.
     """
-    if not request.turns:
+    if not request.turns and not request.history and request.compaction_context is None:
         return request.user_text
-    items: list[dict[str, Any]] = [
-        {"role": "user", "content": [{"type": "input_text", "text": request.user_text}]}
-    ]
+
+    items: list[dict[str, Any]] = []
+
+    compaction_prefix = (
+        f"[Earlier Conversation Context]\n{request.compaction_context}"
+        if request.compaction_context
+        else None
+    )
+
+    if request.history:
+        for idx, hist in enumerate(request.history):
+            if hist.role == MessageRole.USER:
+                content = hist.content
+                if idx == 0 and compaction_prefix is not None:
+                    content = f"{compaction_prefix}\n\n{content}"
+                    compaction_prefix = None
+                items.append({"role": "user", "content": [{"type": "input_text", "text": content}]})
+            else:
+                items.append(
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": hist.content}],
+                    }
+                )
+
+    current_user_content = request.user_text
+    if compaction_prefix is not None:
+        current_user_content = f"{compaction_prefix}\n\n{current_user_content}"
+    items.append(
+        {"role": "user", "content": [{"type": "input_text", "text": current_user_content}]}
+    )
+
     for turn in request.turns:
         if isinstance(turn, AssistantTurn):
             if turn.text:

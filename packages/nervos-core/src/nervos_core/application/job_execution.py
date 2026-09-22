@@ -45,6 +45,7 @@ from nervos_core.application.model_completion import (
 )
 from nervos_core.application.retry_policy import PRODUCTION_RETRY_POLICY, RetryPolicy
 from nervos_core.application.run_execution import ExecutionOutcome, RunExecutor
+from nervos_core.domain.context import ContextSnapshotData, compute_context_digest
 from nervos_core.domain.jobs import RetryDisposition
 from nervos_core.domain.runs import ModelUsage, Run
 
@@ -257,6 +258,12 @@ class JobExecutionPersistence(Protocol):
         """
         ...
 
+    def load_run_context_snapshot(self, run_id: int) -> ContextSnapshotData | None: ...
+
+    def load_conversation_run_link(
+        self, run_id: int
+    ) -> tuple[int, int, int, int, str, str] | None: ...
+
 
 class JobExecutionService:
     """Execute one claimed Job end to end without ever re-invoking a model."""
@@ -350,7 +357,43 @@ class JobExecutionService:
             # Job for it. This is unreachable while claim eligibility filters on the same
             # configured provider set, so it is a defensive strand rather than a policy.
             return None
-        execution = asyncio.create_task(self._executor.execute(run, completion, claim))
+
+        # Resolve conversational link & snapshot requirement
+        link = await self._offload(self._persistence.load_conversation_run_link, claim.run_id)
+        snapshot: ContextSnapshotData | None = None
+        if link is not None and link[5] == "f2_context_snapshot":
+            snapshot = await self._offload(
+                self._persistence.load_run_context_snapshot, claim.run_id
+            )
+            if snapshot is None:
+                # Required snapshot missing -> fail closed (DO_NOT_RETRY)
+                return ExecutionOutcome(
+                    status="failed",
+                    output_text=None,
+                    finish_reason=None,
+                    elapsed_ms=0,
+                    usage=ModelUsage(),
+                    error_code=INTERNAL_EXECUTION_ERROR,
+                    error_message=safe_error_message(INTERNAL_EXECUTION_ERROR),
+                )
+            expected_digest = compute_context_digest(snapshot.rendered_context)
+            if (
+                snapshot.content_digest != expected_digest
+                or snapshot.rendered_context != run.input_text
+            ):
+                return ExecutionOutcome(
+                    status="failed",
+                    output_text=None,
+                    finish_reason=None,
+                    elapsed_ms=0,
+                    usage=ModelUsage(),
+                    error_code=INTERNAL_EXECUTION_ERROR,
+                    error_message=safe_error_message(INTERNAL_EXECUTION_ERROR),
+                )
+
+        execution = asyncio.create_task(
+            self._executor.execute(run, completion, claim, snapshot=snapshot)
+        )
         watch = asyncio.create_task(lost.wait())
         # The clock starts here, immediately around the provider invocation and after the
         # durable execution-start commit, so queue time, claim time, a scheduled retry wait,
