@@ -610,3 +610,72 @@ class IssuedWebhookResponse(BaseModel):
 
     trigger: TriggerDetailResponse
     secret: str
+
+
+# ============================================================================================
+# F1: Conversations, Turns, Messages
+# ============================================================================================
+
+
+class ConversationCreateRequest(BaseModel):
+    agent_instance_id: int
+    title: Annotated[str | None, Field(min_length=1, max_length=100)] = None
+
+
+class SendMessageRequest(BaseModel):
+    client_message_id: Annotated[str, Field(min_length=1, max_length=128)]
+    content: Annotated[str, Field(min_length=1, max_length=4000)]
+
+
+class ConversationListItemResponse(BaseModel):
+    id: int
+    owner_user_id: int
+    agent_instance_id: int
+    title: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConversationResponse(BaseModel):
+    id: int
+    owner_user_id: int
+    agent_instance_id: int
+    title: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConversationPageResponse(BaseModel):
+    items: list[ConversationListItemResponse]
+    next_before_id: int | None
+
+
+class ConversationMessageResponse(BaseModel):
+    id: int
+    turn_id: int
+    role: str
+    content: str
+    source_run_id: int | None
+    created_at: datetime
+
+
+class ConversationTurnResponse(BaseModel):
+    id: int
+    conversation_id: int
+    sequence: int
+    state: str
+    client_message_id: str
+    authoritative_run_id: int | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    user_message: ConversationMessageResponse
+    assistant_message: ConversationMessageResponse | None
+    latest_run_id: int | None
+    latest_run_status: str | None
+    is_retryable: bool
+
+
+class ConversationTurnPageResponse(BaseModel):
+    items: list[ConversationTurnResponse]
+    next_before_sequence: int | None

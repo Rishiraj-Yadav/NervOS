@@ -26,9 +26,8 @@ from sqlalchemy import Engine
 
 from nervos_scheduler.config import SchedulerSettings
 
-#: The one migration revision this process understands. E2 adds no migration, so this is the same
-#: revision E1 shipped: the trigger tables and the partial due index are already sufficient.
-EXPECTED_SCHEMA_REVISION = "0008_stage_e1_trigger_scheduling"
+#: The one migration revision this process understands. F1 ships migration 0009.
+EXPECTED_SCHEMA_REVISION = "0009_stage_f1_conversations"
 
 
 def utc_now() -> datetime:

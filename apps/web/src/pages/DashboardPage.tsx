@@ -46,6 +46,17 @@ export function DashboardPage({ user }: { user: User }) {
             </Link>
           </div>
         </div>
+        <div className="panel ready-card" style={{ marginTop: "1rem" }}>
+          <div>
+            <h2>Conversations</h2>
+            <p>
+              Start interactive multi-turn conversation sessions with your configured agents.
+            </p>
+            <Link className="button-link" to="/conversations">
+              Open conversations
+            </Link>
+          </div>
+        </div>
       </section>
     </main>
   );

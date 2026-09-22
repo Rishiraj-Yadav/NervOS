@@ -20,6 +20,13 @@ from nervos_core.application.authentication import (
     PersistenceUnavailable,
     SetupComplete,
 )
+from nervos_core.application.conversations import (
+    ConversationBusy,
+    ConversationConflict,
+    ConversationNotFound,
+    TurnNotFound,
+    TurnNotRetryable,
+)
 from nervos_core.application.errors import (
     PersistenceUnavailable as ApplicationPersistenceUnavailable,
 )
@@ -39,6 +46,7 @@ from nervos_core.application.triggers import (
 )
 from nervos_core.application.trusted_chat import UnknownAgentHandler
 from nervos_core.domain.agents import InvalidAgentDefinitionId, InvalidAgentInstance
+from nervos_core.domain.conversations import InvalidConversation
 from nervos_core.domain.runs import InvalidRun
 from nervos_core.domain.scheduling import ScheduleCalculationError
 from nervos_core.domain.triggers import InvalidTrigger
@@ -186,6 +194,36 @@ AGENT_ERROR_MAP: dict[type[Exception], tuple[int, str, str]] = {
         422,
         "invalid_schedule",
         "The schedule could not be evaluated.",
+    ),
+    ConversationNotFound: (
+        404,
+        "conversation_not_found",
+        "The conversation was not found.",
+    ),
+    ConversationBusy: (
+        409,
+        "conversation_busy",
+        "The conversation has an active turn; wait for it to complete.",
+    ),
+    ConversationConflict: (
+        409,
+        "conversation_conflict",
+        "The client message ID was already used with different content.",
+    ),
+    TurnNotFound: (
+        404,
+        "turn_not_found",
+        "The turn was not found.",
+    ),
+    TurnNotRetryable: (
+        409,
+        "turn_not_retryable",
+        "The turn is not eligible for retry.",
+    ),
+    InvalidConversation: (
+        422,
+        "invalid_conversation",
+        "The conversation input is invalid.",
     ),
 }
 

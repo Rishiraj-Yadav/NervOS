@@ -13,6 +13,7 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    PrimaryKeyConstraint,
     String,
     Text,
     UniqueConstraint,
@@ -985,6 +986,158 @@ class TriggerOccurrenceRecord(Base):
     payload_digest: Mapped[bytes | None] = mapped_column(LargeBinary(32), nullable=True)
     payload_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+# ============================================================================================
+# F1: Conversations, Turns, Messages, Run Links
+# ============================================================================================
+
+
+class ConversationRecord(Base):
+    """Owner-scoped durable conversation belonging to one AgentInstance."""
+
+    __tablename__ = "conversations"
+    __table_args__ = (
+        CheckConstraint(
+            "title IS NULL OR (length(title) BETWEEN 1 AND 400 AND instr(title, char(0)) = 0)",
+            name="title_shape",
+        ),
+        CheckConstraint("updated_at >= created_at", name="timestamp_order"),
+        ForeignKeyConstraint(
+            ["agent_instance_id"],
+            ["agent_instances.id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(["owner_user_id"], ["users.id"], ondelete="RESTRICT"),
+        PrimaryKeyConstraint("id"),
+        Index("ix_conversations_owner_id", "owner_user_id", "id"),
+        Index("ix_conversations_owner_agent", "owner_user_id", "agent_instance_id"),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    agent_instance_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str | None] = mapped_column(String(400), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class ConversationTurnRecord(Base):
+    """One submission/execution lifecycle within a Conversation."""
+
+    __tablename__ = "conversation_turns"
+    __table_args__ = (
+        CheckConstraint("sequence > 0", name="sequence_positive"),
+        CheckConstraint(
+            "state IN ('pending','running','succeeded','failed','cancelled','ambiguous')",
+            name="state_value",
+        ),
+        CheckConstraint(
+            "length(client_message_id) BETWEEN 1 AND 128 AND instr(client_message_id, char(0)) = 0",
+            name="client_message_id_shape",
+        ),
+        CheckConstraint(
+            "length(content_digest) = 32",
+            name="content_digest_length",
+        ),
+        ForeignKeyConstraint(["authoritative_run_id"], ["runs.id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(["conversation_id"], ["conversations.id"], ondelete="RESTRICT"),
+        PrimaryKeyConstraint("id"),
+        UniqueConstraint("conversation_id", "sequence", name="uq_conversation_turns_sequence"),
+        UniqueConstraint(
+            "conversation_id",
+            "client_message_id",
+            name="uq_conversation_turns_client_message_id",
+        ),
+        Index(
+            "uq_conversation_turns_one_active",
+            "conversation_id",
+            unique=True,
+            sqlite_where=text("state IN ('pending','running')"),
+        ),
+        Index(
+            "ix_conversation_turns_conversation_sequence",
+            "conversation_id",
+            "sequence",
+        ),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    conversation_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    client_message_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    content_digest: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    authoritative_run_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class ConversationRunLinkRecord(Base):
+    """Link from a Turn to an ordinary Run (initial or retry)."""
+
+    __tablename__ = "conversation_run_links"
+    __table_args__ = (
+        CheckConstraint("ordinal >= 1", name="ordinal_positive"),
+        CheckConstraint("role IN ('initial','retry')", name="link_role_value"),
+        ForeignKeyConstraint(["run_id"], ["runs.id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(["turn_id"], ["conversation_turns.id"], ondelete="RESTRICT"),
+        PrimaryKeyConstraint("id"),
+        UniqueConstraint("run_id", name="uq_conversation_run_links_run"),
+        UniqueConstraint("turn_id", "ordinal", name="uq_conversation_run_links_turn_ordinal"),
+        UniqueConstraint("turn_id", "run_id", name="uq_conversation_run_links_turn_run"),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    turn_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    run_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class ConversationMessageRecord(Base):
+    """One USER or ASSISTANT message attached to a Turn."""
+
+    __tablename__ = "conversation_messages"
+    __table_args__ = (
+        CheckConstraint("role IN ('user','assistant')", name="role_value"),
+        CheckConstraint(
+            "length(content) BETWEEN 1 AND 32000 AND length(CAST(content AS BLOB)) <= 32000 AND instr(content, char(0)) = 0",
+            name="message_content_bounds",
+        ),
+        ForeignKeyConstraint(
+            ["turn_id", "source_run_id"],
+            ["conversation_run_links.turn_id", "conversation_run_links.run_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(["turn_id"], ["conversation_turns.id"], ondelete="RESTRICT"),
+        PrimaryKeyConstraint("id"),
+        UniqueConstraint("turn_id", "role", name="uq_conversation_messages_turn_role"),
+        CheckConstraint(
+            "(role = 'user' AND source_run_id IS NULL) OR "
+            "(role = 'assistant' AND source_run_id IS NOT NULL)",
+            name="message_role_source",
+        ),
+        Index(
+            "uq_conversation_messages_source_run",
+            "source_run_id",
+            unique=True,
+            sqlite_where=text("source_run_id IS NOT NULL"),
+        ),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    turn_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    source_run_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 

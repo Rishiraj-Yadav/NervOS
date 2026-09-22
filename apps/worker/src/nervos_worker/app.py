@@ -30,6 +30,9 @@ from nervos_core.application.trusted_chat import (
 )
 from nervos_core.domain.tools import ToolDescriptor
 from nervos_core.infrastructure.database import create_session_factory, create_sqlite_engine
+from nervos_core.infrastructure.database.conversations import (
+    SqlAlchemyConversationPersistence,
+)
 from nervos_core.infrastructure.database.jobs import SqlAlchemyJobExecutionPersistence
 from nervos_core.infrastructure.database.mcp_connections import (
     SqlAlchemyMcpConnectionPersistence,
@@ -58,8 +61,8 @@ from nervos_worker.mcp import McpRegistrySynchronizer, build_mcp_gateway
 from nervos_worker.registry import ReclaimLoop, WorkerRegistry
 from nervos_worker.service import Worker
 
-# Bumped only by the milestone that adds a migration. E1 ships migration 0008.
-EXPECTED_SCHEMA_REVISION = "0008_stage_e1_trigger_scheduling"
+# Bumped only by the milestone that adds a migration. F1 ships migration 0009.
+EXPECTED_SCHEMA_REVISION = "0009_stage_f1_conversations"
 
 
 def utc_now() -> datetime:
@@ -146,6 +149,7 @@ def create_worker(settings: WorkerSettings | None = None) -> WorkerComposition:
         # the control plane after this process started become usable without a restart.
         synchronizer=mcp_synchronizer,
     )
+    conversations = SqlAlchemyConversationPersistence(engine)
     execution = JobExecutionService(
         persistence,
         RunExecutor(create_builtin_handler_registry(), tool_loop=tool_loop),
@@ -155,6 +159,7 @@ def create_worker(settings: WorkerSettings | None = None) -> WorkerComposition:
         # composition root names the one policy that decides when a safe failure may be
         # replayed.
         retry_policy=PRODUCTION_RETRY_POLICY,
+        conversation_projection=conversations.project_terminal_run,
     )
     worker_id = generate_worker_id()
     registry = WorkerRegistry(persistence, worker_id, clock=utc_now)
