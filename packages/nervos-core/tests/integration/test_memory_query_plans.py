@@ -125,3 +125,18 @@ def test_agent_candidate_retrieval_uses_owner_agent_index(rig: MemoryPlanRig) ->
         target in plan_text
         for target in ("ix_memory_items_owner_agent_status", "USING INDEX", "SEARCH")
     )
+
+
+def test_list_memories_uses_owner_scope_index(rig: MemoryPlanRig) -> None:
+    rig.service.create_memory(owner_user_id=OWNER, scope=MemoryScope.USER, content="User Fact")
+
+    with Captured(rig.engine) as captured:
+        rig.service.list_memories(owner_user_id=OWNER, scope=MemoryScope.USER, limit=20)
+
+    selects = captured.selects("memory_items", "memory_versions")
+    assert len(selects) >= 1
+    plan_text = plan_for(rig.engine, selects[0])
+    assert any(
+        target in plan_text
+        for target in ("ix_memory_items_owner_scope_status", "USING INDEX", "SEARCH")
+    )

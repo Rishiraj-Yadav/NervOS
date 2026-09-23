@@ -1053,7 +1053,7 @@ def test_the_tool_definition_columns_are_unchanged_by_d4(engine: Engine) -> None
         revisions = list(
             connection.execute(text("SELECT version_num FROM alembic_version")).scalars()
         )
-    assert revisions == ["0011_stage_f3_scoped_memory"]
+    assert revisions == ["0012_stage_f4_conversation_lifecycle"]
 
 
 def test_a_tool_source_ref_for_builtins_carries_no_connection(tmp_path: Path) -> None:

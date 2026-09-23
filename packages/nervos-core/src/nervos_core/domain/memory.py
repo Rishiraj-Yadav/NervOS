@@ -33,6 +33,10 @@ class MemoryNotFound(LookupError):
     """Raised when a Memory item is not found or belongs to another owner."""
 
 
+class StaleMemoryVersion(Exception):
+    """Raised when an expected version does not match the current version."""
+
+
 class MemoryScope(StrEnum):
     USER = "user"
     AGENT = "agent"
@@ -127,6 +131,7 @@ __all__ = [
     "MemorySourceKind",
     "MemoryStatus",
     "MemoryVersion",
+    "StaleMemoryVersion",
     "compute_memory_digest",
     "is_blank_text",
     "validate_memory_content",

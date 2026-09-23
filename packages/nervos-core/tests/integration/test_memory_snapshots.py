@@ -377,3 +377,89 @@ def test_zero_automatic_memory_writes(tmp_path: Path, monkeypatch: pytest.Monkey
     with db.connect() as conn:
         count = conn.scalar(select(func.count()).select_from(MemoryItemRecord))
         assert count == 0
+
+
+def test_memory_lifecycle_snapshot_invalidation_and_immutability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = migrate(tmp_path / "lifecycle_immutability.db", monkeypatch)
+    user_id, agent_id = _seed_user_and_agent(db)
+    conv_service, mem_service = _setup_services(db)
+
+    # 1. Create memory v1
+    mem = mem_service.create_memory(
+        owner_user_id=user_id,
+        scope=MemoryScope.USER,
+        content="User likes Apples v1",
+    )
+    conv = conv_service.create_conversation(user_id, agent_id, "Memory Lifecycle Test")
+
+    # 2. Run 1 snapshot captures memory v1
+    d1, _ = conv_service.send_message(user_id, conv.id, "cmid-s1", "Query 1")
+    run1_id = d1.latest_run_id
+    assert run1_id is not None
+    conv_service.project_terminal_run(run_id=run1_id, status="succeeded", output_text="Ans 1")
+
+    # 3. Edit memory to v2
+    mem_service.edit_memory(
+        owner_user_id=user_id,
+        memory_item_id=mem.item.id,
+        expected_version=1,
+        content="User likes Bananas v2",
+    )
+
+    # 4. Run 2 snapshot captures memory v2
+    d2, _ = conv_service.send_message(user_id, conv.id, "cmid-s2", "Query 2")
+    run2_id = d2.latest_run_id
+    assert run2_id is not None
+    conv_service.project_terminal_run(run_id=run2_id, status="succeeded", output_text="Ans 2")
+
+    # 5. Delete memory
+    mem_service.delete_memory(
+        owner_user_id=user_id,
+        memory_item_id=mem.item.id,
+        expected_version=2,
+    )
+
+    # 6. Run 3 snapshot has zero active memory
+    d3, _ = conv_service.send_message(user_id, conv.id, "cmid-s3", "Query 3")
+    run3_id = d3.latest_run_id
+    assert run3_id is not None
+    conv_service.project_terminal_run(run_id=run3_id, status="succeeded", output_text="Ans 3")
+
+    # 7. Verify all historical snapshots directly from database
+    with db.connect() as conn:
+        snap1_row = (
+            conn.execute(
+                select(RunContextSnapshotRecord).where(RunContextSnapshotRecord.run_id == run1_id)
+            )
+            .mappings()
+            .one()
+        )
+        assert snap1_row["injected_user_memory_text"] is not None
+        assert "User likes Apples v1" in str(snap1_row["injected_user_memory_text"])
+        mems1 = deserialize_selected_memories(str(snap1_row["memory_items_json"]))
+        assert mems1[0].version == 1
+
+        snap2_row = (
+            conn.execute(
+                select(RunContextSnapshotRecord).where(RunContextSnapshotRecord.run_id == run2_id)
+            )
+            .mappings()
+            .one()
+        )
+        assert snap2_row["injected_user_memory_text"] is not None
+        assert "User likes Bananas v2" in str(snap2_row["injected_user_memory_text"])
+        mems2 = deserialize_selected_memories(str(snap2_row["memory_items_json"]))
+        assert mems2[0].version == 2
+
+        snap3_row = (
+            conn.execute(
+                select(RunContextSnapshotRecord).where(RunContextSnapshotRecord.run_id == run3_id)
+            )
+            .mappings()
+            .one()
+        )
+        assert snap3_row["injected_user_memory_text"] is None
+        mems3 = deserialize_selected_memories(str(snap3_row["memory_items_json"]))
+        assert len(mems3) == 0

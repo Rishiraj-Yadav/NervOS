@@ -15,6 +15,7 @@ from nervos_core.domain.memory import (
     MemoryProvenanceType,
     MemoryScope,
     MemorySourceKind,
+    MemoryVersion,
     compute_memory_digest,
     validate_memory_content,
     validate_memory_scope,
@@ -79,13 +80,52 @@ class MemoryPersistence(Protocol):
 
     def get_memory(self, owner_user_id: int, memory_item_id: int) -> MemoryItemDetail: ...
 
+    def list_memories(
+        self,
+        *,
+        owner_user_id: int,
+        scope: MemoryScope | None = None,
+        agent_instance_id: int | None = None,
+        before_id: int | None = None,
+        limit: int = 20,
+    ) -> tuple[tuple[MemoryItemDetail, ...], int | None]: ...
+
+    def list_memory_versions(
+        self,
+        *,
+        owner_user_id: int,
+        memory_item_id: int,
+        before_version: int | None = None,
+        limit: int = 20,
+    ) -> tuple[tuple[MemoryVersion, ...], int | None]: ...
+
+    def edit_memory(
+        self,
+        *,
+        owner_user_id: int,
+        memory_item_id: int,
+        expected_version: int,
+        content: str,
+        content_digest: bytes,
+        now: datetime,
+    ) -> MemoryItemDetail: ...
+
+    def delete_memory(
+        self,
+        *,
+        owner_user_id: int,
+        memory_item_id: int,
+        expected_version: int | None = None,
+        now: datetime,
+    ) -> None: ...
+
     def retrieve_candidates(
         self, query: MemoryRetrievalQuery
     ) -> tuple[RetrievedMemoryItem, ...]: ...
 
 
 class MemoryService:
-    """Owner-scoped application service for explicit memory creation and promotion."""
+    """Owner-scoped application service for explicit memory creation, inspection, and lifecycle."""
 
     def __init__(
         self,
@@ -174,6 +214,93 @@ class MemoryService:
 
     def get_memory(self, owner_user_id: int, memory_item_id: int) -> MemoryItemDetail:
         return self._persistence.get_memory(owner_user_id, memory_item_id)
+
+    def list_memories(
+        self,
+        *,
+        owner_user_id: int,
+        scope: str | None = None,
+        agent_instance_id: int | None = None,
+        before_id: int | None = None,
+        limit: int = 20,
+    ) -> tuple[tuple[MemoryItemDetail, ...], int | None]:
+        if limit < 1 or limit > 50:
+            raise ValueError("limit must be between 1 and 50")
+        if before_id is not None and before_id <= 0:
+            raise ValueError("before_id must be positive")
+        resolved_scope: MemoryScope | None = None
+        if scope is not None:
+            resolved_scope = validate_memory_scope(scope)
+            if resolved_scope == MemoryScope.AGENT and agent_instance_id is not None:
+                self._agents.get_instance(owner_user_id, agent_instance_id)
+        elif agent_instance_id is not None:
+            self._agents.get_instance(owner_user_id, agent_instance_id)
+
+        return self._persistence.list_memories(
+            owner_user_id=owner_user_id,
+            scope=resolved_scope,
+            agent_instance_id=agent_instance_id,
+            before_id=before_id,
+            limit=limit,
+        )
+
+    def list_memory_versions(
+        self,
+        *,
+        owner_user_id: int,
+        memory_item_id: int,
+        before_version: int | None = None,
+        limit: int = 20,
+    ) -> tuple[tuple[MemoryVersion, ...], int | None]:
+        if limit < 1 or limit > 50:
+            raise ValueError("limit must be between 1 and 50")
+        if before_version is not None and before_version <= 0:
+            raise ValueError("before_version must be positive")
+        return self._persistence.list_memory_versions(
+            owner_user_id=owner_user_id,
+            memory_item_id=memory_item_id,
+            before_version=before_version,
+            limit=limit,
+        )
+
+    def edit_memory(
+        self,
+        *,
+        owner_user_id: int,
+        memory_item_id: int,
+        expected_version: int,
+        content: str,
+    ) -> MemoryItemDetail:
+        if expected_version <= 0:
+            raise ValueError("expected_version must be positive")
+        valid_content = validate_memory_content(content)
+        digest = compute_memory_digest(valid_content)
+        now = require_utc(self._clock())
+        return self._persistence.edit_memory(
+            owner_user_id=owner_user_id,
+            memory_item_id=memory_item_id,
+            expected_version=expected_version,
+            content=valid_content,
+            content_digest=digest,
+            now=now,
+        )
+
+    def delete_memory(
+        self,
+        *,
+        owner_user_id: int,
+        memory_item_id: int,
+        expected_version: int | None = None,
+    ) -> None:
+        if expected_version is not None and expected_version <= 0:
+            raise ValueError("expected_version must be positive")
+        now = require_utc(self._clock())
+        self._persistence.delete_memory(
+            owner_user_id=owner_user_id,
+            memory_item_id=memory_item_id,
+            expected_version=expected_version,
+            now=now,
+        )
 
     def retrieve_candidates(
         self, owner_user_id: int, agent_instance_id: int, limit: int = 50

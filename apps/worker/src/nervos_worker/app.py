@@ -61,8 +61,8 @@ from nervos_worker.mcp import McpRegistrySynchronizer, build_mcp_gateway
 from nervos_worker.registry import ReclaimLoop, WorkerRegistry
 from nervos_worker.service import Worker
 
-# Bumped only by the milestone that adds a migration. F3 ships migration 0011.
-EXPECTED_SCHEMA_REVISION = "0011_stage_f3_scoped_memory"
+# Bumped only by the milestone that adds a migration. F4 ships migration 0012.
+EXPECTED_SCHEMA_REVISION = "0012_stage_f4_conversation_lifecycle"
 
 
 def utc_now() -> datetime:

@@ -57,3 +57,25 @@ def test_memory_enums() -> None:
 
     assert MemoryStatus.ACTIVE == "active"
     assert MemoryStatus.DELETED == "deleted"
+
+
+def test_stale_memory_version_exception() -> None:
+    from nervos_core.domain.memory import StaleMemoryVersion
+
+    err = StaleMemoryVersion("Version mismatch: expected 1, got 2")
+    assert "Version mismatch" in str(err)
+
+
+def test_conversation_status_validation() -> None:
+    from nervos_core.domain.conversations import (
+        ConversationStatus,
+        InvalidConversation,
+        validate_conversation_status,
+    )
+
+    assert validate_conversation_status("active") == ConversationStatus.ACTIVE
+    assert validate_conversation_status("archived") == ConversationStatus.ARCHIVED
+    assert validate_conversation_status("deleted") == ConversationStatus.DELETED
+
+    with pytest.raises(InvalidConversation, match="invalid ConversationStatus"):
+        validate_conversation_status("unknown")

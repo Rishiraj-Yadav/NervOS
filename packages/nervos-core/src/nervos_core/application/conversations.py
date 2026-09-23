@@ -13,10 +13,12 @@ from nervos_core.domain.context import ContextSnapshotData
 from nervos_core.domain.conversations import (
     Conversation,
     ConversationMessage,
+    ConversationStatus,
     ConversationTurn,
     TurnState,
     compute_content_digest,
     validate_client_message_id,
+    validate_conversation_status,
     validate_conversation_title,
     validate_message_content,
 )
@@ -25,6 +27,14 @@ from nervos_core.domain.runs import RunLimits
 
 class ConversationNotFound(LookupError):
     """Raised when a Conversation does not exist or belongs to another owner."""
+
+
+class ConversationArchived(Exception):
+    """Raised when an operation is rejected because the conversation is archived."""
+
+
+class ConversationDeleted(Exception):
+    """Raised when an operation is rejected because the conversation is deleted."""
 
 
 class ConversationBusy(Exception):
@@ -74,7 +84,32 @@ class ConversationPersistence(Protocol):
         limit: int,
         before_id: int | None,
         agent_instance_id: int | None = None,
+        status: ConversationStatus = ConversationStatus.ACTIVE,
     ) -> tuple[Conversation, ...]: ...
+
+    def archive_conversation(
+        self,
+        *,
+        owner_user_id: int,
+        conversation_id: int,
+        now: datetime,
+    ) -> Conversation: ...
+
+    def unarchive_conversation(
+        self,
+        *,
+        owner_user_id: int,
+        conversation_id: int,
+        now: datetime,
+    ) -> Conversation: ...
+
+    def delete_conversation(
+        self,
+        *,
+        owner_user_id: int,
+        conversation_id: int,
+        now: datetime,
+    ) -> None: ...
 
     def send_message(
         self,
@@ -177,16 +212,65 @@ class ConversationService:
         limit: int = 20,
         before_id: int | None = None,
         agent_instance_id: int | None = None,
+        status: ConversationStatus | str = ConversationStatus.ACTIVE,
     ) -> tuple[Conversation, ...]:
         if not 1 <= limit <= 50:
             raise ValueError("limit must be between 1 and 50")
         if before_id is not None and before_id <= 0:
             raise ValueError("before_id must be positive")
+        resolved_status = (
+            validate_conversation_status(str(status))
+            if not isinstance(status, ConversationStatus)
+            else status
+        )
+        if resolved_status == ConversationStatus.DELETED:
+            # Active product list never exposes deleted conversations
+            return ()
         if agent_instance_id is not None:
             # Pre-flight ownership check
             self._agents.get_instance(owner_user_id, agent_instance_id)
         return self._persistence.list_conversations(
-            owner_user_id, limit, before_id, agent_instance_id=agent_instance_id
+            owner_user_id,
+            limit,
+            before_id,
+            agent_instance_id=agent_instance_id,
+            status=resolved_status,
+        )
+
+    def archive_conversation(
+        self,
+        owner_user_id: int,
+        conversation_id: int,
+    ) -> Conversation:
+        now = require_utc(self._clock())
+        return self._persistence.archive_conversation(
+            owner_user_id=owner_user_id,
+            conversation_id=conversation_id,
+            now=now,
+        )
+
+    def unarchive_conversation(
+        self,
+        owner_user_id: int,
+        conversation_id: int,
+    ) -> Conversation:
+        now = require_utc(self._clock())
+        return self._persistence.unarchive_conversation(
+            owner_user_id=owner_user_id,
+            conversation_id=conversation_id,
+            now=now,
+        )
+
+    def delete_conversation(
+        self,
+        owner_user_id: int,
+        conversation_id: int,
+    ) -> None:
+        now = require_utc(self._clock())
+        self._persistence.delete_conversation(
+            owner_user_id=owner_user_id,
+            conversation_id=conversation_id,
+            now=now,
         )
 
     def send_message(

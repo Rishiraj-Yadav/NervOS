@@ -1,10 +1,13 @@
-import { apiRequest } from "./client";
+import { apiRequest, apiRequestNoContent } from "./client";
 
 export interface ConversationListItem {
   id: number;
   owner_user_id: number;
   agent_instance_id: number;
   title: string | null;
+  status: "active" | "archived" | "deleted";
+  archived_at: string | null;
+  deleted_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -14,6 +17,9 @@ export interface ConversationDetail {
   owner_user_id: number;
   agent_instance_id: number;
   title: string | null;
+  status: "active" | "archived" | "deleted";
+  archived_at: string | null;
+  deleted_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -90,12 +96,14 @@ export const listConversations = (params?: {
   limit?: number;
   before_id?: number;
   agent_instance_id?: number;
+  status?: "active" | "archived";
 }) => {
   const query = new URLSearchParams();
   if (params?.limit) query.set("limit", String(params.limit));
   if (params?.before_id) query.set("before_id", String(params.before_id));
   if (params?.agent_instance_id)
     query.set("agent_instance_id", String(params.agent_instance_id));
+  if (params?.status) query.set("status", params.status);
   const qs = query.toString() ? `?${query.toString()}` : "";
   return apiRequest(`/conversations${qs}`, isConversationPage);
 };
@@ -105,6 +113,15 @@ export const getConversation = (id: number) =>
 
 export const createConversation = (body: ConversationCreate) =>
   apiRequest(`/conversations`, isConversation, { method: "POST", body });
+
+export const archiveConversation = (id: number) =>
+  apiRequest(`/conversations/${id}/archive`, isConversation, { method: "POST" });
+
+export const unarchiveConversation = (id: number) =>
+  apiRequest(`/conversations/${id}/unarchive`, isConversation, { method: "POST" });
+
+export const deleteConversation = (id: number) =>
+  apiRequestNoContent(`/conversations/${id}`, { method: "DELETE" });
 
 export const sendMessage = (conversationId: number, body: SendMessage) =>
   apiRequest(`/conversations/${conversationId}/messages`, isTurn, {

@@ -6,7 +6,7 @@ from typing import Annotated, Literal
 from nervos_core.application.mcp_connections import McpConnectionRow
 from nervos_core.domain.agents import AgentInstance, InvalidAgentInstance
 from nervos_core.domain.jobs import JobStatus, RunEvent, RunEventType
-from nervos_core.domain.memory import MemoryItemDetail
+from nervos_core.domain.memory import MemoryItemDetail, MemoryVersion
 from nervos_core.domain.runs import ModelUsage, Run, RunStatus
 from nervos_core.domain.triggers import TriggerDefinition, TriggerOccurrence
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
@@ -633,6 +633,9 @@ class ConversationListItemResponse(BaseModel):
     owner_user_id: int
     agent_instance_id: int
     title: str | None
+    status: str = "active"
+    archived_at: datetime | None = None
+    deleted_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -642,6 +645,9 @@ class ConversationResponse(BaseModel):
     owner_user_id: int
     agent_instance_id: int
     title: str | None
+    status: str = "active"
+    archived_at: datetime | None = None
+    deleted_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -700,6 +706,13 @@ class MemoryPromoteRequest(BaseModel):
     agent_instance_id: int | None = None
 
 
+class MemoryEditRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: Annotated[int, Field(ge=1)]
+    content: Annotated[str, Field(min_length=1, max_length=16000)]
+
+
 class MemoryItemResponse(BaseModel):
     id: int
     owner_user_id: int
@@ -730,3 +743,41 @@ class MemoryItemResponse(BaseModel):
             created_at=detail.item.created_at,
             updated_at=detail.item.updated_at,
         )
+
+
+class MemoryPageResponse(BaseModel):
+    items: list[MemoryItemResponse]
+    next_before_id: int | None
+
+
+class MemoryVersionResponse(BaseModel):
+    id: int
+    memory_item_id: int
+    version: int
+    content: str
+    content_digest: str
+    source_kind: str
+    source_id: int | None
+    provenance_type: str
+    created_by_user_id: int
+    created_at: datetime
+
+    @classmethod
+    def from_domain(cls, version: MemoryVersion) -> "MemoryVersionResponse":
+        return cls(
+            id=version.id,
+            memory_item_id=version.memory_item_id,
+            version=version.version,
+            content=version.content,
+            content_digest=version.content_digest.hex(),
+            source_kind=version.source_kind.value,
+            source_id=version.source_id,
+            provenance_type=version.provenance_type.value,
+            created_by_user_id=version.created_by_user_id,
+            created_at=version.created_at,
+        )
+
+
+class MemoryVersionPageResponse(BaseModel):
+    items: list[MemoryVersionResponse]
+    next_before_version: int | None
