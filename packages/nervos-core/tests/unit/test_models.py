@@ -34,6 +34,8 @@ def test_metadata_contains_exact_application_tables() -> None:
         "conversation_run_links",
         "run_context_snapshots",
         "conversation_compactions",
+        "memory_items",
+        "memory_versions",
     }
 
 

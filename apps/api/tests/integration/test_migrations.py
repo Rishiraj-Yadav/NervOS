@@ -54,6 +54,9 @@ APPLICATION_TABLES = {
     # Stage F (F2): context snapshots and compactions.
     "run_context_snapshots",
     "conversation_compactions",
+    # Stage F (F3): scoped memory items and versions.
+    "memory_items",
+    "memory_versions",
 }
 DEFAULT_DATABASE = (Path.home() / ".nervos" / "nervos.db").resolve(strict=False)
 
@@ -115,7 +118,7 @@ def test_upgrade_drift_downgrade_and_reupgrade(
         assert application_tables(engine) == APPLICATION_TABLES
         with engine.connect() as connection:
             current_revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
-            assert current_revision == F2_REVISION
+            assert current_revision == F3_REVISION
             assert connection.scalar(text("PRAGMA foreign_keys")) == 1
             assert connection.scalar(text("PRAGMA busy_timeout")) == 5000
         command.check(config)
@@ -1244,7 +1247,7 @@ def test_the_c5_downgrade_is_clean_when_nothing_needs_cancellation(
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM runs")) == 1
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                F2_REVISION
+                F3_REVISION
             )
     finally:
         engine.dispose()
@@ -1330,7 +1333,7 @@ def test_migration_0006_creates_only_the_fairness_table(
         assert "queue_partitions" in application_tables(engine)
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                F2_REVISION
+                F3_REVISION
             )
             columns = [
                 str(row[1])
@@ -1471,6 +1474,7 @@ REVIEWED_MIGRATIONS = [
     "0008_stage_e1_trigger_scheduling.py",
     "0009_stage_f1_conversations.py",
     "0010_stage_f2_context_snapshots_and_compactions.py",
+    "0011_stage_f3_scoped_memory.py",
 ]
 
 
@@ -1492,8 +1496,8 @@ def test_c7_consumed_no_migration_number() -> None:
     names = sorted(path.name for path in VERSIONS.glob("*.py"))
 
     assert names == REVIEWED_MIGRATIONS
-    assert names[-1] == "0010_stage_f2_context_snapshots_and_compactions.py"
-    assert not any(name.startswith("0011") for name in names)
+    assert names[-1] == "0011_stage_f3_scoped_memory.py"
+    assert not any(name.startswith("0012") for name in names)
 
 
 def test_the_run_event_index_set_is_the_same_one_c6_shipped(
@@ -1529,6 +1533,7 @@ def test_the_run_event_index_set_is_the_same_one_c6_shipped(
 E1_REVISION = "0008_stage_e1_trigger_scheduling"
 F1_REVISION = "0009_stage_f1_conversations"
 F2_REVISION = "0010_stage_f2_context_snapshots_and_compactions"
+F3_REVISION = "0011_stage_f3_scoped_memory"
 # The E1 downgrade lands at D1, not at C6: `0008`'s `down_revision` is `0007`, so downgrading E1
 # exercises exactly one migration's downgrade. Asking for `0006` would additionally run D1's own
 # downgrade, which is D1's contract to prove (see `test_migrations_d1.py`) and not E1's.
@@ -1687,7 +1692,7 @@ def test_the_stage_e_downgrade_is_clean_when_nothing_needs_keeping(
     engine = create_sqlite_engine(database_path)
     try:
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == F2_REVISION
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == F3_REVISION
     finally:
         engine.dispose()
 
@@ -1772,7 +1777,7 @@ def test_migration_0010_creates_snapshots_and_compactions_and_context_mode(
         assert "conversation_compactions" in application_tables(engine)
 
         with engine.connect() as conn:
-            assert conn.scalar(text("SELECT version_num FROM alembic_version")) == F2_REVISION
+            assert conn.scalar(text("SELECT version_num FROM alembic_version")) == F3_REVISION
 
             # Verify existing link backfilled with f1_single_turn
             mode = conn.scalar(text("SELECT context_mode FROM conversation_run_links WHERE id = 1"))

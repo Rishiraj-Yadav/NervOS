@@ -6,6 +6,7 @@ from typing import Annotated, Literal
 from nervos_core.application.mcp_connections import McpConnectionRow
 from nervos_core.domain.agents import AgentInstance, InvalidAgentInstance
 from nervos_core.domain.jobs import JobStatus, RunEvent, RunEventType
+from nervos_core.domain.memory import MemoryItemDetail
 from nervos_core.domain.runs import ModelUsage, Run, RunStatus
 from nervos_core.domain.triggers import TriggerDefinition, TriggerOccurrence
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
@@ -679,3 +680,53 @@ class ConversationTurnResponse(BaseModel):
 class ConversationTurnPageResponse(BaseModel):
     items: list[ConversationTurnResponse]
     next_before_sequence: int | None
+
+
+class MemoryCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scope: Literal["user", "agent"]
+    content: Annotated[str, Field(min_length=1, max_length=16000)]
+    agent_instance_id: int | None = None
+
+
+class MemoryPromoteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_type: Literal["conversation_message", "run"]
+    source_id: int
+    scope: Literal["user", "agent"]
+    content: Annotated[str | None, Field(min_length=1, max_length=16000)] = None
+    agent_instance_id: int | None = None
+
+
+class MemoryItemResponse(BaseModel):
+    id: int
+    owner_user_id: int
+    agent_instance_id: int | None
+    scope: str
+    status: str
+    current_version: int
+    content: str
+    source_kind: str
+    source_id: int | None
+    provenance_type: str
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_domain(cls, detail: MemoryItemDetail) -> "MemoryItemResponse":
+        return cls(
+            id=detail.item.id,
+            owner_user_id=detail.item.owner_user_id,
+            agent_instance_id=detail.item.agent_instance_id,
+            scope=detail.item.scope.value,
+            status=detail.item.status.value,
+            current_version=detail.item.current_version,
+            content=detail.current_version_record.content,
+            source_kind=detail.current_version_record.source_kind.value,
+            source_id=detail.current_version_record.source_id,
+            provenance_type=detail.current_version_record.provenance_type.value,
+            created_at=detail.item.created_at,
+            updated_at=detail.item.updated_at,
+        )

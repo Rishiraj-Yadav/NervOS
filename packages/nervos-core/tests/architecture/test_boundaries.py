@@ -52,6 +52,9 @@ EXPECTED_TABLES = {
     # F2 adds context snapshots and compactions.
     "run_context_snapshots",
     "conversation_compactions",
+    # F3 adds scoped memory items and versions.
+    "memory_items",
+    "memory_versions",
 }
 FORBIDDEN_SUBSYSTEMS = (
     "message",
@@ -206,6 +209,7 @@ def test_b3_route_surface_and_migration_freeze() -> None:
     assert "runs_router" in router_text
     assert "mcp_connections_router" in router_text
     assert "conversations_router" in router_text
+    assert "memories_router" in router_text
 
     migrations = sorted((ROOT / "apps" / "api" / "alembic" / "versions").glob("*.py"))
     assert [path.name for path in migrations] == [
@@ -223,6 +227,8 @@ def test_b3_route_surface_and_migration_freeze() -> None:
         "0009_stage_f1_conversations.py",
         # F2 adds context snapshots and compactions.
         "0010_stage_f2_context_snapshots_and_compactions.py",
+        # F3 adds scoped memory items and versions.
+        "0011_stage_f3_scoped_memory.py",
     ]
     # The Worker refuses to run against a schema it does not expect, so the pinned revision and
     # the migration head are one fact in two places. Letting them drift bricks the supervised
@@ -629,6 +635,8 @@ def test_c7_adds_only_the_reviewed_observability_surface() -> None:
         "health.py",
         # D5 is authorized exactly one new control-plane resource family: MCP connections.
         "mcp_connections.py",
+        # F3 is authorized the memories resource family.
+        "memories.py",
         "runs.py",
         "setup.py",
         # E4 is authorized exactly one new control-plane resource family: triggers.
@@ -1074,12 +1082,12 @@ def test_the_frontend_gained_only_event_vocabulary() -> None:
         assert forbidden not in timeline, forbidden
 
 
-def test_the_migration_head_is_exactly_0010_and_no_0011_exists() -> None:
-    """F2 adds context snapshots and compactions, and nothing beyond that head."""
+def test_the_migration_head_is_exactly_0011_and_no_0012_exists() -> None:
+    """F3 adds scoped memory, and nothing beyond that head."""
     versions = ROOT / "apps" / "api" / "alembic" / "versions"
     discovered = sorted(path.name for path in versions.glob("*.py"))
-    assert discovered[-1] == "0010_stage_f2_context_snapshots_and_compactions.py"
-    assert not any(name.startswith("0011") for name in discovered), discovered
+    assert discovered[-1] == "0011_stage_f3_scoped_memory.py"
+    assert not any(name.startswith("0012") for name in discovered), discovered
 
 
 def test_nervos_mcp_depends_only_on_public_sdk_surfaces() -> None:
@@ -1347,10 +1355,7 @@ def test_the_scheduler_declares_its_own_schema_expectation() -> None:
     scheduler_app = (ROOT / "apps" / "scheduler" / "src" / "nervos_scheduler" / "app.py").read_text(
         encoding="utf-8"
     )
-    assert (
-        'EXPECTED_SCHEMA_REVISION = "0010_stage_f2_context_snapshots_and_compactions"'
-        in scheduler_app
-    )
+    assert 'EXPECTED_SCHEMA_REVISION = "0011_stage_f3_scoped_memory"' in scheduler_app
     assert "nervos_worker" not in scheduler_app
     main = (ROOT / "apps" / "scheduler" / "src" / "nervos_scheduler" / "main.py").read_text(
         encoding="utf-8"

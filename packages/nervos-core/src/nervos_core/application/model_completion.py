@@ -315,6 +315,8 @@ class ModelRequest:
     turns: tuple[ConversationTurn, ...] = ()
     history: tuple[HistoricalMessage, ...] = ()
     compaction_context: str | None = None
+    user_memory_context: str | None = None
+    agent_memory_context: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

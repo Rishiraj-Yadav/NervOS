@@ -14,6 +14,7 @@ from nervos_core.application.authentication import (
 )
 from nervos_core.application.conversations import ConversationService
 from nervos_core.application.mcp_connection_service import McpConnectionService
+from nervos_core.application.memory import MemoryService
 from nervos_core.application.model_providers import ModelProviderCatalog
 from nervos_core.application.run_cancellation import RunCancellationService
 from nervos_core.application.triggers import TriggerManagementService
@@ -73,6 +74,11 @@ def get_conversation_service(request: Request) -> ConversationService:
     return cast(ConversationService, request.app.state.conversation_service)
 
 
+def get_memory_service(request: Request) -> MemoryService:
+    """Return the owner-scoped memory service; routes never build one."""
+    return cast(MemoryService, request.app.state.memory_service)
+
+
 def require_configured_origin(
     request: Request,
     settings: Annotated[Settings, Depends(get_settings)],
@@ -118,6 +124,10 @@ TriggerManagementDependency = Annotated[
 ConversationServiceDependency = Annotated[
     ConversationService,
     Depends(get_conversation_service),
+]
+MemoryServiceDependency = Annotated[
+    MemoryService,
+    Depends(get_memory_service),
 ]
 OriginDependency = Annotated[None, Depends(require_configured_origin)]
 CurrentUserDependency = Annotated[PublicUser, Depends(get_current_user)]

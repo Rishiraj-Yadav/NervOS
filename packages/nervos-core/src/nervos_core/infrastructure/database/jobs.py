@@ -72,6 +72,7 @@ from nervos_core.domain.context import (
     ContextSnapshotData,
     deserialize_history_messages,
     deserialize_id_list,
+    deserialize_selected_memories,
 )
 from nervos_core.domain.jobs import (
     AttemptStatus,
@@ -2496,6 +2497,9 @@ class SqlAlchemyJobExecutionPersistence:
             comp_start = row["compaction_source_start"]
             comp_end = row["compaction_source_end"]
             inj_comp = row["injected_compaction_text"]
+            mem_raw = row.get("memory_items_json", "[]")
+            inj_user_mem = row.get("injected_user_memory_text", None)
+            inj_agent_mem = row.get("injected_agent_memory_text", None)
             return ContextSnapshotData(
                 run_id=int(row["run_id"]),
                 turn_id=int(row["turn_id"]),
@@ -2518,6 +2522,11 @@ class SqlAlchemyJobExecutionPersistence:
                 rendered_context=str(row["rendered_context"]),
                 content_digest=bytes(row["content_digest"]),
                 created_at=created,
+                selected_memories=(deserialize_selected_memories(str(mem_raw)) if mem_raw else ()),
+                injected_user_memory_text=(str(inj_user_mem) if inj_user_mem is not None else None),
+                injected_agent_memory_text=(
+                    str(inj_agent_mem) if inj_agent_mem is not None else None
+                ),
             )
 
         return self._runner.run(operation)

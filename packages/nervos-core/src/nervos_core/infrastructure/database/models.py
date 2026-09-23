@@ -1166,6 +1166,9 @@ class RunContextSnapshotRecord(Base):
     rendered_context: Mapped[str] = mapped_column(Text, nullable=False)
     content_digest: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    memory_items_json: Mapped[str] = mapped_column(Text, nullable=False, server_default="[]")
+    injected_user_memory_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    injected_agent_memory_text: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ConversationCompactionRecord(Base):
@@ -1203,6 +1206,95 @@ class ConversationCompactionRecord(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     content_digest: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class MemoryItemRecord(Base):
+    """Durable memory item identity and current-version pointer."""
+
+    __tablename__ = "memory_items"
+    __table_args__ = (
+        ForeignKeyConstraint(["owner_user_id"], ["users.id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(["agent_instance_id"], ["agent_instances.id"], ondelete="RESTRICT"),
+        PrimaryKeyConstraint("id"),
+        CheckConstraint("scope IN ('user','agent')", name="scope_value"),
+        CheckConstraint(
+            "(scope = 'user' AND agent_instance_id IS NULL) OR "
+            "(scope = 'agent' AND agent_instance_id IS NOT NULL)",
+            name="scope_agent_shape",
+        ),
+        CheckConstraint("status IN ('active','deleted')", name="status_value"),
+        CheckConstraint("current_version > 0", name="current_version_positive"),
+        CheckConstraint("updated_at >= created_at", name="timestamp_order"),
+        Index(
+            "ix_memory_items_owner_scope_status",
+            "owner_user_id",
+            "scope",
+            "status",
+            "id",
+        ),
+        Index(
+            "ix_memory_items_owner_agent_status",
+            "owner_user_id",
+            "agent_instance_id",
+            "status",
+            "id",
+            sqlite_where=text("agent_instance_id IS NOT NULL"),
+        ),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    agent_instance_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    scope: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="active")
+    current_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class MemoryVersionRecord(Base):
+    """One immutable version of a memory item."""
+
+    __tablename__ = "memory_versions"
+    __table_args__ = (
+        ForeignKeyConstraint(["memory_item_id"], ["memory_items.id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(["created_by_user_id"], ["users.id"], ondelete="RESTRICT"),
+        PrimaryKeyConstraint("id"),
+        UniqueConstraint("memory_item_id", "version", name="uq_memory_versions_item_version"),
+        CheckConstraint("version > 0", name="version_positive"),
+        CheckConstraint(
+            f"length(content) >= 1 AND length(CAST(content AS BLOB)) <= 32000 AND instr(content, char(0)) = 0 AND length(trim(content, {NERVOS_BLANK_TEXT_SQL_CHARS})) > 0",
+            name="content_bounds",
+        ),
+        CheckConstraint("length(content_digest) = 32", name="content_digest_length"),
+        CheckConstraint(
+            "(source_kind = 'direct_user' AND source_id IS NULL) OR "
+            "(source_kind IN ('promoted_message','promoted_run') AND source_id IS NOT NULL)",
+            name="source_shape",
+        ),
+        CheckConstraint(
+            "source_kind IN ('direct_user','promoted_message','promoted_run')",
+            name="source_kind_value",
+        ),
+        CheckConstraint(
+            "provenance_type IN ('user_authored','user_approved_inferred')",
+            name="provenance_type_value",
+        ),
+        Index("ix_memory_versions_item_version", "memory_item_id", "version"),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    memory_item_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    content_digest: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    source_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    provenance_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_by_user_id: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
