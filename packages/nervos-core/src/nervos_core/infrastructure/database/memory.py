@@ -6,7 +6,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 
-from sqlalchemy import Engine, and_, func, insert, select
+from sqlalchemy import Engine, and_, func, insert, select, update
 from sqlalchemy.engine import Connection, RowMapping
 
 from nervos_core.application.memory import (
@@ -24,6 +24,7 @@ from nervos_core.domain.memory import (
     MemorySourceKind,
     MemoryStatus,
     MemoryVersion,
+    StaleMemoryVersion,
     compute_memory_digest,
     validate_memory_content,
 )
@@ -560,6 +561,7 @@ class SqlAlchemyMemoryPersistence:
                     .where(
                         MemoryItemRecord.id == memory_item_id,
                         MemoryItemRecord.owner_user_id == owner_user_id,
+                        MemoryItemRecord.status == MemoryStatus.ACTIVE.value,
                     )
                 )
                 .mappings()
@@ -582,6 +584,249 @@ class SqlAlchemyMemoryPersistence:
                 created_at=_as_utc(row["version_created_at"]) or item.created_at,
             )
             return MemoryItemDetail(item=item, current_version_record=version)
+
+        return self._runner.run(operation)
+
+    def list_memories(
+        self,
+        *,
+        owner_user_id: int,
+        scope: MemoryScope | None = None,
+        agent_instance_id: int | None = None,
+        before_id: int | None = None,
+        limit: int = 20,
+    ) -> tuple[tuple[MemoryItemDetail, ...], int | None]:
+        def operation(connection: Connection) -> tuple[tuple[MemoryItemDetail, ...], int | None]:
+            stmt = (
+                select(
+                    MemoryItemRecord.id,
+                    MemoryItemRecord.owner_user_id,
+                    MemoryItemRecord.agent_instance_id,
+                    MemoryItemRecord.scope,
+                    MemoryItemRecord.status,
+                    MemoryItemRecord.current_version,
+                    MemoryItemRecord.created_at,
+                    MemoryItemRecord.updated_at,
+                    MemoryVersionRecord.id.label("version_id"),
+                    MemoryVersionRecord.version,
+                    MemoryVersionRecord.content,
+                    MemoryVersionRecord.content_digest,
+                    MemoryVersionRecord.source_kind,
+                    MemoryVersionRecord.source_id,
+                    MemoryVersionRecord.provenance_type,
+                    MemoryVersionRecord.created_by_user_id,
+                    MemoryVersionRecord.created_at.label("version_created_at"),
+                )
+                .join(
+                    MemoryVersionRecord,
+                    and_(
+                        MemoryVersionRecord.memory_item_id == MemoryItemRecord.id,
+                        MemoryVersionRecord.version == MemoryItemRecord.current_version,
+                    ),
+                )
+                .where(
+                    MemoryItemRecord.owner_user_id == owner_user_id,
+                    MemoryItemRecord.status == MemoryStatus.ACTIVE.value,
+                )
+            )
+            if scope is not None:
+                stmt = stmt.where(MemoryItemRecord.scope == scope.value)
+            if agent_instance_id is not None:
+                stmt = stmt.where(MemoryItemRecord.agent_instance_id == agent_instance_id)
+            if before_id is not None:
+                stmt = stmt.where(MemoryItemRecord.id < before_id)
+
+            stmt = stmt.order_by(MemoryItemRecord.id.desc()).limit(limit)
+            rows = connection.execute(stmt).mappings().all()
+
+            items = tuple(
+                MemoryItemDetail(
+                    item=_to_memory_item(row),
+                    current_version_record=MemoryVersion(
+                        id=int(row["version_id"]),
+                        memory_item_id=int(row["id"]),
+                        version=int(row["version"]),
+                        content=str(row["content"]),
+                        content_digest=bytes(row["content_digest"]),
+                        source_kind=MemorySourceKind(str(row["source_kind"])),
+                        source_id=int(row["source_id"]) if row["source_id"] is not None else None,
+                        provenance_type=MemoryProvenanceType(str(row["provenance_type"])),
+                        created_by_user_id=int(row["created_by_user_id"]),
+                        created_at=_as_utc(row["version_created_at"])
+                        or _to_memory_item(row).created_at,
+                    ),
+                )
+                for row in rows
+            )
+            next_before_id = items[-1].item.id if len(items) == limit else None
+            return items, next_before_id
+
+        return self._runner.run(operation)
+
+    def list_memory_versions(
+        self,
+        *,
+        owner_user_id: int,
+        memory_item_id: int,
+        before_version: int | None = None,
+        limit: int = 20,
+    ) -> tuple[tuple[MemoryVersion, ...], int | None]:
+        def operation(connection: Connection) -> tuple[tuple[MemoryVersion, ...], int | None]:
+            # Verify owner owns the item
+            item_exists = connection.execute(
+                select(MemoryItemRecord.id).where(
+                    MemoryItemRecord.id == memory_item_id,
+                    MemoryItemRecord.owner_user_id == owner_user_id,
+                    MemoryItemRecord.status == MemoryStatus.ACTIVE.value,
+                )
+            ).scalar_one_or_none()
+            if item_exists is None:
+                raise MemoryNotFound(f"Memory {memory_item_id} not found")
+
+            stmt = select(MemoryVersionRecord).where(
+                MemoryVersionRecord.memory_item_id == memory_item_id,
+            )
+            if before_version is not None:
+                stmt = stmt.where(MemoryVersionRecord.version < before_version)
+
+            stmt = stmt.order_by(MemoryVersionRecord.version.desc()).limit(limit)
+            rows = connection.execute(stmt).mappings().all()
+
+            versions = tuple(_to_memory_version(row) for row in rows)
+            next_before_ver = versions[-1].version if len(versions) == limit else None
+            return versions, next_before_ver
+
+        return self._runner.run(operation)
+
+    def edit_memory(
+        self,
+        *,
+        owner_user_id: int,
+        memory_item_id: int,
+        expected_version: int,
+        content: str,
+        content_digest: bytes,
+        now: datetime,
+    ) -> MemoryItemDetail:
+        def operation(connection: Connection) -> MemoryItemDetail:
+            item_row = (
+                connection.execute(
+                    select(MemoryItemRecord).where(
+                        MemoryItemRecord.id == memory_item_id,
+                        MemoryItemRecord.owner_user_id == owner_user_id,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if item_row is None or str(item_row["status"]) != MemoryStatus.ACTIVE.value:
+                raise MemoryNotFound(f"Memory {memory_item_id} not found")
+
+            current_ver = int(item_row["current_version"])
+            if current_ver != expected_version:
+                raise StaleMemoryVersion(
+                    f"Memory item {memory_item_id} version mismatch:"
+                    f" expected {expected_version}, got {current_ver}"
+                )
+
+            next_ver = current_ver + 1
+
+            # Insert new version record
+            ver_stmt = (
+                insert(MemoryVersionRecord)
+                .values(
+                    memory_item_id=memory_item_id,
+                    version=next_ver,
+                    content=content,
+                    content_digest=content_digest,
+                    source_kind=MemorySourceKind.DIRECT_USER.value,
+                    source_id=None,
+                    provenance_type=MemoryProvenanceType.USER_AUTHORED.value,
+                    created_by_user_id=owner_user_id,
+                    created_at=now,
+                )
+                .returning(MemoryVersionRecord)
+            )
+            ver_row = connection.execute(ver_stmt).mappings().one()
+            new_version = _to_memory_version(ver_row)
+
+            # Atomic CAS update of MemoryItemRecord
+            update_stmt = (
+                update(MemoryItemRecord)
+                .where(
+                    MemoryItemRecord.id == memory_item_id,
+                    MemoryItemRecord.owner_user_id == owner_user_id,
+                    MemoryItemRecord.current_version == expected_version,
+                    MemoryItemRecord.status == MemoryStatus.ACTIVE.value,
+                )
+                .values(
+                    current_version=next_ver,
+                    updated_at=now,
+                )
+                .returning(MemoryItemRecord)
+            )
+            updated_item_row = connection.execute(update_stmt).mappings().one_or_none()
+            if updated_item_row is None:
+                raise StaleMemoryVersion(
+                    f"Memory item {memory_item_id} version was concurrently modified"
+                )
+
+            item = _to_memory_item(updated_item_row)
+            return MemoryItemDetail(item=item, current_version_record=new_version)
+
+        return self._runner.run(operation)
+
+    def delete_memory(
+        self,
+        *,
+        owner_user_id: int,
+        memory_item_id: int,
+        expected_version: int | None = None,
+        now: datetime,
+    ) -> None:
+        def operation(connection: Connection) -> None:
+            item_row = (
+                connection.execute(
+                    select(MemoryItemRecord).where(
+                        MemoryItemRecord.id == memory_item_id,
+                        MemoryItemRecord.owner_user_id == owner_user_id,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if item_row is None:
+                raise MemoryNotFound(f"Memory {memory_item_id} not found")
+
+            if str(item_row["status"]) == MemoryStatus.DELETED.value:
+                # Idempotent success
+                return
+
+            current_ver = int(item_row["current_version"])
+            if expected_version is not None and current_ver != expected_version:
+                raise StaleMemoryVersion(
+                    f"Memory item {memory_item_id} version mismatch:"
+                    f" expected {expected_version}, got {current_ver}"
+                )
+
+            update_stmt = update(MemoryItemRecord).where(
+                MemoryItemRecord.id == memory_item_id,
+                MemoryItemRecord.owner_user_id == owner_user_id,
+                MemoryItemRecord.status == MemoryStatus.ACTIVE.value,
+            )
+            if expected_version is not None:
+                update_stmt = update_stmt.where(
+                    MemoryItemRecord.current_version == expected_version
+                )
+            update_stmt = update_stmt.values(
+                status=MemoryStatus.DELETED.value,
+                updated_at=now,
+            )
+            res = connection.execute(update_stmt)
+            if expected_version is not None and res.rowcount != 1:
+                raise StaleMemoryVersion(
+                    f"Memory item {memory_item_id} version was concurrently modified"
+                )
 
         return self._runner.run(operation)
 

@@ -199,3 +199,143 @@ def test_owner_and_agent_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     # User 2 cannot get User 1's memory by ID
     with pytest.raises(MemoryNotFound):
         service.get_memory(owner_user_id=user2, memory_item_id=1)
+
+
+def test_list_memories_and_versions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db = migrate(tmp_path / "list_mem_test.db", monkeypatch)
+    user_id, agent_id = _seed_user_and_agent(db)
+    service = _setup_service(db)
+
+    m1 = service.create_memory(owner_user_id=user_id, scope=MemoryScope.USER, content="Fact 1")
+    m2 = service.create_memory(
+        owner_user_id=user_id, scope=MemoryScope.AGENT, content="Fact 2", agent_instance_id=agent_id
+    )
+    m3 = service.create_memory(owner_user_id=user_id, scope=MemoryScope.USER, content="Fact 3")
+
+    # List all active memories (default 20, newest first: m3, m2, m1)
+    items, next_before_id = service.list_memories(owner_user_id=user_id, limit=20)
+    assert len(items) == 3
+    assert [i.item.id for i in items] == [m3.item.id, m2.item.id, m1.item.id]
+    assert next_before_id is None
+
+    # List with pagination limit=2
+    items_p1, next_id_p1 = service.list_memories(owner_user_id=user_id, limit=2)
+    assert len(items_p1) == 2
+    assert [i.item.id for i in items_p1] == [m3.item.id, m2.item.id]
+    assert next_id_p1 == m2.item.id
+
+    items_p2, next_id_p2 = service.list_memories(
+        owner_user_id=user_id, before_id=next_id_p1, limit=2
+    )
+    assert len(items_p2) == 1
+    assert items_p2[0].item.id == m1.item.id
+    assert next_id_p2 is None
+
+    # Filter by scope
+    user_items, _ = service.list_memories(owner_user_id=user_id, scope=MemoryScope.USER)
+    assert len(user_items) == 2
+    assert [i.item.id for i in user_items] == [m3.item.id, m1.item.id]
+
+    agent_items, _ = service.list_memories(
+        owner_user_id=user_id, scope=MemoryScope.AGENT, agent_instance_id=agent_id
+    )
+    assert len(agent_items) == 1
+    assert agent_items[0].item.id == m2.item.id
+
+
+def test_edit_memory_version_allocation_and_cas(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nervos_core.domain.memory import StaleMemoryVersion
+
+    db = migrate(tmp_path / "edit_mem_test.db", monkeypatch)
+    user_id, agent_id = _seed_user_and_agent(db)
+    service = _setup_service(db)
+
+    mem = service.create_memory(
+        owner_user_id=user_id,
+        scope=MemoryScope.AGENT,
+        content="Initial text",
+        agent_instance_id=agent_id,
+    )
+    assert mem.item.current_version == 1
+    assert mem.current_version_record.content == "Initial text"
+
+    # Successful edit with expected_version=1
+    edited = service.edit_memory(
+        owner_user_id=user_id,
+        memory_item_id=mem.item.id,
+        expected_version=1,
+        content="Updated text v2",
+    )
+    assert edited.item.current_version == 2
+    assert edited.current_version_record.version == 2
+    assert edited.current_version_record.content == "Updated text v2"
+    assert edited.current_version_record.provenance_type.value == "user_authored"
+
+    # Stale edit with expected_version=1 must fail with StaleMemoryVersion
+    with pytest.raises(StaleMemoryVersion, match="mismatch"):
+        service.edit_memory(
+            owner_user_id=user_id,
+            memory_item_id=mem.item.id,
+            expected_version=1,
+            content="Stale write",
+        )
+
+    # Historical versions are inspectable in reverse chronological order
+    versions, _ = service.list_memory_versions(owner_user_id=user_id, memory_item_id=mem.item.id)
+    assert len(versions) == 2
+    assert [v.version for v in versions] == [2, 1]
+    assert [v.content for v in versions] == ["Updated text v2", "Initial text"]
+
+    # Active retrieval returns only the new current version (v2)
+    candidates = service.retrieve_candidates(user_id, agent_id)
+    assert len(candidates) == 1
+    assert candidates[0].version == 2
+    assert candidates[0].content == "Updated text v2"
+
+
+def test_delete_memory_and_capacity_freeing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nervos_core.domain.memory import StaleMemoryVersion
+
+    db = migrate(tmp_path / "del_mem_test.db", monkeypatch)
+    user_id, agent_id = _seed_user_and_agent(db)
+    service = _setup_service(db)
+
+    mem = service.create_memory(
+        owner_user_id=user_id, scope=MemoryScope.USER, content="To be deleted"
+    )
+    mem_id = mem.item.id
+
+    # Stale expected_version on delete raises StaleMemoryVersion
+    with pytest.raises(StaleMemoryVersion, match="mismatch"):
+        service.delete_memory(owner_user_id=user_id, memory_item_id=mem_id, expected_version=999)
+
+    # Successful delete with matching expected_version
+    service.delete_memory(owner_user_id=user_id, memory_item_id=mem_id, expected_version=1)
+
+    # Deleted item is excluded from active get_memory
+    with pytest.raises(MemoryNotFound):
+        service.get_memory(owner_user_id=user_id, memory_item_id=mem_id)
+
+    # Deleted item is excluded from active list
+    items, _ = service.list_memories(owner_user_id=user_id)
+    assert len(items) == 0
+
+    # Deleted item is excluded from candidate retrieval
+    candidates = service.retrieve_candidates(user_id, agent_id)
+    assert len(candidates) == 0
+
+    # Deleted item cannot be edited
+    with pytest.raises(MemoryNotFound):
+        service.edit_memory(
+            owner_user_id=user_id,
+            memory_item_id=mem_id,
+            expected_version=1,
+            content="Should not work",
+        )
+
+    # Repeated delete is idempotent
+    service.delete_memory(owner_user_id=user_id, memory_item_id=mem_id)

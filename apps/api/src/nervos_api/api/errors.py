@@ -21,8 +21,10 @@ from nervos_core.application.authentication import (
     SetupComplete,
 )
 from nervos_core.application.conversations import (
+    ConversationArchived,
     ConversationBusy,
     ConversationConflict,
+    ConversationDeleted,
     ConversationNotFound,
     TurnNotFound,
     TurnNotRetryable,
@@ -52,6 +54,7 @@ from nervos_core.domain.memory import (
     InvalidMemorySource,
     MemoryNotFound,
     MemoryScopeCapacityExceeded,
+    StaleMemoryVersion,
 )
 from nervos_core.domain.runs import InvalidRun
 from nervos_core.domain.scheduling import ScheduleCalculationError
@@ -250,6 +253,21 @@ AGENT_ERROR_MAP: dict[type[Exception], tuple[int, str, str]] = {
         409,
         "memory_scope_capacity_exceeded",
         "The memory scope has reached its maximum capacity.",
+    ),
+    StaleMemoryVersion: (
+        409,
+        "stale_memory_version",
+        "The memory version is stale.",
+    ),
+    ConversationArchived: (
+        409,
+        "conversation_archived",
+        "The conversation is archived.",
+    ),
+    ConversationDeleted: (
+        404,
+        "conversation_not_found",
+        "The conversation was not found.",
     ),
 }
 

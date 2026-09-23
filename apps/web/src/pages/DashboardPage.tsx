@@ -57,6 +57,17 @@ export function DashboardPage({ user }: { user: User }) {
             </Link>
           </div>
         </div>
+        <div className="panel ready-card" style={{ marginTop: "1rem" }}>
+          <div>
+            <h2>Scoped Memory</h2>
+            <p>
+              Inspect, edit, and manage durable USER and AGENT scoped facts.
+            </p>
+            <Link className="button-link" to="/memories">
+              Open memory
+            </Link>
+          </div>
+        </div>
       </section>
     </main>
   );

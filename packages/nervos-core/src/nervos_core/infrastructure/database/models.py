@@ -1003,6 +1003,13 @@ class ConversationRecord(Base):
             "title IS NULL OR (length(title) BETWEEN 1 AND 400 AND instr(title, char(0)) = 0)",
             name="title_shape",
         ),
+        CheckConstraint("status IN ('active','archived','deleted')", name="status_value"),
+        CheckConstraint(
+            "((status = 'active' AND archived_at IS NULL AND deleted_at IS NULL) OR "
+            "(status = 'archived' AND archived_at IS NOT NULL AND deleted_at IS NULL) OR "
+            "(status = 'deleted' AND deleted_at IS NOT NULL))",
+            name="lifecycle_timestamps",
+        ),
         CheckConstraint("updated_at >= created_at", name="timestamp_order"),
         ForeignKeyConstraint(
             ["agent_instance_id"],
@@ -1013,6 +1020,14 @@ class ConversationRecord(Base):
         PrimaryKeyConstraint("id"),
         Index("ix_conversations_owner_id", "owner_user_id", "id"),
         Index("ix_conversations_owner_agent", "owner_user_id", "agent_instance_id"),
+        Index("ix_conversations_owner_status_id", "owner_user_id", "status", "id"),
+        Index(
+            "ix_conversations_owner_agent_status_id",
+            "owner_user_id",
+            "agent_instance_id",
+            "status",
+            "id",
+        ),
         {"sqlite_autoincrement": True},
     )
 
@@ -1020,6 +1035,9 @@ class ConversationRecord(Base):
     owner_user_id: Mapped[int] = mapped_column(Integer, nullable=False)
     agent_instance_id: Mapped[int] = mapped_column(Integer, nullable=False)
     title: Mapped[str | None] = mapped_column(String(400), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="active")
+    archived_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 

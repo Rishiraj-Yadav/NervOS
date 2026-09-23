@@ -229,6 +229,8 @@ def test_b3_route_surface_and_migration_freeze() -> None:
         "0010_stage_f2_context_snapshots_and_compactions.py",
         # F3 adds scoped memory items and versions.
         "0011_stage_f3_scoped_memory.py",
+        # F4 adds conversation lifecycle (active/archived/deleted) state.
+        "0012_stage_f4_conversation_lifecycle.py",
     ]
     # The Worker refuses to run against a schema it does not expect, so the pinned revision and
     # the migration head are one fact in two places. Letting them drift bricks the supervised
@@ -1082,12 +1084,12 @@ def test_the_frontend_gained_only_event_vocabulary() -> None:
         assert forbidden not in timeline, forbidden
 
 
-def test_the_migration_head_is_exactly_0011_and_no_0012_exists() -> None:
-    """F3 adds scoped memory, and nothing beyond that head."""
+def test_the_migration_head_is_exactly_0012_and_no_0013_exists() -> None:
+    """F4 adds conversation lifecycle, and nothing beyond that head."""
     versions = ROOT / "apps" / "api" / "alembic" / "versions"
     discovered = sorted(path.name for path in versions.glob("*.py"))
-    assert discovered[-1] == "0011_stage_f3_scoped_memory.py"
-    assert not any(name.startswith("0012") for name in discovered), discovered
+    assert discovered[-1] == "0012_stage_f4_conversation_lifecycle.py"
+    assert not any(name.startswith("0013") for name in discovered), discovered
 
 
 def test_nervos_mcp_depends_only_on_public_sdk_surfaces() -> None:
@@ -1355,7 +1357,7 @@ def test_the_scheduler_declares_its_own_schema_expectation() -> None:
     scheduler_app = (ROOT / "apps" / "scheduler" / "src" / "nervos_scheduler" / "app.py").read_text(
         encoding="utf-8"
     )
-    assert 'EXPECTED_SCHEMA_REVISION = "0011_stage_f3_scoped_memory"' in scheduler_app
+    assert 'EXPECTED_SCHEMA_REVISION = "0012_stage_f4_conversation_lifecycle"' in scheduler_app
     assert "nervos_worker" not in scheduler_app
     main = (ROOT / "apps" / "scheduler" / "src" / "nervos_scheduler" / "main.py").read_text(
         encoding="utf-8"
@@ -1536,22 +1538,27 @@ def test_e4_exposes_only_the_reviewed_management_surface_and_the_delivery_ingres
     assert frontend == ""
 
 
-#: The exact reviewed F1 conversation control-plane surface, as (verb, path) pairs.
+#: The exact reviewed conversation control-plane surface, as (verb, path) pairs.
+# F1 shipped the base surface; F4 adds the lifecycle archive/unarchive/delete.
 F1_CONVERSATION_ROUTES = [
+    ("delete", "/{conversation_id}"),
     ("get", ""),
     ("get", "/{conversation_id}"),
     ("get", "/{conversation_id}/turns"),
     ("post", ""),
+    ("post", "/{conversation_id}/archive"),
     ("post", "/{conversation_id}/messages"),
     ("post", "/{conversation_id}/turns/{turn_id}/retry"),
+    ("post", "/{conversation_id}/unarchive"),
 ]
 
 
 def test_f1_exposes_only_the_reviewed_conversation_surface() -> None:
-    """F1 is one owner-scoped resource family with exactly the reviewed route set.
+    """Conversations are one owner-scoped resource family with exactly the reviewed route set.
 
-    It has no archive/delete route (that is F4), no `/memories` (F3), no streaming, and no
-    direct provider or storage reach: the control plane accepts work and never executes it.
+    The lifecycle archive/unarchive/delete verbs are owned by F4. There is no `/memories` route
+    here (that is the memory router), no streaming, and no direct provider or storage reach: the
+    control plane accepts work and never executes it.
     """
     route_path = API_ROUTES / "conversations.py"
     assert route_path.exists()
@@ -1559,8 +1566,6 @@ def test_f1_exposes_only_the_reviewed_conversation_surface() -> None:
     assert 'APIRouter(prefix="/conversations")' in source
     assert sorted(_ROUTE_DECORATOR.findall(source)) == F1_CONVERSATION_ROUTES
     for forbidden in (
-        '"archive"',
-        '"delete"',
         '"memories"',
         "RunExecutor",
         "RunCoordinator",

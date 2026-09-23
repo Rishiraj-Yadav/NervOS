@@ -10,6 +10,7 @@ import { ConversationPage } from "./pages/ConversationPage";
 import { ConversationsPage } from "./pages/ConversationsPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { LoginPage } from "./pages/LoginPage";
+import { MemoriesPage } from "./pages/MemoriesPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
 import { SetupPage } from "./pages/SetupPage";
 import { useQuery } from "@tanstack/react-query";
@@ -25,6 +26,7 @@ export function AutomationRoute() { return <SessionView page="automation" />; }
 export function NewAutomationRoute() { return <SessionView page="new-automation" />; }
 export function ConversationsRoute() { return <SessionView page="conversations" />; }
 export function ConversationRoute() { return <SessionView page="conversation" />; }
+export function MemoriesRoute() { return <SessionView page="memories" />; }
 
 type Session =
   | { kind: "unconfigured" }
@@ -81,7 +83,7 @@ export function NotFoundRoute() {
   return <NotFoundPage />;
 }
 
-function SessionView({ page }: { page: "home" | "setup" | "login" | "agents" | "agent" | "automations" | "automation" | "new-automation" | "conversations" | "conversation" }) {
+function SessionView({ page }: { page: "home" | "setup" | "login" | "agents" | "agent" | "automations" | "automation" | "new-automation" | "conversations" | "conversation" | "memories" }) {
   const session = useOutletContext<Session>();
   const location = useLocation();
 
@@ -105,6 +107,7 @@ function SessionView({ page }: { page: "home" | "setup" | "login" | "agents" | "
   if (page === "new-automation") return <NewAutomationPage />;
   if (page === "conversations") return <ConversationsPage />;
   if (page === "conversation") return <ConversationPage />;
+  if (page === "memories") return <MemoriesPage />;
   return <Navigate to="/" replace />;
 }
 

@@ -6,26 +6,41 @@ import {
 import {
   ConversationCreate,
   SendMessage,
+  archiveConversation,
   createConversation,
+  deleteConversation,
   getConversation,
   listConversations,
   listTurns,
   retryTurn,
   sendMessage,
+  unarchiveConversation,
 } from "./conversations";
 
 export const conversationKeys = {
   all: ["conversations"] as const,
-  list: (agentInstanceId?: number) =>
-    [...conversationKeys.all, "list", agentInstanceId ?? "all"] as const,
+  list: (agentInstanceId?: number, status?: "active" | "archived") =>
+    [
+      ...conversationKeys.all,
+      "list",
+      agentInstanceId ?? "all",
+      status ?? "active",
+    ] as const,
   detail: (id: number) => [...conversationKeys.all, "detail", id] as const,
   turns: (id: number) => [...conversationKeys.all, "turns", id] as const,
 };
 
-export const conversationsListQuery = (agentInstanceId?: number) =>
+export const conversationsListQuery = (
+  agentInstanceId?: number,
+  status?: "active" | "archived"
+) =>
   queryOptions({
-    queryKey: conversationKeys.list(agentInstanceId),
-    queryFn: () => listConversations({ agent_instance_id: agentInstanceId }),
+    queryKey: conversationKeys.list(agentInstanceId, status),
+    queryFn: () =>
+      listConversations({
+        agent_instance_id: agentInstanceId,
+        status: status ?? "active",
+      }),
   });
 
 export const conversationDetailQuery = (id: number) =>
@@ -49,6 +64,31 @@ export const useConversationActions = () => {
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: conversationKeys.all });
       queryClient.setQueryData(conversationKeys.detail(data.id), data);
+    },
+  });
+
+  const archiveMutation = useMutation({
+    mutationFn: (id: number) => archiveConversation(id),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: conversationKeys.all });
+      queryClient.setQueryData(conversationKeys.detail(data.id), data);
+    },
+  });
+
+  const unarchiveMutation = useMutation({
+    mutationFn: (id: number) => unarchiveConversation(id),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: conversationKeys.all });
+      queryClient.setQueryData(conversationKeys.detail(data.id), data);
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => deleteConversation(id),
+    onSuccess: (_, id) => {
+      queryClient.invalidateQueries({ queryKey: conversationKeys.all });
+      queryClient.removeQueries({ queryKey: conversationKeys.detail(id) });
+      queryClient.removeQueries({ queryKey: conversationKeys.turns(id) });
     },
   });
 
@@ -86,6 +126,9 @@ export const useConversationActions = () => {
 
   return {
     createConversation: createMutation,
+    archiveConversation: archiveMutation,
+    unarchiveConversation: unarchiveMutation,
+    deleteConversation: deleteMutation,
     sendMessage: sendMessageMutation,
     retryTurn: retryTurnMutation,
   };

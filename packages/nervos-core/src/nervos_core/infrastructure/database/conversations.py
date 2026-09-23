@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 
 from nervos_core.application.context_builder import ContextBuilder
 from nervos_core.application.conversations import (
+    ConversationArchived,
     ConversationBusy,
     ConversationConflict,
     ConversationNotFound,
@@ -36,6 +37,7 @@ from nervos_core.domain.context import (
 from nervos_core.domain.conversations import (
     Conversation,
     ConversationMessage,
+    ConversationStatus,
     ConversationTurn,
     MessageRole,
     RunLinkRole,
@@ -76,9 +78,25 @@ def _rowcount(result: object) -> int:
 def _to_conversation(record: ConversationRecord | RowMapping) -> Conversation:
     created = _as_utc(record["created_at"] if isinstance(record, RowMapping) else record.created_at)
     updated = _as_utc(record["updated_at"] if isinstance(record, RowMapping) else record.updated_at)
+    archived_at = _as_utc(
+        record["archived_at"]
+        if isinstance(record, RowMapping)
+        else getattr(record, "archived_at", None)
+    )
+    deleted_at = _as_utc(
+        record["deleted_at"]
+        if isinstance(record, RowMapping)
+        else getattr(record, "deleted_at", None)
+    )
     assert created is not None
     assert updated is not None
     title = record["title"] if isinstance(record, RowMapping) else record.title
+    raw_status = (
+        record["status"] if isinstance(record, RowMapping) else getattr(record, "status", "active")
+    )
+    status = (
+        ConversationStatus(str(raw_status)) if raw_status is not None else ConversationStatus.ACTIVE
+    )
     return Conversation(
         id=int(record["id"] if isinstance(record, RowMapping) else record.id),
         owner_user_id=int(
@@ -92,6 +110,9 @@ def _to_conversation(record: ConversationRecord | RowMapping) -> Conversation:
         title=str(title) if title is not None else None,
         created_at=created,
         updated_at=updated,
+        status=status,
+        archived_at=archived_at,
+        deleted_at=deleted_at,
     )
 
 
@@ -324,7 +345,7 @@ class SqlAlchemyConversationPersistence:
                 .mappings()
                 .one_or_none()
             )
-            if row is None:
+            if row is None or str(row.get("status", "active")) == ConversationStatus.DELETED.value:
                 raise ConversationNotFound(f"Conversation {conversation_id} not found")
             return _to_conversation(row)
 
@@ -336,9 +357,13 @@ class SqlAlchemyConversationPersistence:
         limit: int,
         before_id: int | None,
         agent_instance_id: int | None = None,
+        status: ConversationStatus = ConversationStatus.ACTIVE,
     ) -> tuple[Conversation, ...]:
         def operation(connection: Connection) -> tuple[Conversation, ...]:
-            conditions = [ConversationRecord.owner_user_id == owner_user_id]
+            conditions = [
+                ConversationRecord.owner_user_id == owner_user_id,
+                ConversationRecord.status == status.value,
+            ]
             if before_id is not None:
                 conditions.append(ConversationRecord.id < before_id)
             if agent_instance_id is not None:
@@ -352,6 +377,134 @@ class SqlAlchemyConversationPersistence:
             )
             rows = connection.execute(stmt).mappings().all()
             return tuple(_to_conversation(row) for row in rows)
+
+        return self._runner.run(operation)
+
+    def archive_conversation(
+        self,
+        *,
+        owner_user_id: int,
+        conversation_id: int,
+        now: datetime,
+    ) -> Conversation:
+        def operation(connection: Connection) -> Conversation:
+            row = (
+                connection.execute(
+                    select(ConversationRecord).where(
+                        ConversationRecord.id == conversation_id,
+                        ConversationRecord.owner_user_id == owner_user_id,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if row is None or str(row.get("status", "active")) == ConversationStatus.DELETED.value:
+                raise ConversationNotFound(f"Conversation {conversation_id} not found")
+
+            if str(row.get("status")) == ConversationStatus.ARCHIVED.value:
+                return _to_conversation(row)
+
+            updated = (
+                connection.execute(
+                    update(ConversationRecord)
+                    .where(
+                        ConversationRecord.id == conversation_id,
+                        ConversationRecord.owner_user_id == owner_user_id,
+                        ConversationRecord.status == ConversationStatus.ACTIVE.value,
+                    )
+                    .values(
+                        status=ConversationStatus.ARCHIVED.value,
+                        archived_at=now,
+                        updated_at=now,
+                    )
+                    .returning(ConversationRecord)
+                )
+                .mappings()
+                .one()
+            )
+            return _to_conversation(updated)
+
+        return self._runner.run(operation)
+
+    def unarchive_conversation(
+        self,
+        *,
+        owner_user_id: int,
+        conversation_id: int,
+        now: datetime,
+    ) -> Conversation:
+        def operation(connection: Connection) -> Conversation:
+            row = (
+                connection.execute(
+                    select(ConversationRecord).where(
+                        ConversationRecord.id == conversation_id,
+                        ConversationRecord.owner_user_id == owner_user_id,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if row is None or str(row.get("status", "active")) == ConversationStatus.DELETED.value:
+                raise ConversationNotFound(f"Conversation {conversation_id} not found")
+
+            if str(row.get("status")) == ConversationStatus.ACTIVE.value:
+                return _to_conversation(row)
+
+            updated = (
+                connection.execute(
+                    update(ConversationRecord)
+                    .where(
+                        ConversationRecord.id == conversation_id,
+                        ConversationRecord.owner_user_id == owner_user_id,
+                        ConversationRecord.status == ConversationStatus.ARCHIVED.value,
+                    )
+                    .values(
+                        status=ConversationStatus.ACTIVE.value,
+                        archived_at=None,
+                        updated_at=now,
+                    )
+                    .returning(ConversationRecord)
+                )
+                .mappings()
+                .one()
+            )
+            return _to_conversation(updated)
+
+        return self._runner.run(operation)
+
+    def delete_conversation(
+        self,
+        *,
+        owner_user_id: int,
+        conversation_id: int,
+        now: datetime,
+    ) -> None:
+        def operation(connection: Connection) -> None:
+            row = (
+                connection.execute(
+                    select(ConversationRecord).where(
+                        ConversationRecord.id == conversation_id,
+                        ConversationRecord.owner_user_id == owner_user_id,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if row is None or str(row.get("status", "active")) == ConversationStatus.DELETED.value:
+                return
+
+            connection.execute(
+                update(ConversationRecord)
+                .where(
+                    ConversationRecord.id == conversation_id,
+                    ConversationRecord.owner_user_id == owner_user_id,
+                )
+                .values(
+                    status=ConversationStatus.DELETED.value,
+                    deleted_at=now,
+                    updated_at=now,
+                )
+            )
 
         return self._runner.run(operation)
 
@@ -455,8 +608,13 @@ class SqlAlchemyConversationPersistence:
                 .mappings()
                 .one_or_none()
             )
-            if conv_row is None:
+            if (
+                conv_row is None
+                or str(conv_row.get("status", "active")) == ConversationStatus.DELETED.value
+            ):
                 raise ConversationNotFound(f"Conversation {conversation_id} not found")
+            if str(conv_row.get("status")) == ConversationStatus.ARCHIVED.value:
+                raise ConversationArchived(f"Conversation {conversation_id} is archived")
 
             # 2. Check idempotency: same client_message_id
             existing_turn = (
@@ -719,14 +877,21 @@ class SqlAlchemyConversationPersistence:
         self, owner_user_id: int, conversation_id: int, turn_id: int
     ) -> ConversationTurnDetail:
         def operation(connection: Connection) -> ConversationTurnDetail:
-            # Check owner
-            conv = connection.execute(
-                select(ConversationRecord.id).where(
-                    ConversationRecord.id == conversation_id,
-                    ConversationRecord.owner_user_id == owner_user_id,
+            # Check owner and not deleted
+            conv = (
+                connection.execute(
+                    select(ConversationRecord.id, ConversationRecord.status).where(
+                        ConversationRecord.id == conversation_id,
+                        ConversationRecord.owner_user_id == owner_user_id,
+                    )
                 )
-            ).scalar_one_or_none()
-            if conv is None:
+                .mappings()
+                .one_or_none()
+            )
+            if (
+                conv is None
+                or str(conv.get("status", "active")) == ConversationStatus.DELETED.value
+            ):
                 raise ConversationNotFound(f"Conversation {conversation_id} not found")
 
             return self._load_turn_detail_on_connection(connection, conversation_id, turn_id)
@@ -741,13 +906,20 @@ class SqlAlchemyConversationPersistence:
         before_sequence: int | None,
     ) -> tuple[ConversationTurnDetail, ...]:
         def operation(connection: Connection) -> tuple[ConversationTurnDetail, ...]:
-            conv = connection.execute(
-                select(ConversationRecord.id).where(
-                    ConversationRecord.id == conversation_id,
-                    ConversationRecord.owner_user_id == owner_user_id,
+            conv = (
+                connection.execute(
+                    select(ConversationRecord.id, ConversationRecord.status).where(
+                        ConversationRecord.id == conversation_id,
+                        ConversationRecord.owner_user_id == owner_user_id,
+                    )
                 )
-            ).scalar_one_or_none()
-            if conv is None:
+                .mappings()
+                .one_or_none()
+            )
+            if (
+                conv is None
+                or str(conv.get("status", "active")) == ConversationStatus.DELETED.value
+            ):
                 raise ConversationNotFound(f"Conversation {conversation_id} not found")
 
             conditions = [ConversationTurnRecord.conversation_id == conversation_id]
@@ -796,8 +968,13 @@ class SqlAlchemyConversationPersistence:
                 .mappings()
                 .one_or_none()
             )
-            if conv is None:
+            if (
+                conv is None
+                or str(conv.get("status", "active")) == ConversationStatus.DELETED.value
+            ):
                 raise ConversationNotFound(f"Conversation {conversation_id} not found")
+            if str(conv.get("status")) == ConversationStatus.ARCHIVED.value:
+                raise ConversationArchived(f"Conversation {conversation_id} is archived")
 
             # 2. Select turn
             turn_row = (

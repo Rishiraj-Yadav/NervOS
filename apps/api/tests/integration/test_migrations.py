@@ -118,7 +118,7 @@ def test_upgrade_drift_downgrade_and_reupgrade(
         assert application_tables(engine) == APPLICATION_TABLES
         with engine.connect() as connection:
             current_revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
-            assert current_revision == F3_REVISION
+            assert current_revision == F4_REVISION
             assert connection.scalar(text("PRAGMA foreign_keys")) == 1
             assert connection.scalar(text("PRAGMA busy_timeout")) == 5000
         command.check(config)
@@ -1247,7 +1247,7 @@ def test_the_c5_downgrade_is_clean_when_nothing_needs_cancellation(
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM runs")) == 1
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                F3_REVISION
+                F4_REVISION
             )
     finally:
         engine.dispose()
@@ -1333,7 +1333,7 @@ def test_migration_0006_creates_only_the_fairness_table(
         assert "queue_partitions" in application_tables(engine)
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                F3_REVISION
+                F4_REVISION
             )
             columns = [
                 str(row[1])
@@ -1475,6 +1475,7 @@ REVIEWED_MIGRATIONS = [
     "0009_stage_f1_conversations.py",
     "0010_stage_f2_context_snapshots_and_compactions.py",
     "0011_stage_f3_scoped_memory.py",
+    "0012_stage_f4_conversation_lifecycle.py",
 ]
 
 
@@ -1496,8 +1497,8 @@ def test_c7_consumed_no_migration_number() -> None:
     names = sorted(path.name for path in VERSIONS.glob("*.py"))
 
     assert names == REVIEWED_MIGRATIONS
-    assert names[-1] == "0011_stage_f3_scoped_memory.py"
-    assert not any(name.startswith("0012") for name in names)
+    assert names[-1] == "0012_stage_f4_conversation_lifecycle.py"
+    assert not any(name.startswith("0013") for name in names)
 
 
 def test_the_run_event_index_set_is_the_same_one_c6_shipped(
@@ -1534,6 +1535,7 @@ E1_REVISION = "0008_stage_e1_trigger_scheduling"
 F1_REVISION = "0009_stage_f1_conversations"
 F2_REVISION = "0010_stage_f2_context_snapshots_and_compactions"
 F3_REVISION = "0011_stage_f3_scoped_memory"
+F4_REVISION = "0012_stage_f4_conversation_lifecycle"
 # The E1 downgrade lands at D1, not at C6: `0008`'s `down_revision` is `0007`, so downgrading E1
 # exercises exactly one migration's downgrade. Asking for `0006` would additionally run D1's own
 # downgrade, which is D1's contract to prove (see `test_migrations_d1.py`) and not E1's.
@@ -1692,7 +1694,7 @@ def test_the_stage_e_downgrade_is_clean_when_nothing_needs_keeping(
     engine = create_sqlite_engine(database_path)
     try:
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == F3_REVISION
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == F4_REVISION
     finally:
         engine.dispose()
 
@@ -1777,7 +1779,7 @@ def test_migration_0010_creates_snapshots_and_compactions_and_context_mode(
         assert "conversation_compactions" in application_tables(engine)
 
         with engine.connect() as conn:
-            assert conn.scalar(text("SELECT version_num FROM alembic_version")) == F3_REVISION
+            assert conn.scalar(text("SELECT version_num FROM alembic_version")) == F4_REVISION
 
             # Verify existing link backfilled with f1_single_turn
             mode = conn.scalar(text("SELECT context_mode FROM conversation_run_links WHERE id = 1"))
@@ -1904,5 +1906,99 @@ def test_the_stage_e_tables_are_empty_and_indexed_after_a_fresh_upgrade(
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM trigger_definitions")) == 0
             assert connection.scalar(text("SELECT count(*) FROM trigger_occurrences")) == 0
+    finally:
+        engine.dispose()
+
+
+def test_migration_0012_adds_conversation_lifecycle_columns_and_indexes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """0012 adds status, archived_at, deleted_at and status indexes to conversations."""
+    database_path = tmp_path / "f4-migration.db"
+    config = alembic_config(database_path, monkeypatch)
+
+    # 1. Upgrade to 0011
+    command.upgrade(config, F3_REVISION)
+    engine = create_sqlite_engine(database_path)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO users(id, username, password_hash, role, is_active,"
+                    " created_at, updated_at) VALUES(1, 'owner', X'00', 'admin', 1,"
+                    " '2026-09-22 12:00:00', '2026-09-22 12:00:00')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO agent_instances(id, owner_user_id, agent_key,"
+                    " agent_definition_version, display_name, enabled, model_provider,"
+                    " model_name, created_at, updated_at) VALUES(1, 1, 'nervos.chat', '1',"
+                    " 'Agent', 1, 'anthropic', 'opaque/model', '2026-09-22 12:00:00',"
+                    " '2026-09-22 12:00:00')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO conversations(id, owner_user_id, agent_instance_id, title,"
+                    " created_at, updated_at) VALUES(1, 1, 1, 'Pre-F4 Conv',"
+                    " '2026-09-22 12:00:00', '2026-09-22 12:00:00')"
+                )
+            )
+    finally:
+        engine.dispose()
+
+    # 2. Upgrade to 0012 (head)
+    command.upgrade(config, F4_REVISION)
+    engine = create_sqlite_engine(database_path)
+    try:
+        inspector = inspect(engine)
+        conv_cols = {col["name"]: col for col in inspector.get_columns("conversations")}
+        assert "status" in conv_cols
+        assert "archived_at" in conv_cols
+        assert "deleted_at" in conv_cols
+
+        indexes = {item["name"] for item in inspector.get_indexes("conversations")}
+        assert "ix_conversations_owner_status_id" in indexes
+        assert "ix_conversations_owner_agent_status_id" in indexes
+
+        with engine.connect() as conn:
+            row = (
+                conn.execute(
+                    text(
+                        "SELECT id, status, archived_at, deleted_at FROM conversations WHERE id = 1"
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            assert row["status"] == "active"
+            assert row["archived_at"] is None
+            assert row["deleted_at"] is None
+
+            assert conn.scalar(text("SELECT version_num FROM alembic_version")) == F4_REVISION
+            assert conn.exec_driver_sql("PRAGMA integrity_check").scalar() == "ok"
+            assert conn.exec_driver_sql("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        engine.dispose()
+
+    # 3. Test downgrade to 0011 and re-upgrade to 0012
+    command.downgrade(config, F3_REVISION)
+    engine = create_sqlite_engine(database_path)
+    try:
+        inspector = inspect(engine)
+        conv_cols = {col["name"]: col for col in inspector.get_columns("conversations")}
+        assert "status" not in conv_cols
+        assert "archived_at" not in conv_cols
+        assert "deleted_at" not in conv_cols
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_sqlite_engine(database_path)
+    try:
+        inspector = inspect(engine)
+        conv_cols = {col["name"]: col for col in inspector.get_columns("conversations")}
+        assert "status" in conv_cols
     finally:
         engine.dispose()

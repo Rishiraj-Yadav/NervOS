@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Query, Response, status
 from nervos_core.application.conversations import (
@@ -39,6 +39,9 @@ def _conversation_response(conv: Conversation) -> ConversationResponse:
         owner_user_id=conv.owner_user_id,
         agent_instance_id=conv.agent_instance_id,
         title=conv.title,
+        status=conv.status.value,
+        archived_at=conv.archived_at,
+        deleted_at=conv.deleted_at,
         created_at=conv.created_at,
         updated_at=conv.updated_at,
     )
@@ -52,6 +55,9 @@ def _page_conversations(items: list[Conversation], limit: int) -> ConversationPa
                 owner_user_id=c.owner_user_id,
                 agent_instance_id=c.agent_instance_id,
                 title=c.title,
+                status=c.status.value,
+                archived_at=c.archived_at,
+                deleted_at=c.deleted_at,
                 created_at=c.created_at,
                 updated_at=c.updated_at,
             )
@@ -130,13 +136,18 @@ def create_conversation(
 def list_conversations(
     user: CurrentUserDependency,
     service: ConversationServiceDependency,
+    status: Literal["active", "archived"] = "active",
     limit: PageLimit = 20,
     before_id: BeforeId = None,
     agent_instance_id: int | None = None,
 ) -> ConversationPageResponse:
     """Return one newest-first page of conversations owned by the authenticated user."""
     conversations = service.list_conversations(
-        user.id, limit=limit, before_id=before_id, agent_instance_id=agent_instance_id
+        user.id,
+        limit=limit,
+        before_id=before_id,
+        agent_instance_id=agent_instance_id,
+        status=status,
     )
     return _page_conversations(list(conversations), limit)
 
@@ -149,6 +160,56 @@ def get_conversation(
 ) -> ConversationResponse:
     """Return one owned conversation; foreign and nonexistent ids are indistinguishable."""
     return _conversation_response(service.get_conversation(user.id, conversation_id))
+
+
+@router.post(
+    "/{conversation_id}/archive",
+    response_model=ConversationResponse,
+    status_code=status.HTTP_200_OK,
+)
+def archive_conversation(
+    conversation_id: int,
+    origin: OriginDependency,
+    user: CurrentUserDependency,
+    service: ConversationServiceDependency,
+) -> ConversationResponse:
+    """Archive an active conversation."""
+    del origin
+    conv = service.archive_conversation(user.id, conversation_id)
+    return _conversation_response(conv)
+
+
+@router.post(
+    "/{conversation_id}/unarchive",
+    response_model=ConversationResponse,
+    status_code=status.HTTP_200_OK,
+)
+def unarchive_conversation(
+    conversation_id: int,
+    origin: OriginDependency,
+    user: CurrentUserDependency,
+    service: ConversationServiceDependency,
+) -> ConversationResponse:
+    """Restore an archived conversation back to active."""
+    del origin
+    conv = service.unarchive_conversation(user.id, conversation_id)
+    return _conversation_response(conv)
+
+
+@router.delete(
+    "/{conversation_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_conversation(
+    conversation_id: int,
+    origin: OriginDependency,
+    user: CurrentUserDependency,
+    service: ConversationServiceDependency,
+) -> Response:
+    """Soft delete a conversation."""
+    del origin
+    service.delete_conversation(user.id, conversation_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post(

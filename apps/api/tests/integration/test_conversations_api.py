@@ -204,3 +204,57 @@ def test_cross_owner_isolation_collapse_api(
     list_resp = client.get(CONVERSATIONS)
     assert list_resp.status_code == 200
     assert list_resp.json()["items"] == []
+
+
+def test_conversation_archive_unarchive_and_delete_api(
+    owner_client: TestClient, agent: int
+) -> None:
+    conv = create_conv(owner_client, agent, title="Lifecycle Conv")
+    conv_id = conv["id"]
+
+    # Archive conversation
+    arch_resp = owner_client.post(f"{CONVERSATIONS}/{conv_id}/archive", headers=ORIGIN)
+    assert arch_resp.status_code == 200
+    assert arch_resp.json()["status"] == "archived"
+    assert arch_resp.json()["archived_at"] is not None
+
+    # Excluded from active list
+    active_resp = owner_client.get(f"{CONVERSATIONS}?status=active")
+    assert not any(c["id"] == conv_id for c in active_resp.json()["items"])
+
+    # Included in archived list
+    arch_list_resp = owner_client.get(f"{CONVERSATIONS}?status=archived")
+    assert any(c["id"] == conv_id for c in arch_list_resp.json()["items"])
+
+    # Sending a message to an archived conversation returns 409
+    send_arch = owner_client.post(
+        f"{CONVERSATIONS}/{conv_id}/messages",
+        json={"client_message_id": "msg-arch-1", "content": "Hello"},
+        headers=ORIGIN,
+    )
+    assert send_arch.status_code == 409
+    assert send_arch.json()["error"]["code"] == "conversation_archived"
+
+    # Unarchive conversation
+    unarch_resp = owner_client.post(f"{CONVERSATIONS}/{conv_id}/unarchive", headers=ORIGIN)
+    assert unarch_resp.status_code == 200
+    assert unarch_resp.json()["status"] == "active"
+    assert unarch_resp.json()["archived_at"] is None
+
+    # Appears back in active list
+    active_after = owner_client.get(f"{CONVERSATIONS}?status=active")
+    assert any(c["id"] == conv_id for c in active_after.json()["items"])
+
+    # Delete conversation
+    del_resp = owner_client.delete(f"{CONVERSATIONS}/{conv_id}", headers=ORIGIN)
+    assert del_resp.status_code == 204
+
+    # Subsequent GET returns 404
+    assert owner_client.get(f"{CONVERSATIONS}/{conv_id}").status_code == 404
+    assert owner_client.get(f"{CONVERSATIONS}/{conv_id}/turns").status_code == 404
+    send_del = owner_client.post(
+        f"{CONVERSATIONS}/{conv_id}/messages",
+        json={"client_message_id": "msg-del-1", "content": "Hello"},
+        headers=ORIGIN,
+    )
+    assert send_del.status_code == 404

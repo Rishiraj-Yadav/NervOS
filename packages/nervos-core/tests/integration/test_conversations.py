@@ -648,3 +648,106 @@ def test_submission_transaction_rollback_on_capacity_exceeded(
         assert connection.scalar(text("SELECT count(*) FROM conversation_run_links")) == 1
         assert connection.scalar(text("SELECT count(*) FROM runs")) == 1
         assert connection.scalar(text("SELECT count(*) FROM jobs")) == 1
+
+
+def test_conversation_archive_and_unarchive_lifecycle(rig: ConversationRig) -> None:
+    from nervos_core.application.conversations import ConversationArchived
+    from nervos_core.domain.conversations import ConversationStatus
+
+    conv = rig.service.create_conversation(OWNER, AGENT, "Archivable Conversation")
+    assert conv.status == ConversationStatus.ACTIVE
+    assert conv.archived_at is None
+
+    # Send a message to verify normal operation
+    rig.service.send_message(OWNER, conv.id, "cmid-arch-1", "Hello before archive")
+
+    # Archive the conversation
+    archived = rig.service.archive_conversation(OWNER, conv.id)
+    assert archived.status == ConversationStatus.ARCHIVED
+    assert archived.archived_at is not None
+
+    # Default active list excludes archived conversation
+    active_list = rig.service.list_conversations(OWNER, status="active")
+    assert not any(c.id == conv.id for c in active_list)
+
+    # Archived list includes it
+    archived_list = rig.service.list_conversations(OWNER, status="archived")
+    assert any(c.id == conv.id for c in archived_list)
+
+    # Detail remains readable
+    detail = rig.service.get_conversation(OWNER, conv.id)
+    assert detail.status == ConversationStatus.ARCHIVED
+
+    # Sending a message to an archived conversation is rejected
+    with pytest.raises(ConversationArchived):
+        rig.service.send_message(OWNER, conv.id, "cmid-arch-2", "Should be rejected")
+
+    # Unarchive the conversation
+    unarchived = rig.service.unarchive_conversation(OWNER, conv.id)
+    assert unarchived.status == ConversationStatus.ACTIVE
+    assert unarchived.archived_at is None
+
+    # Appears back in active list
+    active_list_after = rig.service.list_conversations(OWNER, status="active")
+    assert any(c.id == conv.id for c in active_list_after)
+
+
+def test_conversation_delete_lifecycle(rig: ConversationRig) -> None:
+    conv = rig.service.create_conversation(OWNER, AGENT, "Deletable Conversation")
+    rig.service.send_message(OWNER, conv.id, "cmid-del-1", "Hello before delete")
+
+    # Delete the conversation
+    rig.service.delete_conversation(OWNER, conv.id)
+
+    # Excluded from active list
+    active_list = rig.service.list_conversations(OWNER, status="active")
+    assert not any(c.id == conv.id for c in active_list)
+
+    # Excluded from archived list
+    archived_list = rig.service.list_conversations(OWNER, status="archived")
+    assert not any(c.id == conv.id for c in archived_list)
+
+    # Detail returns ConversationNotFound
+    with pytest.raises(ConversationNotFound):
+        rig.service.get_conversation(OWNER, conv.id)
+
+    # List turns returns ConversationNotFound
+    with pytest.raises(ConversationNotFound):
+        rig.service.list_turns(OWNER, conv.id)
+
+    # Send message returns ConversationNotFound
+    with pytest.raises(ConversationNotFound):
+        rig.service.send_message(OWNER, conv.id, "cmid-del-2", "Should fail on deleted")
+
+
+def test_conversation_delete_during_active_run(rig: ConversationRig) -> None:
+    conv = rig.service.create_conversation(OWNER, AGENT, "Active Run Conv")
+    t_detail, _ = rig.service.send_message(OWNER, conv.id, "cmid-inflight", "In flight query")
+    run_id = t_detail.latest_run_id
+    assert run_id is not None
+
+    # Delete conversation while run is in-flight
+    rig.service.delete_conversation(OWNER, conv.id)
+
+    # Execution row (Run) still exists and is not cascaded
+    with rig.engine.connect() as connection:
+        run_count = connection.scalar(
+            text("SELECT count(*) FROM runs WHERE id = :id"), {"id": run_id}
+        )
+        assert run_count == 1
+        snapshot_count = connection.scalar(
+            text("SELECT count(*) FROM run_context_snapshots WHERE run_id = :id"), {"id": run_id}
+        )
+        assert snapshot_count == 1
+
+    # Finalizer projects the run successfully without un-deleting or resurrecting the conversation
+    projected = rig.service.project_terminal_run(
+        run_id=run_id, status="succeeded", output_text="Finished answer"
+    )
+    assert projected
+
+    with rig.engine.connect() as connection:
+        conv_status = connection.scalar(
+            text("SELECT status FROM conversations WHERE id = :id"), {"id": conv.id}
+        )
+        assert conv_status == "deleted"

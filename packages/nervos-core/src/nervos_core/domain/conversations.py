@@ -90,6 +90,12 @@ class InvalidConversation(ValueError):
     """Raised when a Conversation entity violates validation rules."""
 
 
+class ConversationStatus(StrEnum):
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+    DELETED = "deleted"
+
+
 class TurnState(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
@@ -107,6 +113,13 @@ class MessageRole(StrEnum):
 class RunLinkRole(StrEnum):
     INITIAL = "initial"
     RETRY = "retry"
+
+
+def validate_conversation_status(value: str) -> ConversationStatus:
+    try:
+        return ConversationStatus(value)
+    except ValueError as err:
+        raise InvalidConversation(f"invalid ConversationStatus: {value}") from err
 
 
 def validate_turn_state(value: str) -> TurnState:
@@ -154,6 +167,9 @@ class Conversation:
     title: str | None
     created_at: datetime
     updated_at: datetime
+    status: ConversationStatus = ConversationStatus.ACTIVE
+    archived_at: datetime | None = None
+    deleted_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +213,7 @@ __all__ = [
     "Conversation",
     "ConversationMessage",
     "ConversationRunLink",
+    "ConversationStatus",
     "ConversationTurn",
     "InvalidConversation",
     "MessageRole",
@@ -205,6 +222,7 @@ __all__ = [
     "compute_content_digest",
     "validate_client_message_id",
     "validate_content_digest",
+    "validate_conversation_status",
     "validate_conversation_title",
     "validate_message_content",
     "validate_message_role",

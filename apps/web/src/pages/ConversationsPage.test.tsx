@@ -38,7 +38,7 @@ describe("conversations page", () => {
 
     await renderRoute("/conversations");
 
-    expect(await screen.findByText(/no conversations yet/i)).toBeVisible();
+    expect(await screen.findByText(/no active conversations/i)).toBeVisible();
     expect(
       screen.getByRole("button", { name: /new conversation/i })
     ).toBeVisible();
@@ -50,6 +50,9 @@ describe("conversations page", () => {
       owner_user_id: 1,
       agent_instance_id: 1,
       title: "Project Discussion",
+      status: "active",
+      archived_at: null,
+      deleted_at: null,
       created_at: "2026-09-21T12:00:00Z",
       updated_at: "2026-09-21T12:00:00Z",
     };
@@ -61,5 +64,7 @@ describe("conversations page", () => {
       name: /project discussion/i,
     });
     expect(link).toHaveAttribute("href", "/conversations/1");
+    expect(screen.getByRole("button", { name: /archive/i })).toBeVisible();
+    expect(screen.getByRole("button", { name: /delete/i })).toBeVisible();
   });
 });

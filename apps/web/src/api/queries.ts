@@ -179,6 +179,12 @@ export function useLogout() {
     mutationFn: logout,
     onSuccess: () => {
       queryClient.setQueryData<User | null>(queryKeys.currentUser, null);
+      queryClient.removeQueries({ queryKey: queryKeys.agentInstances });
+      queryClient.removeQueries({ queryKey: ["conversations"] });
+      queryClient.removeQueries({ queryKey: ["memories"] });
+      queryClient.removeQueries({ queryKey: ["automations"] });
+      queryClient.removeQueries({ queryKey: ["agent-runs"] });
+      queryClient.removeQueries({ queryKey: ["run-events"] });
     },
   });
 }

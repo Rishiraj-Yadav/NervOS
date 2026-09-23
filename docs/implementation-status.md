@@ -30,9 +30,16 @@ under migration `0011_stage_f3_scoped_memory`, deterministic bounded indexed SQL
 (≤50 candidates total with keyset refill), active item limits (≤1000 per scope, ≤32000 bytes per
 item), memory injection sub-budget (≤4000 bytes), ContextBuilder v2 integration, immutable
 memory-bearing snapshots with v1 backward compatibility, single-attempt retry snapshot reuse,
-memory/tool authority isolation, and zero automatic memory writes. **F4 edit/delete lifecycle and
-memory management UI are NOT implemented; Workspace/shared memory is NOT implemented;
-FTS/vector/embedding search is NOT implemented.**
+memory/tool authority isolation, and zero automatic memory writes. **F4 — Conversation and memory
+lifecycle, versioned editing, deletion, active-data invalidation, retention semantics, and minimal
+management UI — is complete and accepted.** F4 delivers memory inspection (`GET /api/v1/memories`),
+versioned editing via `expected_version` CAS allocating version N+1, soft deletion (`DELETE
+/api/v1/memories/{id}`), active-retrieval invalidation, conversation archive and unarchive (`POST
+/archive`, `POST /unarchive`), conversation soft deletion (`DELETE /conversations/{id}`) under
+migration `0012_stage_f4_conversation_lifecycle`, non-cascading execution and audit retention,
+in-flight run finalization safety, full minimal `/memories` UI, and private query cache hygiene on
+logout. **Workspace/shared memory is NOT implemented; FTS/vector/embedding search is NOT
+implemented.**
 
 Stage C — Persistent execution engine is COMPLETE. The C0 architecture freeze, the C1 durable execution foundation, C2 — asynchronous submission and minimal durable Worker execution — C3 — Worker registry/health, expired-lease reconciliation, and fencing hardening — C4 — the safe execution retry engine — C5 — owner cancellation and Attempt execution-timeout orchestration — C6 — authoritative global/per-Agent/per-provider execution concurrency, durable Agent fairness, and full admission backpressure — C7 — public read-only execution observability, the Run Events API, the execution timeline, and the polling model — and C8 — integrated deterministic Stage C acceptance and closeout — are implemented, externally reviewed, and accepted.
 
@@ -48,7 +55,7 @@ no runtime behaviour. **D1 — durable tool, capability, and audit schema is com
 **D5 — MCP client/gateway and connection lifecycle is complete and accepted**.
 **D6 — tool audit, failure semantics, and C3–C6 integration is complete and accepted**.
 **D7 — integrated acceptance and Stage-D closeout is complete and accepted**.
-The next milestone is **F4 — Conversation and memory lifecycle, delete, and minimal UI**.
+The next milestone is **F5 — Integrated acceptance, Stage-F closeout, and documentation**.
 
 ## Stage D milestones
 
@@ -76,7 +83,7 @@ The next milestone is **F4 — Conversation and memory lifecycle, delete, and mi
 - [x] F1 — Durable Conversations, Turns, Messages, Run linkage, idempotency, assistant finalization, API and minimal UI
 - [x] F2 — ContextBuilder, mandatory RunContextSnapshot, deterministic compaction, context bounds
 - [x] F3 — AGENT/USER scoped memory, provenance, and deterministic retrieval
-- [ ] F4 — Conversation and memory lifecycle, delete, and minimal UI
+- [x] F4 — Conversation and memory lifecycle, delete, and minimal UI
 - [ ] F5 — Integrated acceptance and Stage-F closeout
 
 **E0 is architecture frozen and externally accepted.** It delivered governance only and changed no

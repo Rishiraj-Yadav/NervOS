@@ -10,13 +10,15 @@ import { ErrorState, LoadingState } from "../components/AsyncState";
 
 export function ConversationsPage() {
   const navigate = useNavigate();
-  const listQ = useQuery(conversationsListQuery());
+  const [statusFilter, setStatusFilter] = useState<"active" | "archived">("active");
+  const listQ = useQuery(conversationsListQuery(undefined, statusFilter));
   const agentsQ = useQuery(agentInstancesQuery());
   const actions = useConversationActions();
 
   const [selectedAgent, setSelectedAgent] = useState<number | "">("");
   const [title, setTitle] = useState("");
   const [showCreate, setShowCreate] = useState(false);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
 
   if (listQ.isPending || agentsQ.isPending) return <LoadingState />;
   if (listQ.isError)
@@ -42,6 +44,15 @@ export function ConversationsPage() {
     );
   };
 
+  const handleDeleteConfirm = () => {
+    if (deletingId === null) return;
+    actions.deleteConversation.mutate(deletingId, {
+      onSuccess: () => {
+        setDeletingId(null);
+      },
+    });
+  };
+
   return (
     <main className="page-shell">
       <header className="page-header">
@@ -54,8 +65,26 @@ export function ConversationsPage() {
 
       <section className="panel page-card">
         <div className="section-heading">
-          <h2>All conversations</h2>
-          {!showCreate && (
+          <div className="tab-group" role="tablist">
+            <button
+              className={`button-link ${statusFilter === "active" ? "active font-bold" : ""}`}
+              onClick={() => setStatusFilter("active")}
+              role="tab"
+              aria-selected={statusFilter === "active"}
+            >
+              Active
+            </button>
+            <button
+              className={`button-link ${statusFilter === "archived" ? "active font-bold" : ""}`}
+              onClick={() => setStatusFilter("archived")}
+              role="tab"
+              aria-selected={statusFilter === "archived"}
+            >
+              Archived
+            </button>
+          </div>
+
+          {!showCreate && statusFilter === "active" && (
             <button
               className="button-link"
               onClick={() => {
@@ -71,7 +100,7 @@ export function ConversationsPage() {
         </div>
 
         {showCreate && (
-          <form className="form-card" onSubmit={handleCreate}>
+          <form className="form-card" onSubmit={handleCreate} style={{ marginTop: "1rem" }}>
             <h3>Start a new conversation</h3>
             <label>
               Agent
@@ -98,22 +127,16 @@ export function ConversationsPage() {
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder="New conversation"
-                maxLength={100}
               />
             </label>
 
-            <div className="button-row">
-              <button
-                type="submit"
-                disabled={actions.createConversation.isPending || !selectedAgent}
-              >
-                {actions.createConversation.isPending ? "Creating..." : "Start"}
+            <div className="form-actions" style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
+              <button type="submit" disabled={actions.createConversation.isPending}>
+                {actions.createConversation.isPending
+                  ? "Starting..."
+                  : "Start conversation"}
               </button>
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => setShowCreate(false)}
-              >
+              <button type="button" onClick={() => setShowCreate(false)}>
                 Cancel
               </button>
             </div>
@@ -121,25 +144,94 @@ export function ConversationsPage() {
         )}
 
         {listQ.data.items.length === 0 ? (
-          <p>No conversations yet.</p>
+          <p className="empty-state" style={{ marginTop: "1rem" }}>
+            {statusFilter === "active" ? "No active conversations." : "No archived conversations."}
+          </p>
         ) : (
-          <div className="stack">
+          <div className="stack" style={{ marginTop: "1rem" }}>
             {listQ.data.items.map((c) => (
-              <article className="list-row" key={c.id}>
+              <article
+                className="list-row"
+                key={c.id}
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                }}
+              >
                 <div>
                   <Link to={`/conversations/${c.id}`}>
                     <strong>{c.title || "New conversation"}</strong>
                   </Link>
-                  <p>
+                  <p style={{ margin: "0.25rem 0 0 0", fontSize: "0.875rem", color: "var(--muted, #64748b)" }}>
                     Agent {c.agent_instance_id} · Created{" "}
                     {new Date(c.created_at).toLocaleString()}
+                    {c.archived_at && ` · Archived ${new Date(c.archived_at).toLocaleString()}`}
                   </p>
+                </div>
+
+                <div style={{ display: "flex", gap: "0.5rem" }}>
+                  {c.status === "active" ? (
+                    <button
+                      type="button"
+                      className="button-link"
+                      onClick={() => actions.archiveConversation.mutate(c.id)}
+                      disabled={actions.archiveConversation.isPending}
+                    >
+                      Archive
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="button-link"
+                      onClick={() => actions.unarchiveConversation.mutate(c.id)}
+                      disabled={actions.unarchiveConversation.isPending}
+                    >
+                      Unarchive
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="button-link text-danger"
+                    onClick={() => setDeletingId(c.id)}
+                  >
+                    Delete
+                  </button>
                 </div>
               </article>
             ))}
           </div>
         )}
       </section>
+
+      {/* Delete Confirmation Modal */}
+      {deletingId !== null && (
+        <div className="modal-backdrop" style={{ marginTop: "1.5rem" }}>
+          <section className="panel form-card">
+            <h3>Delete conversation #{deletingId}</h3>
+            <p>
+              Are you sure you want to delete this conversation? It will be removed from active
+              chat sessions.
+            </p>
+            <p className="text-secondary" style={{ fontSize: "0.875rem" }}>
+              Note: Historical execution logs and snapshots will be retained in Runs.
+            </p>
+            <div className="form-actions" style={{ display: "flex", gap: "0.5rem", marginTop: "1rem" }}>
+              <button
+                type="button"
+                className="button-danger"
+                onClick={handleDeleteConfirm}
+                disabled={actions.deleteConversation.isPending}
+              >
+                {actions.deleteConversation.isPending ? "Deleting..." : "Confirm delete"}
+              </button>
+              <button type="button" onClick={() => setDeletingId(null)}>
+                Cancel
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </main>
   );
 }

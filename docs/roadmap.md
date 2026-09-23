@@ -58,7 +58,7 @@ and integrated acceptance/closeout without adding a second execution path.
 
 Conversations, messages, deterministic context assembly, agent-private memory, user profile memory, retrieval/writing policy, memory UI. The canonical plan and frozen architecture are `docs/stage-f/README.md` with ADRs 0021–0023.
 
-**F0 (architecture freeze), F1 (durable Conversations, Turns, Messages, and Run linkage), F2 (ContextBuilder, mandatory RunContextSnapshot, deterministic compaction), and F3 (AGENT/USER scoped memory, provenance, and deterministic retrieval) are complete and externally accepted.** F4 (Conversation and memory lifecycle, delete, and minimal UI) is next.
+**F0 (architecture freeze), F1 (durable Conversations, Turns, Messages, and Run linkage), F2 (ContextBuilder, mandatory RunContextSnapshot, deterministic compaction), F3 (AGENT/USER scoped memory, provenance, and deterministic retrieval), and F4 (Conversation and memory lifecycle, delete, and minimal UI) are complete and externally accepted.** F5 (Integrated acceptance and Stage-F closeout) is next.
 
 Outcome: persistent useful agent context.
 
