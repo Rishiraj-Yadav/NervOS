@@ -28,8 +28,10 @@ from nervos_core.domain.context import (
     compute_context_digest,
     deserialize_history_messages,
     deserialize_id_list,
+    deserialize_selected_memories,
     serialize_history_messages,
     serialize_id_list,
+    serialize_selected_memories,
 )
 from nervos_core.domain.conversations import (
     Conversation,
@@ -42,6 +44,9 @@ from nervos_core.domain.conversations import (
 from nervos_core.domain.runs import RunLimits, RunStatus
 from nervos_core.infrastructure.database.jobs import (
     insert_run_and_job_on_connection,
+)
+from nervos_core.infrastructure.database.memory import (
+    _retrieve_memory_candidates_on_connection,
 )
 from nervos_core.infrastructure.database.models import (
     AgentInstanceRecord,
@@ -172,6 +177,21 @@ def _to_context_snapshot(record: RunContextSnapshotRecord | RowMapping) -> Conte
         if isinstance(record, RowMapping)
         else record.selected_message_ids
     )
+    mem_raw = (
+        record["memory_items_json"]
+        if isinstance(record, RowMapping)
+        else getattr(record, "memory_items_json", "[]")
+    )
+    inj_user_mem = (
+        record["injected_user_memory_text"]
+        if isinstance(record, RowMapping)
+        else getattr(record, "injected_user_memory_text", None)
+    )
+    inj_agent_mem = (
+        record["injected_agent_memory_text"]
+        if isinstance(record, RowMapping)
+        else getattr(record, "injected_agent_memory_text", None)
+    )
     return ContextSnapshotData(
         run_id=int(record["run_id"] if isinstance(record, RowMapping) else record.run_id),
         turn_id=int(record["turn_id"] if isinstance(record, RowMapping) else record.turn_id),
@@ -226,6 +246,9 @@ def _to_context_snapshot(record: RunContextSnapshotRecord | RowMapping) -> Conte
             record["content_digest"] if isinstance(record, RowMapping) else record.content_digest
         ),
         created_at=created,
+        selected_memories=deserialize_selected_memories(str(mem_raw)) if mem_raw else (),
+        injected_user_memory_text=str(inj_user_mem) if inj_user_mem is not None else None,
+        injected_agent_memory_text=str(inj_agent_mem) if inj_agent_mem is not None else None,
     )
 
 
@@ -475,12 +498,18 @@ class SqlAlchemyConversationPersistence:
             ).scalar_one()
             next_seq = int(max_seq) + 1
 
-            # 4b. ContextBuilder assembly
+            # 4b. ContextBuilder assembly with memory retrieval on this connection
             candidate_turns = self._load_candidate_turns_on_connection(
                 connection, conversation_id, next_seq
             )
             current_compaction = self._load_current_compaction_on_connection(
                 connection, conversation_id
+            )
+            memory_candidates = _retrieve_memory_candidates_on_connection(
+                connection,
+                owner_user_id=owner_user_id,
+                agent_instance_id=agent_instance_id,
+                candidate_limit=50,
             )
             snapshot_data = ContextBuilder.assemble(
                 current_user_text=content,
@@ -488,6 +517,7 @@ class SqlAlchemyConversationPersistence:
                 current_compaction=current_compaction,
                 agent_definition_id=definition_id,
                 now=now,
+                memory_candidates=memory_candidates,
                 max_bytes=limits.input_max_bytes,
                 max_code_points=limits.input_max_code_points,
             )
@@ -581,6 +611,9 @@ class SqlAlchemyConversationPersistence:
                 rendered_context=snapshot_data.rendered_context,
                 content_digest=snapshot_data.content_digest,
                 created_at=now,
+                memory_items_json=serialize_selected_memories(snapshot_data.selected_memories),
+                injected_user_memory_text=snapshot_data.injected_user_memory_text,
+                injected_agent_memory_text=snapshot_data.injected_agent_memory_text,
             )
             connection.execute(snapshot_insert)
 
@@ -838,12 +871,19 @@ class SqlAlchemyConversationPersistence:
             current_compaction = self._load_current_compaction_on_connection(
                 connection, conversation_id
             )
+            memory_candidates = _retrieve_memory_candidates_on_connection(
+                connection,
+                owner_user_id=owner_user_id,
+                agent_instance_id=agent_instance_id,
+                candidate_limit=50,
+            )
             snapshot_data = ContextBuilder.assemble(
                 current_user_text=user_content,
                 candidate_turns=candidate_turns,
                 current_compaction=current_compaction,
                 agent_definition_id=definition_id,
                 now=now,
+                memory_candidates=memory_candidates,
                 max_bytes=limits.input_max_bytes,
                 max_code_points=limits.input_max_code_points,
             )
@@ -908,6 +948,9 @@ class SqlAlchemyConversationPersistence:
                 rendered_context=snapshot_data.rendered_context,
                 content_digest=snapshot_data.content_digest,
                 created_at=now,
+                memory_items_json=serialize_selected_memories(snapshot_data.selected_memories),
+                injected_user_memory_text=snapshot_data.injected_user_memory_text,
+                injected_agent_memory_text=snapshot_data.injected_agent_memory_text,
             )
             connection.execute(snapshot_insert)
 

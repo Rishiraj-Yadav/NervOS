@@ -47,6 +47,12 @@ from nervos_core.application.triggers import (
 from nervos_core.application.trusted_chat import UnknownAgentHandler
 from nervos_core.domain.agents import InvalidAgentDefinitionId, InvalidAgentInstance
 from nervos_core.domain.conversations import InvalidConversation
+from nervos_core.domain.memory import (
+    InvalidMemory,
+    InvalidMemorySource,
+    MemoryNotFound,
+    MemoryScopeCapacityExceeded,
+)
 from nervos_core.domain.runs import InvalidRun
 from nervos_core.domain.scheduling import ScheduleCalculationError
 from nervos_core.domain.triggers import InvalidTrigger
@@ -224,6 +230,26 @@ AGENT_ERROR_MAP: dict[type[Exception], tuple[int, str, str]] = {
         422,
         "invalid_conversation",
         "The conversation input is invalid.",
+    ),
+    InvalidMemory: (
+        422,
+        "invalid_memory",
+        "The memory input is invalid.",
+    ),
+    InvalidMemorySource: (
+        422,
+        "invalid_memory_source",
+        "The memory promotion source is invalid or not eligible.",
+    ),
+    MemoryNotFound: (
+        404,
+        "memory_not_found",
+        "The memory was not found.",
+    ),
+    MemoryScopeCapacityExceeded: (
+        409,
+        "memory_scope_capacity_exceeded",
+        "The memory scope has reached its maximum capacity.",
     ),
 }
 

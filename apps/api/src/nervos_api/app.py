@@ -20,6 +20,7 @@ from nervos_core.application.authentication import (
 )
 from nervos_core.application.conversations import ConversationService
 from nervos_core.application.mcp_connection_service import McpConnectionService
+from nervos_core.application.memory import MemoryService
 from nervos_core.application.run_cancellation import RunCancellationService
 from nervos_core.application.triggers import TriggerManagementService
 from nervos_core.application.webhooks import (
@@ -38,6 +39,7 @@ from nervos_core.infrastructure.database.jobs import (
 from nervos_core.infrastructure.database.mcp_connections import (
     SqlAlchemyMcpConnectionPersistence,
 )
+from nervos_core.infrastructure.database.memory import SqlAlchemyMemoryPersistence
 from nervos_core.infrastructure.database.triggers import SqlAlchemyTriggerPersistence
 from nervos_core.infrastructure.scheduling import create_schedule_evaluator
 from nervos_core.infrastructure.security import Argon2PasswordHasher, SecureSessionTokens
@@ -158,6 +160,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         agent_service,
         clock=utc_now,
     )
+    memory_persistence = SqlAlchemyMemoryPersistence(engine)
+    memory_service = MemoryService(
+        memory_persistence,
+        agent_service,
+        clock=utc_now,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
@@ -182,6 +190,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.webhook_ingress_service = webhook_ingress_service
     app.state.trigger_management_service = trigger_management_service
     app.state.conversation_service = conversation_service
+    app.state.memory_service = memory_service
     app.add_exception_handler(Exception, unexpected_error_handler)
     app.add_exception_handler(AuthenticationError, authentication_error_handler)
     app.add_exception_handler(InvalidOrigin, authentication_error_handler)

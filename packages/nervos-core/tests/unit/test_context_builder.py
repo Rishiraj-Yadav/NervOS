@@ -3,24 +3,32 @@
 from datetime import UTC, datetime
 
 from nervos_core.application.context_builder import ContextBuilder
+from nervos_core.application.memory import RetrievedMemoryItem
 from nervos_core.domain.agents import AgentDefinitionId
 from nervos_core.domain.context import (
+    AGENT_MEMORY_HEADER,
     COMPACTION_HEADER_STORED,
     COMPACTION_WRAPPER_PREFIX,
+    USER_MEMORY_HEADER,
     CompactionData,
     HistoricalMessage,
+    SelectedMemory,
     compute_context_digest,
     deserialize_history_messages,
     deserialize_id_list,
+    deserialize_selected_memories,
     format_stored_compaction_v1,
     render_context_v1,
+    render_context_v2,
     serialize_history_messages,
     serialize_id_list,
+    serialize_selected_memories,
 )
 from nervos_core.domain.conversations import (
     ConversationMessage,
     MessageRole,
 )
+from nervos_core.domain.memory import MemoryProvenanceType, MemoryScope
 
 
 def _msg(turn_id: int, msg_id: int, role: MessageRole, content: str) -> ConversationMessage:
@@ -256,3 +264,74 @@ def test_serialization_helpers() -> None:
     raw_ids = serialize_id_list(ids)
     deserialized_ids = deserialize_id_list(raw_ids)
     assert deserialized_ids == ids
+
+    memories = (
+        SelectedMemory(1, 1, "user", "user_authored", "Prefers Python", b"x" * 32),
+        SelectedMemory(2, 1, "agent", "user_approved_inferred", "Uses SQLite", b"y" * 32),
+    )
+    mem_json = serialize_selected_memories(memories)
+    deserialized_mem = deserialize_selected_memories(mem_json)
+    assert deserialized_mem == memories
+
+
+def test_render_context_v2_with_memory_and_history() -> None:
+    history = (
+        HistoricalMessage(1, 1, 10, MessageRole.USER, "Prior question"),
+        HistoricalMessage(1, 1, 11, MessageRole.ASSISTANT, "Prior answer"),
+    )
+    rendered = render_context_v2(
+        current_user_text="Current question",
+        injected_user_memory_text=f"{USER_MEMORY_HEADER}\n- User fact",
+        injected_agent_memory_text=f"{AGENT_MEMORY_HEADER}\n- Agent fact",
+        injected_compaction_text="Compacted turn",
+        history_messages=history,
+    )
+    expected = (
+        f"{USER_MEMORY_HEADER}\n- User fact\n\n"
+        f"{AGENT_MEMORY_HEADER}\n- Agent fact\n\n"
+        f"{COMPACTION_WRAPPER_PREFIX}Compacted turn\n\n"
+        "Turn 1 (User): Prior question\n\n"
+        "Turn 1 (Assistant): Prior answer\n\n"
+        "Current question"
+    )
+    assert rendered == expected
+
+
+def test_context_builder_with_memory_candidates() -> None:
+    now = datetime.now(UTC)
+    def_id = AgentDefinitionId("nervos.chat", "1")
+    candidates = (
+        RetrievedMemoryItem(
+            1,
+            1,
+            MemoryScope.USER,
+            MemoryProvenanceType.USER_AUTHORED,
+            "User prefers Python",
+            b"u" * 32,
+            now,
+        ),
+        RetrievedMemoryItem(
+            2,
+            1,
+            MemoryScope.AGENT,
+            MemoryProvenanceType.USER_AUTHORED,
+            "Agent runs on Linux",
+            b"a" * 32,
+            now,
+        ),
+    )
+    snapshot = ContextBuilder.assemble(
+        current_user_text="Hello",
+        candidate_turns=[],
+        current_compaction=None,
+        agent_definition_id=def_id,
+        now=now,
+        memory_candidates=candidates,
+    )
+    assert snapshot.builder_version == "nervos.context.v2"
+    assert snapshot.schema_version == 2
+    assert snapshot.injected_user_memory_text == f"{USER_MEMORY_HEADER}\n- User prefers Python"
+    assert snapshot.injected_agent_memory_text == f"{AGENT_MEMORY_HEADER}\n- Agent runs on Linux"
+    assert len(snapshot.selected_memories) == 2
+    assert snapshot.selected_memories[0].content == "User prefers Python"
+    assert snapshot.selected_memories[1].content == "Agent runs on Linux"

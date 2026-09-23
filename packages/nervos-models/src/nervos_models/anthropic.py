@@ -245,7 +245,7 @@ def _normalized_response(message: Any, *, tools_enabled: bool) -> ModelResponse:
 
 
 def _messages(request: ModelRequest) -> list[dict[str, Any]]:
-    """Build the wire message list: multi-turn history, the current user request, and tool turns.
+    """Build the wire message list: memory, multi-turn history, user request, and tool turns.
 
     Consecutive tool results are gathered into one user message, which is the shape the Messages
     API uses for tool results, and a pending run is flushed **before** the next assistant turn --
@@ -255,19 +255,22 @@ def _messages(request: ModelRequest) -> list[dict[str, Any]]:
     """
     messages: list[dict[str, Any]] = []
 
-    compaction_prefix = (
-        f"[Earlier Conversation Context]\n{request.compaction_context}"
-        if request.compaction_context
-        else None
-    )
+    prefixes: list[str] = []
+    if request.user_memory_context:
+        prefixes.append(request.user_memory_context)
+    if request.agent_memory_context:
+        prefixes.append(request.agent_memory_context)
+    if request.compaction_context:
+        prefixes.append(f"[Earlier Conversation Context]\n{request.compaction_context}")
+    user_data_prefix = "\n\n".join(prefixes) if prefixes else None
 
     if request.history:
         for idx, hist in enumerate(request.history):
             if hist.role == MessageRole.USER:
                 content = hist.content
-                if idx == 0 and compaction_prefix is not None:
-                    content = f"{compaction_prefix}\n\n{content}"
-                    compaction_prefix = None
+                if idx == 0 and user_data_prefix is not None:
+                    content = f"{user_data_prefix}\n\n{content}"
+                    user_data_prefix = None
                 messages.append({"role": _USER_ROLE, "content": content})
             else:
                 messages.append(
@@ -278,8 +281,8 @@ def _messages(request: ModelRequest) -> list[dict[str, Any]]:
                 )
 
     current_user_content = request.user_text
-    if compaction_prefix is not None:
-        current_user_content = f"{compaction_prefix}\n\n{current_user_content}"
+    if user_data_prefix is not None:
+        current_user_content = f"{user_data_prefix}\n\n{current_user_content}"
     messages.append({"role": _USER_ROLE, "content": current_user_content})
 
     pending: list[dict[str, Any]] = []

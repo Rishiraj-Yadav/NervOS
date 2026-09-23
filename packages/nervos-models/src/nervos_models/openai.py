@@ -223,29 +223,38 @@ def _normalized_error(error: openai.OpenAIError) -> ModelProviderError:
 
 
 def _input_items(request: ModelRequest) -> Any:
-    """Build the request input: multi-turn history, the current user request, and tool turns.
+    """Build the request input: memory, multi-turn history, user request, and tool turns.
 
-    A tool-free request with no history keeps the exact string input Stage B/C used, so the
-    tool-free wire path is unchanged. A request with history or tools sends explicit items.
+    A tool-free request with no history/memory keeps the exact string input Stage B/C used, so the
+    tool-free wire path is unchanged. A request with memory, history, or tools sends explicit items.
     """
-    if not request.turns and not request.history and request.compaction_context is None:
+    if (
+        not request.turns
+        and not request.history
+        and request.compaction_context is None
+        and request.user_memory_context is None
+        and request.agent_memory_context is None
+    ):
         return request.user_text
 
     items: list[dict[str, Any]] = []
 
-    compaction_prefix = (
-        f"[Earlier Conversation Context]\n{request.compaction_context}"
-        if request.compaction_context
-        else None
-    )
+    prefixes: list[str] = []
+    if request.user_memory_context:
+        prefixes.append(request.user_memory_context)
+    if request.agent_memory_context:
+        prefixes.append(request.agent_memory_context)
+    if request.compaction_context:
+        prefixes.append(f"[Earlier Conversation Context]\n{request.compaction_context}")
+    user_data_prefix = "\n\n".join(prefixes) if prefixes else None
 
     if request.history:
         for idx, hist in enumerate(request.history):
             if hist.role == MessageRole.USER:
                 content = hist.content
-                if idx == 0 and compaction_prefix is not None:
-                    content = f"{compaction_prefix}\n\n{content}"
-                    compaction_prefix = None
+                if idx == 0 and user_data_prefix is not None:
+                    content = f"{user_data_prefix}\n\n{content}"
+                    user_data_prefix = None
                 items.append({"role": "user", "content": [{"type": "input_text", "text": content}]})
             else:
                 items.append(
@@ -257,8 +266,8 @@ def _input_items(request: ModelRequest) -> Any:
                 )
 
     current_user_content = request.user_text
-    if compaction_prefix is not None:
-        current_user_content = f"{compaction_prefix}\n\n{current_user_content}"
+    if user_data_prefix is not None:
+        current_user_content = f"{user_data_prefix}\n\n{current_user_content}"
     items.append(
         {"role": "user", "content": [{"type": "input_text", "text": current_user_content}]}
     )

@@ -351,6 +351,8 @@ class ToolLoop:
         user_text = snapshot.current_user_text if snapshot is not None else run.input_text
         history = snapshot.history_messages if snapshot is not None else ()
         compaction = snapshot.injected_compaction_text if snapshot is not None else None
+        user_mem = snapshot.injected_user_memory_text if snapshot is not None else None
+        agent_mem = snapshot.injected_agent_memory_text if snapshot is not None else None
 
         request = ModelRequest(
             self._system_instruction,
@@ -362,6 +364,8 @@ class ToolLoop:
             turns=tuple(state.turns),
             history=history,
             compaction_context=compaction,
+            user_memory_context=user_mem,
+            agent_memory_context=agent_mem,
         )
         retries = 0
         last_usage = state.usage
