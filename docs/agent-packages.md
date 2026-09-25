@@ -2,7 +2,7 @@
 
 ## Status
 
-Target architecture. Package installation is a later stage.
+**Target architecture / historical design input.** Package installation is a future stage (Stage G). Stage-G accepted architecture will live in `docs/stage-g/README.md` once G0 is frozen.
 
 ## Purpose
 

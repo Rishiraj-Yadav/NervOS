@@ -878,6 +878,7 @@ dependencies = [
     { name = "alembic" },
     { name = "fastapi" },
     { name = "nervos-core" },
+    { name = "nervos-mcp" },
     { name = "nervos-models" },
     { name = "pydantic-settings" },
     { name = "uvicorn", extra = ["standard"] },
@@ -888,6 +889,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.13,<2" },
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "nervos-core", editable = "packages/nervos-core" },
+    { name = "nervos-mcp", editable = "packages/nervos-mcp" },
     { name = "nervos-models", editable = "packages/nervos-models" },
     { name = "pydantic-settings", specifier = ">=2,<3" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30,<1" },
@@ -967,6 +969,7 @@ version = "0.1.0"
 source = { editable = "apps/worker" }
 dependencies = [
     { name = "nervos-core" },
+    { name = "nervos-mcp" },
     { name = "nervos-models" },
     { name = "pydantic-settings" },
 ]
@@ -974,6 +977,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "nervos-core", editable = "packages/nervos-core" },
+    { name = "nervos-mcp", editable = "packages/nervos-mcp" },
     { name = "nervos-models", editable = "packages/nervos-models" },
     { name = "pydantic-settings", specifier = ">=2,<3" },
 ]

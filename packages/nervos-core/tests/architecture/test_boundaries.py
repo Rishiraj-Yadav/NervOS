@@ -129,6 +129,23 @@ def test_core_never_imports_api_or_frontend() -> None:
     assert not any(module.startswith(("react", "apps.web")) for module in imports)
 
 
+def test_direct_workspace_imports_are_declared_in_package_manifests() -> None:
+    """Every direct NervOS workspace import must be declared in the importing package.
+
+    The uv root workspace installs all members, which masks a missing declaration; a built wheel
+    of `nervos-api` or `nervos-worker` would fail to import `nervos_mcp` at runtime. The API and
+    Worker both import `nervos_mcp` directly, so both manifests must declare it as a dependency
+    and point it at the workspace through `[tool.uv.sources]`.
+    """
+    for manifest_path in (
+        ROOT / "apps" / "api" / "pyproject.toml",
+        ROOT / "apps" / "worker" / "pyproject.toml",
+    ):
+        manifest = manifest_path.read_text(encoding="utf-8")
+        assert '"nervos-mcp"' in manifest, manifest_path
+        assert "nervos-mcp = { workspace = true }" in manifest, manifest_path
+
+
 def test_provider_sdk_exists_only_in_the_models_infrastructure_package() -> None:
     core_imports = {
         module for path in python_files(CORE_SOURCE) for module in imported_modules(path)
