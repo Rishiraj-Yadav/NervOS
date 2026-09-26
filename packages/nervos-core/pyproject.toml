@@ -13,6 +13,10 @@ dependencies = [
     # more: it never owns durable state, never fires anything, and is confined to one
     # infrastructure adapter so no domain or application module acquires a dependency on it.
     "cronsim>=2.7,<3",
+    # Strict `manifest.yaml` parsing for Stage G1. It is read as data only, through a SafeLoader
+    # subclass that rejects tags, aliases, anchors, merge keys and duplicate keys, so the dependency
+    # never becomes an object-construction surface.
+    "pyyaml>=6.0.3,<7",
     "sqlalchemy>=2,<3",
     # IANA timezone data. `zoneinfo` reads a database the OS supplies on Linux and the CI runners,
     # but Windows and slim containers have none -- so without this the frozen UTC/timezone contract

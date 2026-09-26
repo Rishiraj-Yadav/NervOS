@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import re
 from pathlib import Path
 
@@ -16,6 +17,7 @@ MODELS_SOURCE = ROOT / "packages" / "nervos-models" / "src" / "nervos_models"
 API_SOURCE = ROOT / "apps" / "api" / "src" / "nervos_api"
 API_ROUTES = API_SOURCE / "api" / "routes"
 WORKER_SOURCE = ROOT / "apps" / "worker" / "src" / "nervos_worker"
+SDK_SOURCE = ROOT / "packages" / "nervos-sdk" / "src" / "nervos_sdk"
 FRONTEND_SOURCE = ROOT / "apps" / "web" / "src"
 ORM_MODELS = CORE_SOURCE / "infrastructure" / "database" / "models.py"
 
@@ -127,6 +129,70 @@ def test_core_never_imports_api_or_frontend() -> None:
 
     assert not any(module.startswith("nervos_api") for module in imports)
     assert not any(module.startswith(("react", "apps.web")) for module in imports)
+
+
+def test_g1_sdk_and_core_remain_independent() -> None:
+    """The public SDK is standalone and core does not acquire a public-contract dependency."""
+    sdk_imports = {module for path in python_files(SDK_SOURCE) for module in imported_modules(path)}
+    core_imports = {
+        module for path in python_files(CORE_SOURCE) for module in imported_modules(path)
+    }
+    forbidden = (
+        "nervos_core",
+        "nervos_api",
+        "nervos_worker",
+        "nervos_scheduler",
+        "sqlalchemy",
+        "nervos_models",
+        "nervos_mcp",
+    )
+
+    assert not any(module.startswith(forbidden) for module in sdk_imports)
+    assert not any(module.startswith("nervos_sdk") for module in core_imports)
+
+
+def test_g1_does_not_add_package_execution_or_persistence() -> None:
+    """G1 is metadata/resolution only, with no G2/G3 execution or storage authority."""
+    core_text = "\n".join(path.read_text(encoding="utf-8") for path in python_files(CORE_SOURCE))
+    worker_text = "\n".join(
+        path.read_text(encoding="utf-8") for path in python_files(WORKER_SOURCE)
+    )
+    forbidden_symbols = (
+        "PackageExecutionAdapter",
+        "InstalledPackageRecord",
+        "PackageInstallationRecord",
+        "PackageApplicationService",
+    )
+
+    assert not any(symbol in core_text or symbol in worker_text for symbol in forbidden_symbols)
+    manifest_parser = CORE_APPLICATION / "package_manifest.py"
+    assert manifest_parser.is_file(), "G1 ships the manifest parser"
+    assert "subprocess" not in manifest_parser.read_text(encoding="utf-8")
+
+
+def test_g1_composes_a_package_aware_resolver_without_package_execution() -> None:
+    """API and Scheduler resolve definitions through the composite; Worker execution is untouched.
+
+    G1 widens *what a definition identity can name* only. The API/Scheduler composition must use the
+    composite resolver (built-ins plus an empty static package source), while the Worker keeps its
+    exact built-in handler registry: resolving a definition and running one are different systems,
+    and the package host that would connect them is G3.
+    """
+    api_app = (ROOT / "apps" / "api" / "src" / "nervos_api" / "app.py").read_text(encoding="utf-8")
+    scheduler_app = (ROOT / "apps" / "scheduler" / "src" / "nervos_scheduler" / "app.py").read_text(
+        encoding="utf-8"
+    )
+    worker_app = (ROOT / "apps" / "worker" / "src" / "nervos_worker" / "app.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "create_composite_agent_definition_resolver" in api_app
+    assert "create_composite_agent_definition_resolver" in scheduler_app
+    assert "create_builtin_definition_registry" not in api_app
+    assert "create_builtin_definition_registry" not in scheduler_app
+    # The Worker's handler path is the built-in handler registry, never a package definition source.
+    assert "create_builtin_handler_registry" in worker_app
+    assert "create_composite_agent_definition_resolver" not in worker_app
 
 
 def test_direct_workspace_imports_are_declared_in_package_manifests() -> None:
@@ -255,7 +321,11 @@ def test_b3_route_surface_and_migration_freeze() -> None:
     worker_app = (ROOT / "apps" / "worker" / "src" / "nervos_worker" / "app.py").read_text(
         encoding="utf-8"
     )
+    scheduler_app = (ROOT / "apps" / "scheduler" / "src" / "nervos_scheduler" / "app.py").read_text(
+        encoding="utf-8"
+    )
     assert f'EXPECTED_SCHEMA_REVISION = "{migrations[-1].stem}"' in worker_app
+    assert f'EXPECTED_SCHEMA_REVISION = "{migrations[-1].stem}"' in scheduler_app
 
 
 def test_stage_g_governance_freeze_files_exist() -> None:
@@ -268,6 +338,15 @@ def test_stage_g_governance_freeze_files_exist() -> None:
     assert stage_g_plan.is_file()
     plan = stage_g_plan.read_text(encoding="utf-8")
     assert "STAGE G ARCHITECTURE CHANGE REQUEST" in plan
+
+    def git_blob_hash(path: Path) -> str:
+        # Git's text filter stores LF even when the Windows checkout uses CRLF.
+        payload = path.read_text(encoding="utf-8").replace("\r\n", "\n").encode()
+        return hashlib.sha1(f"blob {len(payload)}\0".encode() + payload).hexdigest()
+
+    assert git_blob_hash(stage_g_plan) == "4554ab5e93b35f4bbc4daed164ee5712077c1006"
+    stage_f_plan = ROOT / "docs" / "stage-f" / "README.md"
+    assert git_blob_hash(stage_f_plan) == "62cfc0a8039e233c82e2a30ff3fd59495e99395d"
     for adr in ("0024", "0025", "0026"):
         assert list((ROOT / "docs" / "adr").glob(f"{adr}-*.md")), f"ADR {adr} missing"
 

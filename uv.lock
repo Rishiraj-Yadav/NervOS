@@ -13,6 +13,7 @@ members = [
     "nervos-mcp",
     "nervos-models",
     "nervos-scheduler",
+    "nervos-sdk",
     "nervos-worker",
     "nervos-workspace",
 ]
@@ -902,6 +903,7 @@ source = { editable = "packages/nervos-core" }
 dependencies = [
     { name = "argon2-cffi" },
     { name = "cronsim" },
+    { name = "pyyaml" },
     { name = "sqlalchemy" },
     { name = "tzdata" },
 ]
@@ -910,6 +912,7 @@ dependencies = [
 requires-dist = [
     { name = "argon2-cffi", specifier = ">=23,<26" },
     { name = "cronsim", specifier = ">=2.7,<3" },
+    { name = "pyyaml", specifier = ">=6.0.3,<7" },
     { name = "sqlalchemy", specifier = ">=2,<3" },
     { name = "tzdata", specifier = ">=2026.1" },
 ]
@@ -962,6 +965,11 @@ requires-dist = [
     { name = "nervos-core", editable = "packages/nervos-core" },
     { name = "pydantic-settings", specifier = ">=2,<3" },
 ]
+
+[[package]]
+name = "nervos-sdk"
+version = "0.1.0"
+source = { editable = "packages/nervos-sdk" }
 
 [[package]]
 name = "nervos-worker"
