@@ -60,7 +60,7 @@ Conversations, messages, deterministic context assembly, agent-private memory, u
 
 **F0 (architecture freeze), F1 (durable Conversations, Turns, Messages, and Run linkage), F2 (ContextBuilder, mandatory RunContextSnapshot, deterministic compaction), F3 (AGENT/USER scoped memory, provenance, and deterministic retrieval), F4 (Conversation and memory lifecycle, delete, and minimal UI), and F5 (Integrated acceptance and Stage-F closeout) are complete and externally accepted.**
 
-Outcome: persistent useful agent context. Stage G is next.
+Outcome: persistent useful agent context. Stage G is in progress (G0 and G1 complete).
 
 ## Stage G — Agent package system
 
@@ -68,9 +68,9 @@ Outcome: persistent useful agent context. Stage G is next.
 
 Outcome: agents become installable software.
 
-- **G0 — Package architecture, protocol, versioning, trust, and lifecycle freeze:** canonical Stage-G master plan `docs/stage-g/README.md` and ADRs 0024–0026. Governance/documentation only; **implemented, pending external acceptance**.
-- **G1 — Versioned manifest + public Agent SDK + definition-resolution contracts:** manifest/domain types, strict manifest parser, SemVer/identity/compatibility/config-schema validation, `nervos-sdk`, resolver/source interfaces, in-memory/static package definition source, built-in compatibility. No durable package tables.
-- **G2 — Deterministic `.nervos` builder + verifier:** canonical package construction, archive validation, content digest, Ed25519 verification, tamper detection, pure-Python wheelhouse validation, cross-platform safe format.
+- **G0 — Package architecture, protocol, versioning, trust, and lifecycle freeze:** canonical Stage-G master plan `docs/stage-g/README.md` and ADRs 0024–0026. Governance/documentation only; **complete, externally accepted, and merged**.
+- **G1 — Versioned manifest + public Agent SDK + definition-resolution contracts:** manifest/domain types, strict manifest parser, SemVer/identity/compatibility/config-schema validation, `nervos-sdk`, resolver/source interfaces, in-memory/static package definition source, built-in compatibility. **Complete, externally accepted, and merged.** No durable package tables.
+- **G2 — Deterministic `.nervos` builder + verifier:** canonical package construction, archive validation, content digest, Ed25519 verification, tamper detection, pure-Python wheelhouse validation, cross-platform safe format. **Next; not started.**
 - **G3 — Transactional installation + durable registry + package-backed execution:** package-registry migration, SQL-backed definition source, installation state machine, storage, isolated dependency environment, config snapshot + immutable Run semantics, exact executable pinning, package-host subprocess, activation health check.
 - **G4 — Lifecycle:** side-by-side versions, explicit upgrade/rebind with capability delta, rollback, uninstall, unified CLI/API/UI lifecycle surfaces.
 - **G5 — Integrated acceptance and Stage-G closeout.**

@@ -1,1 +1,19 @@
-# Future public SDK package. Excluded from the Stage A1 uv workspace.
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nervos-sdk"
+version = "0.1.0"
+description = "Public Python SDK contracts for NervOS agents."
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+authors = [{ name = "NervOS" }]
+dependencies = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nervos_sdk"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

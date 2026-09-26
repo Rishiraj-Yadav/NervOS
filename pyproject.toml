@@ -15,6 +15,7 @@ members = [
     "packages/nervos-core",
     "packages/nervos-mcp",
     "packages/nervos-models",
+    "packages/nervos-sdk",
 ]
 
 [dependency-groups]
@@ -36,6 +37,7 @@ testpaths = [
     "packages/nervos-core/tests",
     "packages/nervos-mcp/tests",
     "packages/nervos-models/tests",
+    "packages/nervos-sdk/tests",
 ]
 
 [tool.ruff]
@@ -64,6 +66,8 @@ include = [
     "packages/nervos-mcp/tests",
     "packages/nervos-models/src",
     "packages/nervos-models/tests",
+    "packages/nervos-sdk/src",
+    "packages/nervos-sdk/tests",
     "scripts",
     "tests",
 ]
@@ -78,6 +82,7 @@ extraPaths = [
     "packages/nervos-core/src",
     "packages/nervos-mcp/src",
     "packages/nervos-models/src",
+    "packages/nervos-sdk/src",
 ]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"

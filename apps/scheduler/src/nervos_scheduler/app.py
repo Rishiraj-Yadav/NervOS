@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from nervos_core.application.agent_definitions import create_builtin_definition_registry
+from nervos_core.application.agent_definitions import create_composite_agent_definition_resolver
 from nervos_core.application.scheduler import SchedulerService
 from nervos_core.infrastructure.database import create_sqlite_engine
 from nervos_core.infrastructure.database.triggers import SqlAlchemyTriggerPersistence
@@ -54,7 +54,7 @@ def create_scheduler(settings: SchedulerSettings) -> SchedulerComposition:
     engine = create_sqlite_engine(settings.database_path)
     persistence = SqlAlchemyTriggerPersistence(engine)
     service = SchedulerService(
-        create_builtin_definition_registry(),
+        create_composite_agent_definition_resolver(),
         persistence,
         create_schedule_evaluator(),
     )

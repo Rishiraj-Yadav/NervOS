@@ -41,11 +41,13 @@ in-flight run finalization safety, full minimal `/memories` UI, and private quer
 logout. **F5 — integrated acceptance, regression proof, documentation closeout, and Stage-F completion
 — is complete and externally accepted, closing Stage F.** **Workspace/shared memory is NOT
 implemented; FTS/vector/embedding search is NOT implemented.** **Stage G — Agent package system — is
-next: its **G0 — Package Architecture, Protocol, Versioning, Trust, and Lifecycle Freeze — is
-implemented as governance/documentation and is pending external acceptance**, with the canonical
-Stage-G master plan at `docs/stage-g/README.md` and source-of-authority ADRs 0024–0026. No Stage-G
-**runtime** functionality exists: there is no package installer, `.nervos` builder, package registry,
-package-aware resolution, SDK activation, or package execution.
+in progress: its **G0 — Package Architecture, Protocol, Versioning, Trust, and Lifecycle Freeze — is
+COMPLETE, externally accepted, and merged**, with the canonical Stage-G master plan at
+`docs/stage-g/README.md` and source-of-authority ADRs 0024–0026. **G1 — Manifest + Public SDK
+Contracts + Package-Aware Definition Resolution Foundation — is COMPLETE, externally accepted, and
+merged.** G1 adds metadata validation and static definition-resolution contracts only: there is
+still no package installer, `.nervos` builder, durable package registry, package execution, or package
+host. **G2 — the deterministic `.nervos` builder and verifier — is next and NOT STARTED.**
 
 Stage C — Persistent execution engine is COMPLETE. The C0 architecture freeze, the C1 durable execution foundation, C2 — asynchronous submission and minimal durable Worker execution — C3 — Worker registry/health, expired-lease reconciliation, and fencing hardening — C4 — the safe execution retry engine — C5 — owner cancellation and Attempt execution-timeout orchestration — C6 — authoritative global/per-Agent/per-provider execution concurrency, durable Agent fairness, and full admission backpressure — C7 — public read-only execution observability, the Run Events API, the execution timeline, and the polling model — and C8 — integrated deterministic Stage C acceptance and closeout — are implemented, externally reviewed, and accepted.
 
@@ -94,9 +96,9 @@ The next planned stage is **Stage G — Agent package system**.
 
 ## Stage G milestones
 
-- [ ] G0 — Package architecture, protocol, versioning, trust, and lifecycle freeze (governance/documentation only; **implemented, pending external acceptance**)
-- [ ] G1 — Versioned manifest + public Agent SDK contracts + package-aware definition-resolution contracts
-- [ ] G2 — Deterministic `.nervos` builder + verifier
+- [x] G0 — Package architecture, protocol, versioning, trust, and lifecycle freeze (governance/documentation only; complete, externally accepted, and merged)
+- [x] G1 — Versioned manifest + public Agent SDK contracts + package-aware definition-resolution contracts (complete, externally accepted, and merged)
+- [ ] G2 — Deterministic `.nervos` builder + verifier (**next; not started**)
 - [ ] G3 — Transactional installation + durable registry + package-backed execution
 - [ ] G4 — Lifecycle: upgrade / version coexistence / rollback / uninstall + CLI/API/UI
 - [ ] G5 — Integrated acceptance and Stage-G closeout

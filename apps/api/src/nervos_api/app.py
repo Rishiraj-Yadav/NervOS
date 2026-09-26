@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
-from nervos_core.application.agent_definitions import create_builtin_definition_registry
+from nervos_core.application.agent_definitions import create_composite_agent_definition_resolver
 from nervos_core.application.agents import AgentService
 from nervos_core.application.authentication import (
     AuthenticationError,
@@ -81,9 +81,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Composed with no credential at all: this yields the known-provider set and constructs
     # zero clients, so nothing credential-bearing is reachable from ``app.state``.
     known_providers = compose_model_providers(None, None).catalog
+    definitions = create_composite_agent_definition_resolver()
     agent_service = AgentService(
         SqlAlchemyAgentPersistence(session_factory),
-        create_builtin_definition_registry(),
+        definitions,
         utc_now,
         known_providers,
         SqlAlchemyJobPersistence(
@@ -127,7 +128,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             max_pending_per_agent=resolved_settings.max_pending_jobs_per_agent,
             max_pending_per_provider=resolved_settings.max_pending_jobs_per_provider,
         ),
-        create_builtin_definition_registry(),
+        definitions,
         create_webhook_secret_verifier(),
     )
     # Trigger management: owner-scoped configuration, schedule state, and webhook credentials.
