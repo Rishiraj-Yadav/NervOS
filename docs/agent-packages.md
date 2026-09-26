@@ -2,7 +2,9 @@
 
 ## Status
 
-**Target architecture / historical design input.** Package installation is a future stage (Stage G). Stage-G accepted architecture will live in `docs/stage-g/README.md` once G0 is frozen.
+**Target architecture / historical design input.** The canonical Stage-G architecture is now
+`docs/stage-g/README.md` (G0 freeze, pending external acceptance) with ADRs 0024–0026. Where this
+document's historical proposals conflict with the Stage-G master plan, the master plan wins.
 
 ## Purpose
 

@@ -258,6 +258,20 @@ def test_b3_route_surface_and_migration_freeze() -> None:
     assert f'EXPECTED_SCHEMA_REVISION = "{migrations[-1].stem}"' in worker_app
 
 
+def test_stage_g_governance_freeze_files_exist() -> None:
+    """The canonical Stage-G master plan and its source-of-authority ADRs exist.
+
+    G0 is governance only; these files are the architecture contract G1-G5 must conform to, so
+    their presence is a boundary fact the same way the migration chain is.
+    """
+    stage_g_plan = ROOT / "docs" / "stage-g" / "README.md"
+    assert stage_g_plan.is_file()
+    plan = stage_g_plan.read_text(encoding="utf-8")
+    assert "STAGE G ARCHITECTURE CHANGE REQUEST" in plan
+    for adr in ("0024", "0025", "0026"):
+        assert list((ROOT / "docs" / "adr").glob(f"{adr}-*.md")), f"ADR {adr} missing"
+
+
 def test_only_one_durable_submission_call_exists() -> None:
     """Exactly one canonical acceptance path: no route may drive execution or the coordinator."""
     calls = sum(
