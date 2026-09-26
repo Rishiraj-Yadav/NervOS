@@ -2,6 +2,8 @@
 
 Milestone A2 uses synchronous SQLAlchemy 2 with SQLite through `sqlite+pysqlite`. Alembic is the sole schema authority; application and test code must not call `Base.metadata.create_all()`.
 
+**Note:** This document describes the foundation schema through early milestones (A2/B1). The current schema includes additional tables from Stages C, D, E, and F. See `docs/implementation-status.md` and the Alembic migrations (`apps/api/alembic/versions/`) for the complete delivered schema.
+
 ## Connection behavior
 
 Database URLs are constructed with SQLAlchemy `URL.create`, including on Windows paths containing spaces or URL-significant characters. Every application and Alembic DBAPI connection enables:

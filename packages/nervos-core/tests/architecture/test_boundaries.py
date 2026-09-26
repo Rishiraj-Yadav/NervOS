@@ -129,6 +129,23 @@ def test_core_never_imports_api_or_frontend() -> None:
     assert not any(module.startswith(("react", "apps.web")) for module in imports)
 
 
+def test_direct_workspace_imports_are_declared_in_package_manifests() -> None:
+    """Every direct NervOS workspace import must be declared in the importing package.
+
+    The uv root workspace installs all members, which masks a missing declaration; a built wheel
+    of `nervos-api` or `nervos-worker` would fail to import `nervos_mcp` at runtime. The API and
+    Worker both import `nervos_mcp` directly, so both manifests must declare it as a dependency
+    and point it at the workspace through `[tool.uv.sources]`.
+    """
+    for manifest_path in (
+        ROOT / "apps" / "api" / "pyproject.toml",
+        ROOT / "apps" / "worker" / "pyproject.toml",
+    ):
+        manifest = manifest_path.read_text(encoding="utf-8")
+        assert '"nervos-mcp"' in manifest, manifest_path
+        assert "nervos-mcp = { workspace = true }" in manifest, manifest_path
+
+
 def test_provider_sdk_exists_only_in_the_models_infrastructure_package() -> None:
     core_imports = {
         module for path in python_files(CORE_SOURCE) for module in imported_modules(path)
@@ -239,6 +256,20 @@ def test_b3_route_surface_and_migration_freeze() -> None:
         encoding="utf-8"
     )
     assert f'EXPECTED_SCHEMA_REVISION = "{migrations[-1].stem}"' in worker_app
+
+
+def test_stage_g_governance_freeze_files_exist() -> None:
+    """The canonical Stage-G master plan and its source-of-authority ADRs exist.
+
+    G0 is governance only; these files are the architecture contract G1-G5 must conform to, so
+    their presence is a boundary fact the same way the migration chain is.
+    """
+    stage_g_plan = ROOT / "docs" / "stage-g" / "README.md"
+    assert stage_g_plan.is_file()
+    plan = stage_g_plan.read_text(encoding="utf-8")
+    assert "STAGE G ARCHITECTURE CHANGE REQUEST" in plan
+    for adr in ("0024", "0025", "0026"):
+        assert list((ROOT / "docs" / "adr").glob(f"{adr}-*.md")), f"ADR {adr} missing"
 
 
 def test_only_one_durable_submission_call_exists() -> None:

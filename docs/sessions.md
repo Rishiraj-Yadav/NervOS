@@ -23,45 +23,44 @@ See `docs/authentication.md` and ADR 0006 for the exact API, Origin, cookie, pro
 
 ## Agent conversation session
 
-Future feature representing one ongoing interactive conversation between a user and one AgentInstance.
+**Implemented in Stage F (F1–F5).** A Conversation is a durable, owner-scoped sequence of Turns between a user and one AgentInstance.
 
 ```text
 Research Agent
-  Session "Solar paper"
-    - message
-    - Run 1
-    - message
-    - Run 2
+  Conversation "Solar paper"
+    - Turn 1: user message → Run 1 → assistant message
+    - Turn 2: user message → Run 2 → assistant message
 
-  Session "Battery research"
-    - Run 3
+  Conversation "Battery research"
+    - Turn 1: user message → Run 3 → assistant message
 ```
 
-## Session != Run
+A Conversation belongs to exactly one `(owner_user_id, agent_instance_id)`. One AgentInstance may have many Conversations. Another owner or AgentInstance cannot read it unless a future explicit sharing mechanism grants access. Automated schedule/webhook/event Runs may have `conversation_id = NULL`.
 
-One conversation session can contain many runs. A Run is one execution.
+## Conversation != Run
 
-Background scheduled runs may use `session_id = NULL` because they are not conversational.
+One Conversation contains many Turns; one Turn may link to one or more Runs (initial + retries). A Run is one execution.
 
-## Future conversation-session fields
+Background scheduled runs have `conversation_id = NULL` because they are not conversational.
 
-Likely:
+## Conversation fields (implemented)
 
 - id
-- user_id
+- owner_user_id
 - agent_instance_id
 - title
-- status
-- created_at
-- last_active_at
-- archived_at
+- status (active, archived, deleted)
+- created_at, updated_at
+- archived_at, deleted_at
 
-Messages likely include id, session_id, role/type, content, metadata, and created_at.
+Turns include sequence, status (pending, running, succeeded, failed, cancelled, ambiguous), authoritative_run_id, and at most one ASSISTANT message.
+
+Messages include role (USER/ASSISTANT), content, and created_at. Ordering is by `(turn.sequence, role_order)` where USER=0, ASSISTANT=1.
 
 ## Context strategy
 
-Do not send unlimited historical messages to the model. Use a session summary, recent window, relevant long-term memory, and current request.
+Stage F uses deterministic context assembly: conversation compaction (non-model) plus scoped memory injection, bounded by frozen limits (≤20 recent messages, ≤8000 bytes/4000 code points input, ≤4000 injected memory bytes). No model summaries.
 
 ## Multi-agent note
 
-An agent handoff does not require merging two conversation sessions. Use explicit task/handoff data or shared workspace memory.
+An agent handoff does not require merging two conversation sessions. Use explicit task/handoff data or shared workspace memory (deferred to Stage J).

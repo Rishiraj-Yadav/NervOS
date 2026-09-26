@@ -21,15 +21,17 @@ Repository scripts do not install global or system packages.
 The uv workspace has explicit members so future placeholders are not activated accidentally:
 
 - `apps/api`
+- `apps/scheduler`
 - `apps/worker` (activated in C2 for durable execution; extended in C3 with the registry/reconciler and in C4 with durable safe execution retry)
 - `packages/nervos-core`
+- `packages/nervos-mcp` (activated in D5 for MCP client/gateway and connection lifecycle)
 - `packages/nervos-models` (activated in B2 for Anthropic and extended in B4 with the OpenAI Responses adapter)
 
 The pnpm workspace contains only:
 
 - `apps/web`
 
-The marketplace, SDK, and MCP directories remain future placeholders outside the active workspaces. `apps/worker` is a real process entrypoint but owns no HTTP surface and never runs Alembic. `packages/nervos-models` is active only for concrete provider infrastructure; `nervos-core` remains provider-SDK-free, and both provider SDKs are isolated there.
+The marketplace and SDK directories remain future placeholders outside the active workspaces. `apps/worker` is a real process entrypoint but owns no HTTP surface and never runs Alembic. `packages/nervos-models` is active only for concrete provider infrastructure; `nervos-core` remains provider-SDK-free, and both provider SDKs are isolated there.
 
 ## Bootstrap
 

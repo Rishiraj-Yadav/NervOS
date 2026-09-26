@@ -12,6 +12,7 @@ dependencies = [
     "fastapi>=0.115,<1",
     "nervos-core",
     "nervos-models",
+    "nervos-mcp",
     "pydantic-settings>=2,<3",
     "uvicorn[standard]>=0.30,<1",
 ]
@@ -19,6 +20,7 @@ dependencies = [
 [tool.uv.sources]
 nervos-core = { workspace = true }
 nervos-models = { workspace = true }
+nervos-mcp = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nervos_api"]

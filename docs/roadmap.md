@@ -68,6 +68,13 @@ Outcome: persistent useful agent context. Stage G is next.
 
 Outcome: agents become installable software.
 
+- **G0 — Package architecture, protocol, versioning, trust, and lifecycle freeze:** canonical Stage-G master plan `docs/stage-g/README.md` and ADRs 0024–0026. Governance/documentation only; **implemented, pending external acceptance**.
+- **G1 — Versioned manifest + public Agent SDK + definition-resolution contracts:** manifest/domain types, strict manifest parser, SemVer/identity/compatibility/config-schema validation, `nervos-sdk`, resolver/source interfaces, in-memory/static package definition source, built-in compatibility. No durable package tables.
+- **G2 — Deterministic `.nervos` builder + verifier:** canonical package construction, archive validation, content digest, Ed25519 verification, tamper detection, pure-Python wheelhouse validation, cross-platform safe format.
+- **G3 — Transactional installation + durable registry + package-backed execution:** package-registry migration, SQL-backed definition source, installation state machine, storage, isolated dependency environment, config snapshot + immutable Run semantics, exact executable pinning, package-host subprocess, activation health check.
+- **G4 — Lifecycle:** side-by-side versions, explicit upgrade/rebind with capability delta, rollback, uninstall, unified CLI/API/UI lifecycle surfaces.
+- **G5 — Integrated acceptance and Stage-G closeout.**
+
 ## Stage H — Security isolation
 
 Capability permissions, approvals, encrypted secret manager, sandbox boundary, resource controls, path/network controls, publisher trust.

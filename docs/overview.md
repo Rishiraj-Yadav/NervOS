@@ -2,7 +2,7 @@
 
 ## Status
 
-This document describes the target product architecture. Read `docs/implementation-status.md` to see what is actually implemented. As of the B4 candidate, the implemented subset is the Stage A foundation plus the trusted one-shot Chat path: owner-scoped Agent Instance and Run HTTP resources and a minimal dashboard interaction, backed by the single `nervos.chat@1` definition and two independently configured production provider adapters — canonical `anthropic` and canonical `openai`. Stage B final acceptance is still pending, so nothing here should be read as an accepted release state.
+This document describes the target product architecture. Read `docs/implementation-status.md` to see what is actually implemented. **Stages A through F are complete and externally accepted.** This overview remains a target-architecture document; the implementation-status.md file is the single authoritative source of delivered state.
 
 ## One-line definition
 
