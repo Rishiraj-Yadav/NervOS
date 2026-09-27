@@ -195,6 +195,147 @@ def test_g1_composes_a_package_aware_resolver_without_package_execution() -> Non
     assert "create_composite_agent_definition_resolver" not in worker_app
 
 
+G2_MODULES = (
+    "package_paths.py",
+    "package_archive.py",
+    "package_integrity.py",
+    "package_signing.py",
+    "package_wheel.py",
+    "package_builder.py",
+    "package_verification.py",
+)
+
+
+def test_g2_ships_the_builder_and_verifier_without_installation() -> None:
+    """G2 builds and verifies artifacts; it does not install, store, or execute them."""
+    for name in G2_MODULES:
+        assert (CORE_APPLICATION / name).is_file(), f"G2 ships {name}"
+
+    core_text = "\n".join(path.read_text(encoding="utf-8") for path in python_files(CORE_SOURCE))
+    worker_text = "\n".join(
+        path.read_text(encoding="utf-8") for path in python_files(WORKER_SOURCE)
+    )
+    g2_text = "\n".join(
+        (CORE_APPLICATION / name).read_text(encoding="utf-8") for name in G2_MODULES
+    )
+    # G2 adds no runtime package authority: no host, no adapter, no environment, no installer.
+    for symbol in (
+        "PackageExecutionAdapter",
+        "PackageApplicationService",
+        "InstalledPackageDefinitionSource",
+        "InstalledPackageRecord",
+        "PackageInstallationRecord",
+        "executable_ref",
+    ):
+        assert symbol not in g2_text, symbol
+    assert "PackageExecutionAdapter" not in core_text
+    assert "PackageExecutionAdapter" not in worker_text
+
+    # No G2 module may reach for a process, the database, or the control plane.
+    for name in G2_MODULES:
+        text = (CORE_APPLICATION / name).read_text(encoding="utf-8")
+        for forbidden in ("subprocess", "sqlalchemy", "nervos_api", "nervos_worker"):
+            assert forbidden not in text, (name, forbidden)
+
+
+def test_g2_never_imports_or_executes_package_code() -> None:
+    """The single most important G2 invariant, asserted against the source itself.
+
+    Every G2 module reads package bytes as data. None may import a package module, run a wheel's
+    code, or install anything -- so the import machinery, subprocess, and installer entry points
+    must not appear anywhere in the package path.
+    """
+    for name in G2_MODULES:
+        text = (CORE_APPLICATION / name).read_text(encoding="utf-8")
+        for forbidden in (
+            "importlib.import_module",
+            "pip install",
+            "uv pip install",
+            "subprocess",
+            "__import__",
+            "venv",
+            "ensurepip",
+        ):
+            assert forbidden not in text, (name, forbidden)
+        # A wheel is inspected, never added to sys.path.
+        assert "sys.path" not in text, name
+
+
+def test_g2_has_no_network_resolver() -> None:
+    """V1 is offline and self-contained: there is no index client and no network resolution."""
+    for name in G2_MODULES:
+        text = (CORE_APPLICATION / name).read_text(encoding="utf-8")
+        for forbidden in ("NERVOS_PACKAGE_NETWORK", "requests", "urllib", "httpx", "socket"):
+            assert forbidden not in text, (name, forbidden)
+
+
+def test_g2_adds_no_migration_and_no_package_tables() -> None:
+    """G2 is format-only: the middle of the migration chain and the table set are unchanged."""
+    migrations = sorted((ROOT / "apps" / "api" / "alembic" / "versions").glob("0*.py"))
+    assert migrations[-1].stem == "0012_stage_f4_conversation_lifecycle"
+    assert not list((ROOT / "apps" / "api" / "alembic" / "versions").glob("0013*"))
+
+    tables = set(re.findall(r'__tablename__ = "([a-z_]+)"', ORM_MODELS.read_text(encoding="utf-8")))
+    assert tables == EXPECTED_TABLES
+    for forbidden in ("package", "installed", "registry"):
+        assert not any(forbidden in table for table in tables), forbidden
+
+
+def test_g2_keeps_package_and_python_wheel_identity_separate() -> None:
+    """NervOS package identity is never PEP-normalized, and wheel identity is never SemVer-checked.
+
+    Conflating the two would be a quiet format decision, so the boundary is asserted on *imports*
+    rather than on text: a comment mentioning "packaging metadata" is not a dependency.
+    """
+    identity_modules = (
+        CORE_SOURCE / "domain" / "packages.py",
+        CORE_APPLICATION / "package_manifest.py",
+    )
+    for path in identity_modules:
+        imports = imported_modules(path)
+        assert not any(module.startswith(("packaging", "wheel")) for module in imports), (
+            f"{path.name} must not PEP-normalize NervOS package identity"
+        )
+
+    # PEP normalization belongs to the dependency layer only.
+    wheel_imports = imported_modules(CORE_APPLICATION / "package_wheel.py")
+    assert any(module.startswith("packaging") for module in wheel_imports)
+
+
+def test_g2_builder_and_verifier_share_single_rule_sets() -> None:
+    """Builder and verifier must not each own a copy of the path or integrity rules."""
+    builder_text = (CORE_APPLICATION / "package_builder.py").read_text(encoding="utf-8")
+    verification_text = (CORE_APPLICATION / "package_verification.py").read_text(encoding="utf-8")
+
+    # Both must delegate to the shared path validator and the shared verifier.
+    assert "canonical_package_path" in builder_text
+    assert "canonical_package_path" in verification_text
+    assert "verify_package" in builder_text, "the builder must self-verify through the verifier"
+
+    # Neither may define its own ZIP writer or its own path-collision logic.
+    for forbidden in ("def _collision_key", "def collision_key", "zipfile.ZipFile("):
+        assert forbidden not in verification_text, forbidden
+
+
+def test_g2_sdk_boundary_is_unchanged() -> None:
+    """G2 ships no public SDK surface; the SDK stays standalone and stdlib-only."""
+    sdk_imports = {module for path in python_files(SDK_SOURCE) for module in imported_modules(path)}
+    forbidden = (
+        "nervos_core",
+        "cryptography",
+        "packaging",
+        "zipfile",
+        "nervos_api",
+        "nervos_worker",
+    )
+    assert not any(module.startswith(forbidden) for module in sdk_imports)
+
+    core_imports = {
+        module for path in python_files(CORE_SOURCE) for module in imported_modules(path)
+    }
+    assert not any(module.startswith("nervos_sdk") for module in core_imports)
+
+
 def test_direct_workspace_imports_are_declared_in_package_manifests() -> None:
     """Every direct NervOS workspace import must be declared in the importing package.
 
