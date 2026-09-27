@@ -903,6 +903,8 @@ source = { editable = "packages/nervos-core" }
 dependencies = [
     { name = "argon2-cffi" },
     { name = "cronsim" },
+    { name = "cryptography" },
+    { name = "packaging" },
     { name = "pyyaml" },
     { name = "sqlalchemy" },
     { name = "tzdata" },
@@ -912,6 +914,8 @@ dependencies = [
 requires-dist = [
     { name = "argon2-cffi", specifier = ">=23,<26" },
     { name = "cronsim", specifier = ">=2.7,<3" },
+    { name = "cryptography", specifier = ">=50,<51" },
+    { name = "packaging", specifier = ">=26,<27" },
     { name = "pyyaml", specifier = ">=6.0.3,<7" },
     { name = "sqlalchemy", specifier = ">=2,<3" },
     { name = "tzdata", specifier = ">=2026.1" },

@@ -9,10 +9,18 @@ description = "NervOS core domain, application, and infrastructure package"
 requires-python = ">=3.12"
 dependencies = [
     "argon2-cffi>=23,<26",
+    # Ed25519 signing and verification for Stage G2 `.nervos` packages. Declared directly rather
+    # than relied upon transitively (it also arrives via `pyjwt`): a cryptographic primitive a
+    # milestone depends on must never be an accident of someone else's dependency graph.
+    "cryptography>=50,<51",
     # Schedule evaluation for Stage E cron triggers. It is a *calculation* library and nothing
     # more: it never owns durable state, never fires anything, and is confined to one
     # infrastructure adapter so no domain or application module acquires a dependency on it.
     "cronsim>=2.7,<3",
+    # PEP 503 / PEP 440 normalization of *Python dependency* names and versions for the Stage G2
+    # dependency lock and wheel metadata. Deliberately unrelated to NervOS package identity, which
+    # keeps its own frozen grammar and strict SemVer.
+    "packaging>=26,<27",
     # Strict `manifest.yaml` parsing for Stage G1. It is read as data only, through a SafeLoader
     # subclass that rejects tags, aliases, anchors, merge keys and duplicate keys, so the dependency
     # never becomes an object-construction surface.

@@ -70,8 +70,8 @@ Outcome: agents become installable software.
 
 - **G0 — Package architecture, protocol, versioning, trust, and lifecycle freeze:** canonical Stage-G master plan `docs/stage-g/README.md` and ADRs 0024–0026. Governance/documentation only; **complete, externally accepted, and merged**.
 - **G1 — Versioned manifest + public Agent SDK + definition-resolution contracts:** manifest/domain types, strict manifest parser, SemVer/identity/compatibility/config-schema validation, `nervos-sdk`, resolver/source interfaces, in-memory/static package definition source, built-in compatibility. **Complete, externally accepted, and merged.** No durable package tables.
-- **G2 — Deterministic `.nervos` builder + verifier:** canonical package construction, archive validation, content digest, Ed25519 verification, tamper detection, pure-Python wheelhouse validation, cross-platform safe format. **Next; not started.**
-- **G3 — Transactional installation + durable registry + package-backed execution:** package-registry migration, SQL-backed definition source, installation state machine, storage, isolated dependency environment, config snapshot + immutable Run semantics, exact executable pinning, package-host subprocess, activation health check.
+- **G2 — deterministic `.nervos` builder + verifier:** canonical package construction, archive validation, content digest, Ed25519 verification, tamper detection, pure-Python wheelhouse validation, cross-platform safe format. **Complete; externally accepted.** No installation, durable registry, package execution, persistent publisher trust, or sandbox.
+- **G3 — Transactional installation + durable registry + package-backed execution:** package-registry migration, SQL-backed definition source, installation state machine, storage, isolated dependency environment, config snapshot + immutable Run semantics, exact executable pinning, package-host subprocess, activation health check. **Not started.**
 - **G4 — Lifecycle:** side-by-side versions, explicit upgrade/rebind with capability delta, rollback, uninstall, unified CLI/API/UI lifecycle surfaces.
 - **G5 — Integrated acceptance and Stage-G closeout.**
 
