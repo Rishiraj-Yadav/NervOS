@@ -58,11 +58,12 @@ from sqlalchemy.orm import Session, sessionmaker
 from nervos_worker.config import WorkerSettings, get_worker_settings
 from nervos_worker.identity import generate_worker_id
 from nervos_worker.mcp import McpRegistrySynchronizer, build_mcp_gateway
+from nervos_worker.package_execution import PackageExecutionAdapter
 from nervos_worker.registry import ReclaimLoop, WorkerRegistry
 from nervos_worker.service import Worker
 
 # Bumped only by the milestone that adds a migration. F4 ships migration 0012.
-EXPECTED_SCHEMA_REVISION = "0012_stage_f4_conversation_lifecycle"
+EXPECTED_SCHEMA_REVISION = "0013_stage_g3_package_registry"
 
 
 def utc_now() -> datetime:
@@ -152,7 +153,11 @@ def create_worker(settings: WorkerSettings | None = None) -> WorkerComposition:
     conversations = SqlAlchemyConversationPersistence(engine)
     execution = JobExecutionService(
         persistence,
-        RunExecutor(create_builtin_handler_registry(), tool_loop=tool_loop),
+        RunExecutor(
+            create_builtin_handler_registry(),
+            tool_loop=tool_loop,
+            package_execution=PackageExecutionAdapter(resolved.package_store),
+        ),
         completions,
         utc_now,
         # The retry schedule is injected rather than reached for globally, so the Worker's

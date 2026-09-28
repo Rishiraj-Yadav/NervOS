@@ -12,6 +12,7 @@ members = [
     "nervos-core",
     "nervos-mcp",
     "nervos-models",
+    "nervos-package-host",
     "nervos-scheduler",
     "nervos-sdk",
     "nervos-worker",
@@ -956,6 +957,17 @@ requires-dist = [
 ]
 
 [[package]]
+name = "nervos-package-host"
+version = "0.1.0"
+source = { editable = "packages/nervos-package-host" }
+dependencies = [
+    { name = "nervos-sdk" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "nervos-sdk", editable = "packages/nervos-sdk" }]
+
+[[package]]
 name = "nervos-scheduler"
 version = "0.1.0"
 source = { editable = "apps/scheduler" }
@@ -983,6 +995,7 @@ dependencies = [
     { name = "nervos-core" },
     { name = "nervos-mcp" },
     { name = "nervos-models" },
+    { name = "nervos-package-host" },
     { name = "pydantic-settings" },
 ]
 
@@ -991,6 +1004,7 @@ requires-dist = [
     { name = "nervos-core", editable = "packages/nervos-core" },
     { name = "nervos-mcp", editable = "packages/nervos-mcp" },
     { name = "nervos-models", editable = "packages/nervos-models" },
+    { name = "nervos-package-host", editable = "packages/nervos-package-host" },
     { name = "pydantic-settings", specifier = ">=2,<3" },
 ]
 

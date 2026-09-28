@@ -35,6 +35,7 @@ class WorkerSettings(BaseSettings):
 
     environment: Environment = "development"
     database_path: Path = Path("~/.nervos/nervos.db")
+    package_store: Path = Path("~/.nervos/packages")
     log_level: LogLevel = "INFO"
     worker_concurrency: int = Field(default=1, ge=1, le=16)
     max_active_jobs: int = Field(default=4, ge=1, le=16)
@@ -68,7 +69,7 @@ class WorkerSettings(BaseSettings):
             return value.strip() or None
         return value
 
-    @field_validator("database_path", mode="before")
+    @field_validator("database_path", "package_store", mode="before")
     @classmethod
     def reject_blank_database_path(cls, value: object) -> object:
         """Reject an empty environment value before Path coercion."""
@@ -83,6 +84,15 @@ class WorkerSettings(BaseSettings):
         path = value.expanduser().resolve(strict=False)
         if path.is_dir():
             raise ValueError("database path must identify a file")
+        return path
+
+    @field_validator("package_store")
+    @classmethod
+    def normalize_package_store(cls, value: Path) -> Path:
+        """Expand and resolve the package store without creating it."""
+        path = value.expanduser().resolve(strict=False)
+        if path.exists() and not path.is_dir():
+            raise ValueError("package store must identify a directory")
         return path
 
     def require_worker_ready_file(self) -> Path | None:

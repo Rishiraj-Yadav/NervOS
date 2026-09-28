@@ -74,6 +74,7 @@ from nervos_core.domain.context import (
     deserialize_id_list,
     deserialize_selected_memories,
 )
+from nervos_core.domain.execution import RunExecutableSnapshot, RunExecutionKind
 from nervos_core.domain.jobs import (
     AttemptStatus,
     JobStatus,
@@ -102,6 +103,9 @@ from nervos_core.infrastructure.database.models import (
     RunRecord,
     ToolInvocationRecord,
     WorkerRecord,
+)
+from nervos_core.infrastructure.database.packages import (
+    resolve_run_execution_snapshot_on_connection,
 )
 from nervos_core.infrastructure.database.run_events import (
     EventOwnershipViolation,
@@ -205,6 +209,19 @@ def run_from_record(
         execution_phase,
         retry_available_at,
         record.tool_grant_cutoff_id,
+        RunExecutableSnapshot(
+            execution_kind=RunExecutionKind(record.execution_kind),
+            installed_package_version_id=record.installed_package_version_id,
+            package_content_digest=record.package_content_digest,
+            package_environment_id=record.package_environment_id,
+            package_environment_digest=record.package_environment_digest,
+            package_entrypoint=record.package_entrypoint,
+            effective_config_json=record.effective_config_json,
+            effective_config_digest=record.effective_config_digest,
+            agent_instance_config_revision=record.agent_instance_config_revision,
+            host_protocol_version=record.host_protocol_version,
+            sdk_api_version=record.sdk_api_version,
+        ),
     )
 
 
@@ -455,6 +472,14 @@ def insert_run_and_job_on_connection(
         raise QueueCapacityExceeded
 
     tool_grant_cutoff_id = grant_cutoff_on_connection(connection, agent_instance_id, limits)
+    resolved_definition = AgentDefinitionId(
+        str(instance["agent_key"]), str(instance["agent_definition_version"])
+    )
+    executable = resolve_run_execution_snapshot_on_connection(
+        connection,
+        agent_instance_id=agent_instance_id,
+        definition_id=resolved_definition,
+    )
     run_result = connection.execute(
         insert(RunRecord).values(
             agent_instance_id=agent_instance_id,
@@ -476,6 +501,17 @@ def insert_run_and_job_on_connection(
             tool_result_max_bytes=limits.tool_result_max_bytes,
             max_consecutive_tool_failures=limits.max_consecutive_tool_failures,
             tool_grant_cutoff_id=tool_grant_cutoff_id,
+            execution_kind=executable.execution_kind.value,
+            installed_package_version_id=executable.installed_package_version_id,
+            package_content_digest=executable.package_content_digest,
+            package_environment_id=executable.package_environment_id,
+            package_environment_digest=executable.package_environment_digest,
+            package_entrypoint=executable.package_entrypoint,
+            effective_config_json=executable.effective_config_json,
+            effective_config_digest=executable.effective_config_digest,
+            agent_instance_config_revision=executable.agent_instance_config_revision,
+            host_protocol_version=executable.host_protocol_version,
+            sdk_api_version=executable.sdk_api_version,
             created_at=now,
         )
     )
@@ -534,6 +570,7 @@ def insert_run_and_job_on_connection(
         now,
         execution_phase=JobStatus.QUEUED,
         tool_grant_cutoff_id=tool_grant_cutoff_id,
+        executable=executable,
     )
 
 

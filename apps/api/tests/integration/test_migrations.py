@@ -57,6 +57,12 @@ APPLICATION_TABLES = {
     # Stage F (F3): scoped memory items and versions.
     "memory_items",
     "memory_versions",
+    # Stage G (G3): package environments, installed releases, file/dependency inventories, and bindings.
+    "package_environments",
+    "installed_package_versions",
+    "installed_package_files",
+    "installed_package_dependencies",
+    "agent_instance_package_bindings",
 }
 DEFAULT_DATABASE = (Path.home() / ".nervos" / "nervos.db").resolve(strict=False)
 
@@ -118,7 +124,7 @@ def test_upgrade_drift_downgrade_and_reupgrade(
         assert application_tables(engine) == APPLICATION_TABLES
         with engine.connect() as connection:
             current_revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
-            assert current_revision == F4_REVISION
+            assert current_revision == G3_REVISION
             assert connection.scalar(text("PRAGMA foreign_keys")) == 1
             assert connection.scalar(text("PRAGMA busy_timeout")) == 5000
         command.check(config)
@@ -352,7 +358,9 @@ def test_populated_stage_a_survives_b1_downgrade_and_reupgrade(
     try:
         assert application_tables(engine) == APPLICATION_TABLES
         assert {item["name"] for item in inspect(engine).get_indexes("runs")} == {
-            "ix_runs_agent_instance_id_id"
+            "ix_runs_agent_instance_id_id",
+            "ix_runs_installed_package_version_id",
+            "ix_runs_package_environment_id",
         }
     finally:
         engine.dispose()
@@ -1247,7 +1255,7 @@ def test_the_c5_downgrade_is_clean_when_nothing_needs_cancellation(
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM runs")) == 1
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                F4_REVISION
+                G3_REVISION
             )
     finally:
         engine.dispose()
@@ -1333,7 +1341,7 @@ def test_migration_0006_creates_only_the_fairness_table(
         assert "queue_partitions" in application_tables(engine)
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                F4_REVISION
+                G3_REVISION
             )
             columns = [
                 str(row[1])
@@ -1476,6 +1484,7 @@ REVIEWED_MIGRATIONS = [
     "0010_stage_f2_context_snapshots_and_compactions.py",
     "0011_stage_f3_scoped_memory.py",
     "0012_stage_f4_conversation_lifecycle.py",
+    "0013_stage_g3_package_registry.py",
 ]
 
 
@@ -1490,15 +1499,16 @@ def test_c7_consumed_no_migration_number() -> None:
 
     Stage D's D1 later consumed `0007` for the tool, capability and audit schema, and Stage E's E1
     has since consumed `0008` for the trigger tables. F1 later consumed `0009` for the conversation
-    tables, and F2 consumed `0010` for context snapshots and compactions. None weakens this claim,
-    and the claim is not rewritten to accommodate them: the migrations that follow C6's are exactly
-    D1's, E1's, F1's, and F2's, and the number C7 could have taken is provably still not C7's.
+    tables, and F2 consumed `0010` for context snapshots and compactions. G3 later consumed `0013`
+    for package registry. None weakens this claim, and the claim is not rewritten to accommodate
+    them: the migrations that follow C6's are exactly D1's, E1's, F1's, F2's, F3's, F4's and G3's,
+    and the number C7 could have taken is provably still not C7's.
     """
     names = sorted(path.name for path in VERSIONS.glob("*.py"))
 
     assert names == REVIEWED_MIGRATIONS
-    assert names[-1] == "0012_stage_f4_conversation_lifecycle.py"
-    assert not any(name.startswith("0013") for name in names)
+    assert names[-1] == "0013_stage_g3_package_registry.py"
+    assert not any(name.startswith("0014") for name in names)
 
 
 def test_the_run_event_index_set_is_the_same_one_c6_shipped(
@@ -1536,6 +1546,7 @@ F1_REVISION = "0009_stage_f1_conversations"
 F2_REVISION = "0010_stage_f2_context_snapshots_and_compactions"
 F3_REVISION = "0011_stage_f3_scoped_memory"
 F4_REVISION = "0012_stage_f4_conversation_lifecycle"
+G3_REVISION = "0013_stage_g3_package_registry"
 # The E1 downgrade lands at D1, not at C6: `0008`'s `down_revision` is `0007`, so downgrading E1
 # exercises exactly one migration's downgrade. Asking for `0006` would additionally run D1's own
 # downgrade, which is D1's contract to prove (see `test_migrations_d1.py`) and not E1's.
@@ -1650,7 +1661,9 @@ def test_the_stage_e_downgrade_is_clean_when_nothing_needs_keeping(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database_path = tmp_path / "stage-e-clean-down.db"
-    config, engine = migrate_database(database_path, monkeypatch)
+    config = alembic_config(database_path, monkeypatch)
+    command.upgrade(config, E1_REVISION)
+    engine = create_sqlite_engine(database_path)
     try:
         inspector = inspect(engine)
         before_runs = {column["name"] for column in inspector.get_columns("runs")}
@@ -1694,7 +1707,7 @@ def test_the_stage_e_downgrade_is_clean_when_nothing_needs_keeping(
     engine = create_sqlite_engine(database_path)
     try:
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == F4_REVISION
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == G3_REVISION
     finally:
         engine.dispose()
 
@@ -1779,7 +1792,7 @@ def test_migration_0010_creates_snapshots_and_compactions_and_context_mode(
         assert "conversation_compactions" in application_tables(engine)
 
         with engine.connect() as conn:
-            assert conn.scalar(text("SELECT version_num FROM alembic_version")) == F4_REVISION
+            assert conn.scalar(text("SELECT version_num FROM alembic_version")) == G3_REVISION
 
             # Verify existing link backfilled with f1_single_turn
             mode = conn.scalar(text("SELECT context_mode FROM conversation_run_links WHERE id = 1"))
@@ -1994,11 +2007,135 @@ def test_migration_0012_adds_conversation_lifecycle_columns_and_indexes(
     finally:
         engine.dispose()
 
-    command.upgrade(config, "head")
+    command.upgrade(config, F4_REVISION)
     engine = create_sqlite_engine(database_path)
     try:
         inspector = inspect(engine)
         conv_cols = {col["name"]: col for col in inspector.get_columns("conversations")}
         assert "status" in conv_cols
+        with engine.connect() as conn:
+            assert conn.scalar(text("SELECT version_num FROM alembic_version")) == F4_REVISION
+    finally:
+        engine.dispose()
+
+
+# ---------------------------------------------------------------------------------------
+# 0013 -- G3 package registry and execution snapshot fields on runs
+# ---------------------------------------------------------------------------------------
+
+
+def test_migration_0013_creates_package_registry_and_run_snapshot_columns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """0013 adds package_environments, installed_package_versions, files, deps, bindings, and runs fields."""
+    database_path = tmp_path / "g3-migration.db"
+    config = alembic_config(database_path, monkeypatch)
+
+    # 1. Upgrade to 0012
+    command.upgrade(config, F4_REVISION)
+    engine = create_sqlite_engine(database_path)
+    try:
+        assert "package_environments" not in application_tables(engine)
+        assert "installed_package_versions" not in application_tables(engine)
+        assert "installed_package_files" not in application_tables(engine)
+        assert "installed_package_dependencies" not in application_tables(engine)
+        assert "agent_instance_package_bindings" not in application_tables(engine)
+
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO users(id, username, password_hash, role, is_active,"
+                    " created_at, updated_at) VALUES(1, 'owner', X'00', 'admin', 1,"
+                    " '2026-09-28 12:00:00', '2026-09-28 12:00:00')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO agent_instances(id, owner_user_id, agent_key,"
+                    " agent_definition_version, display_name, enabled, model_provider,"
+                    " model_name, created_at, updated_at) VALUES(1, 1, 'nervos.chat', '1',"
+                    " 'Agent', 1, 'anthropic', 'opaque/model', '2026-09-28 12:00:00',"
+                    " '2026-09-28 12:00:00')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO runs(id, agent_instance_id, status, agent_key,"
+                    " agent_definition_version, model_provider, model_name, input_text,"
+                    " input_max_bytes, input_max_code_points, output_max_bytes, output_max_code_points,"
+                    " provider_timeout_ms, max_output_tokens, max_model_calls, created_at)"
+                    " VALUES(1, 1, 'created', 'nervos.chat', '1', 'anthropic', 'opaque/model',"
+                    " 'pre-G3 text', 8000, 4000, 32000, 16000, 60000, 1024, 1, '2026-09-28 12:00:00')"
+                )
+            )
+    finally:
+        engine.dispose()
+
+    # 2. Upgrade to 0013 (head)
+    command.upgrade(config, G3_REVISION)
+    engine = create_sqlite_engine(database_path)
+    try:
+        inspector = inspect(engine)
+        assert "package_environments" in application_tables(engine)
+        assert "installed_package_versions" in application_tables(engine)
+        assert "installed_package_files" in application_tables(engine)
+        assert "installed_package_dependencies" in application_tables(engine)
+        assert "agent_instance_package_bindings" in application_tables(engine)
+
+        runs_cols = {col["name"]: col for col in inspector.get_columns("runs")}
+        assert "execution_kind" in runs_cols
+        assert "installed_package_version_id" in runs_cols
+        assert "package_content_digest" in runs_cols
+        assert "package_environment_id" in runs_cols
+        assert "package_environment_digest" in runs_cols
+        assert "package_entrypoint" in runs_cols
+        assert "effective_config_json" in runs_cols
+        assert "effective_config_digest" in runs_cols
+        assert "agent_instance_config_revision" in runs_cols
+        assert "host_protocol_version" in runs_cols
+        assert "sdk_api_version" in runs_cols
+
+        with engine.connect() as conn:
+            row = (
+                conn.execute(
+                    text(
+                        "SELECT id, execution_kind, effective_config_json,"
+                        " installed_package_version_id FROM runs WHERE id = 1"
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            assert row["execution_kind"] == "builtin"
+            assert row["effective_config_json"] == "{}"
+            assert row["installed_package_version_id"] is None
+
+            assert conn.scalar(text("SELECT version_num FROM alembic_version")) == G3_REVISION
+            assert conn.exec_driver_sql("PRAGMA integrity_check").scalar() == "ok"
+            assert conn.exec_driver_sql("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        engine.dispose()
+
+    # 3. Test downgrade to 0012 and re-upgrade to 0013
+    command.downgrade(config, F4_REVISION)
+    engine = create_sqlite_engine(database_path)
+    try:
+        inspector = inspect(engine)
+        assert "package_environments" not in application_tables(engine)
+        assert "installed_package_versions" not in application_tables(engine)
+        runs_cols = {col["name"]: col for col in inspector.get_columns("runs")}
+        assert "execution_kind" not in runs_cols
+        assert "installed_package_version_id" not in runs_cols
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_sqlite_engine(database_path)
+    try:
+        inspector = inspect(engine)
+        assert "package_environments" in application_tables(engine)
+        assert "installed_package_versions" in application_tables(engine)
+        runs_cols = {col["name"]: col for col in inspector.get_columns("runs")}
+        assert "execution_kind" in runs_cols
     finally:
         engine.dispose()

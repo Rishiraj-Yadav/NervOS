@@ -40,6 +40,7 @@ from nervos_core.infrastructure.database.mcp_connections import (
     SqlAlchemyMcpConnectionPersistence,
 )
 from nervos_core.infrastructure.database.memory import SqlAlchemyMemoryPersistence
+from nervos_core.infrastructure.database.packages import SqlInstalledPackageDefinitionSource
 from nervos_core.infrastructure.database.triggers import SqlAlchemyTriggerPersistence
 from nervos_core.infrastructure.scheduling import create_schedule_evaluator
 from nervos_core.infrastructure.security import Argon2PasswordHasher, SecureSessionTokens
@@ -81,7 +82,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Composed with no credential at all: this yields the known-provider set and constructs
     # zero clients, so nothing credential-bearing is reachable from ``app.state``.
     known_providers = compose_model_providers(None, None).catalog
-    definitions = create_composite_agent_definition_resolver()
+    definitions = create_composite_agent_definition_resolver(
+        [SqlInstalledPackageDefinitionSource(engine)]
+    )
     agent_service = AgentService(
         SqlAlchemyAgentPersistence(session_factory),
         definitions,

@@ -49,9 +49,13 @@ merged.** G1 adds metadata validation and static definition-resolution contracts
 deterministic `.nervos` builder and secure verifier — is COMPLETE, externally accepted.**
 G2 now constructs byte-reproducible V1 archives, validates cross-platform paths and bounded ZIP/
 wheel structure, proves offline wheelhouse closure, signs and verifies canonical payload integrity
-with Ed25519, and detects tampering without importing or executing package code. There is still no
-package installer, durable package registry, package execution, package host, persistent publisher
-trust, or sandbox; **G3 remains NOT STARTED.**
+with Ed25519, and detects tampering without importing or executing package code. **G3 —
+transactional package installation, durable registry, exact package-definition resolution,
+content-addressed offline Python 3.12 environments, immutable Run executable/config snapshots, and
+package-host execution — is COMPLETE and externally accepted.** It preserves the existing Run → Job
+→ Attempt → Worker authority, adds no G4 product lifecycle surface, and remains a pre-Stage-H
+runtime/dependency-isolation boundary rather than a hostile-code sandbox. Persistent publisher trust
+and sandboxing remain out of scope.
 
 Stage C — Persistent execution engine is COMPLETE. The C0 architecture freeze, the C1 durable execution foundation, C2 — asynchronous submission and minimal durable Worker execution — C3 — Worker registry/health, expired-lease reconciliation, and fencing hardening — C4 — the safe execution retry engine — C5 — owner cancellation and Attempt execution-timeout orchestration — C6 — authoritative global/per-Agent/per-provider execution concurrency, durable Agent fairness, and full admission backpressure — C7 — public read-only execution observability, the Run Events API, the execution timeline, and the polling model — and C8 — integrated deterministic Stage C acceptance and closeout — are implemented, externally reviewed, and accepted.
 
@@ -103,7 +107,7 @@ The next planned stage is **Stage G — Agent package system**.
 - [x] G0 — Package architecture, protocol, versioning, trust, and lifecycle freeze (governance/documentation only; complete, externally accepted, and merged)
 - [x] G1 — Versioned manifest + public Agent SDK contracts + package-aware definition-resolution contracts (complete, externally accepted, and merged)
 - [x] G2 — Deterministic `.nervos` builder + secure verifier (**complete; externally accepted**)
-- [ ] G3 — Transactional installation + durable registry + package-backed execution (**not started**)
+- [x] G3 — Transactional installation + durable registry + package-backed execution (**complete; externally accepted**)
 - [ ] G4 — Lifecycle: upgrade / version coexistence / rollback / uninstall + CLI/API/UI
 - [ ] G5 — Integrated acceptance and Stage-G closeout
 
