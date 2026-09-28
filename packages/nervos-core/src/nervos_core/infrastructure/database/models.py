@@ -40,6 +40,10 @@ CONNECTION_STATUSES = "'connected','unavailable','needs_refresh','definition_cha
 DEFINITION_STATUSES = "'available','unavailable','unsupported_schema'"
 INVOCATION_STATUSES = "'requested','denied','cancelled','started','succeeded','failed','ambiguous'"
 INVOCATION_DISPATCHED_STATUSES = "'started','succeeded','failed','ambiguous'"
+PACKAGE_INSTALL_STATUSES = "'installing','installed','active','failed','pending_removal','removed'"
+PACKAGE_ENVIRONMENT_STATUSES = "'preparing','ready','failed'"
+EXECUTION_KINDS = "'builtin','package'"
+SHA256_SQL = "length({column}) = 64 AND {column} NOT GLOB '*[^0-9a-f]*'"
 # The intersection of both providers' tool-name alphabets and the stricter of their two length
 # bounds, so one persisted name is valid unchanged for either provider.
 MODEL_NAME_SQL = (
@@ -114,6 +118,184 @@ class AgentInstanceRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
+class PackageEnvironmentRecord(Base):
+    """Content-addressed isolated Python environment for installed packages."""
+
+    __tablename__ = "package_environments"
+    __table_args__ = (
+        UniqueConstraint("environment_digest"),
+        CheckConstraint(
+            SHA256_SQL.format(column="environment_digest"), name="environment_digest_hex"
+        ),
+        CheckConstraint(SHA256_SQL.format(column="sdk_wheel_digest"), name="sdk_wheel_digest_hex"),
+        CheckConstraint(
+            SHA256_SQL.format(column="host_wheel_digest"), name="host_wheel_digest_hex"
+        ),
+        CheckConstraint(f"status IN ({PACKAGE_ENVIRONMENT_STATUSES})", name="status_value"),
+        CheckConstraint("python_version = '3.12'", name="python_version_value"),
+        CheckConstraint("host_protocol_version = '1'", name="host_protocol_version_value"),
+        CheckConstraint(
+            "(last_error_code IS NULL AND last_error_message IS NULL) OR "
+            "(last_error_code IS NOT NULL AND last_error_message IS NOT NULL)",
+            name="error_pair",
+        ),
+        CheckConstraint("updated_at >= created_at", name="timestamp_order"),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    environment_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    environment_key_json: Mapped[str] = mapped_column(Text, nullable=False)
+    environment_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    python_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    sdk_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    sdk_wheel_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    host_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    host_wheel_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    host_protocol_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    ready_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    failed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_error_message: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+
+class InstalledPackageVersionRecord(Base):
+    """One node-global exact installed package release."""
+
+    __tablename__ = "installed_package_versions"
+    __table_args__ = (
+        UniqueConstraint("package_id", "package_version"),
+        CheckConstraint("package_id NOT LIKE 'nervos.%'", name="package_id_not_reserved"),
+        CheckConstraint(f"status IN ({PACKAGE_INSTALL_STATUSES})", name="status_value"),
+        CheckConstraint(SHA256_SQL.format(column="content_digest"), name="content_digest_hex"),
+        CheckConstraint(SHA256_SQL.format(column="archive_digest"), name="archive_digest_hex"),
+        CheckConstraint(
+            SHA256_SQL.format(column="signer_fingerprint"), name="signer_fingerprint_hex"
+        ),
+        CheckConstraint("length(signer_public_key) = 32", name="signer_public_key_size"),
+        CheckConstraint("agent_wheel_size > 0", name="agent_wheel_size_positive"),
+        CheckConstraint(
+            "(last_error_code IS NULL AND last_error_message IS NULL) OR "
+            "(last_error_code IS NOT NULL AND last_error_message IS NOT NULL)",
+            name="error_pair",
+        ),
+        CheckConstraint("updated_at >= created_at", name="timestamp_order"),
+        Index("ix_installed_package_versions_status_id", "status", "id"),
+        Index("ix_installed_package_versions_content_digest", "content_digest"),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    package_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    package_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    content_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    archive_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    signer_public_key: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    signer_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    manifest_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    config_schema_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    dependency_lock_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    agent_wheel_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    agent_wheel_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    agent_wheel_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    agent_wheel_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    entrypoint_module: Mapped[str] = mapped_column(String(256), nullable=False)
+    entrypoint_object: Mapped[str] = mapped_column(String(256), nullable=False)
+    storage_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    staging_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    environment_id: Mapped[int | None] = mapped_column(
+        ForeignKey("package_environments.id", ondelete="RESTRICT"), nullable=True
+    )
+    approved_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    approved_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    installed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    activated_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    failed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    removed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_error_message: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+
+class InstalledPackageFileRecord(Base):
+    """One G2-verified payload file belonging to an installed package version."""
+
+    __tablename__ = "installed_package_files"
+    __table_args__ = (
+        UniqueConstraint("installed_package_version_id", "path"),
+        CheckConstraint(SHA256_SQL.format(column="sha256"), name="sha256_hex"),
+        CheckConstraint("byte_length >= 0", name="byte_length_nonnegative"),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    installed_package_version_id: Mapped[int] = mapped_column(
+        ForeignKey("installed_package_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    path: Mapped[str] = mapped_column(Text, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    byte_length: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class InstalledPackageDependencyRecord(Base):
+    """One verified dependency wheel belonging to an installed package version."""
+
+    __tablename__ = "installed_package_dependencies"
+    __table_args__ = (
+        UniqueConstraint("installed_package_version_id", "distribution_name"),
+        UniqueConstraint("installed_package_version_id", "filename"),
+        CheckConstraint(SHA256_SQL.format(column="sha256"), name="sha256_hex"),
+        CheckConstraint("byte_length > 0", name="byte_length_positive"),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    installed_package_version_id: Mapped[int] = mapped_column(
+        ForeignKey("installed_package_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    distribution_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    distribution_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    filename: Mapped[str] = mapped_column(String(512), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    byte_length: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class AgentInstancePackageBindingRecord(Base):
+    """Owner-scoped package binding and effective config for one AgentInstance."""
+
+    __tablename__ = "agent_instance_package_bindings"
+    __table_args__ = (
+        CheckConstraint(
+            SHA256_SQL.format(column="effective_config_digest"), name="effective_config_digest_hex"
+        ),
+        CheckConstraint(
+            SHA256_SQL.format(column="config_schema_digest"), name="config_schema_digest_hex"
+        ),
+        CheckConstraint("config_revision > 0", name="config_revision_positive"),
+        CheckConstraint("updated_at >= created_at", name="timestamp_order"),
+    )
+
+    agent_instance_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_instances.id", ondelete="CASCADE"), primary_key=True
+    )
+    installed_package_version_id: Mapped[int] = mapped_column(
+        ForeignKey("installed_package_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    effective_config_json: Mapped[str] = mapped_column(Text, nullable=False)
+    effective_config_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    config_revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    config_schema_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
 class RunRecord(Base):
     """Persistence record for one immutable-snapshot Run."""
 
@@ -160,7 +342,26 @@ class RunRecord(Base):
             "(status='created' AND started_at IS NULL AND finished_at IS NULL AND output_text IS NULL AND finish_reason IS NULL AND error_code IS NULL AND error_message IS NULL AND input_tokens IS NULL AND output_tokens IS NULL AND total_tokens IS NULL AND elapsed_ms IS NULL) OR (status='running' AND started_at IS NOT NULL AND finished_at IS NULL AND output_text IS NULL AND finish_reason IS NULL AND error_code IS NULL AND error_message IS NULL AND input_tokens IS NULL AND output_tokens IS NULL AND total_tokens IS NULL AND elapsed_ms IS NULL) OR (status='succeeded' AND started_at IS NOT NULL AND finished_at IS NOT NULL AND output_text IS NOT NULL AND length(trim(output_text, char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288))) > 0 AND error_code IS NULL AND error_message IS NULL AND elapsed_ms IS NOT NULL) OR (status='failed' AND started_at IS NOT NULL AND finished_at IS NOT NULL AND output_text IS NULL AND finish_reason IS NULL AND error_code IS NOT NULL AND error_code <> 'worker_recovery_exhausted' AND error_message IS NOT NULL AND length(trim(error_message, char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288))) > 0 AND elapsed_ms IS NOT NULL) OR (status='failed' AND started_at IS NULL AND finished_at IS NOT NULL AND output_text IS NULL AND finish_reason IS NULL AND error_code = 'worker_recovery_exhausted' AND error_message IS NOT NULL AND length(trim(error_message, char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288))) > 0 AND input_tokens IS NULL AND output_tokens IS NULL AND total_tokens IS NULL AND elapsed_ms IS NULL) OR (status='cancelled' AND started_at IS NOT NULL AND finished_at IS NOT NULL AND output_text IS NULL AND finish_reason IS NULL AND error_code IS NULL AND error_message IS NULL AND input_tokens IS NULL AND output_tokens IS NULL AND total_tokens IS NULL AND elapsed_ms IS NOT NULL) OR (status='cancelled' AND started_at IS NULL AND finished_at IS NOT NULL AND output_text IS NULL AND finish_reason IS NULL AND error_code IS NULL AND error_message IS NULL AND input_tokens IS NULL AND output_tokens IS NULL AND total_tokens IS NULL AND elapsed_ms IS NULL)",
             name="lifecycle_shape",
         ),
+        CheckConstraint(f"execution_kind IN ({EXECUTION_KINDS})", name="execution_kind_value"),
+        CheckConstraint(
+            "(execution_kind = 'builtin' AND installed_package_version_id IS NULL AND package_content_digest IS NULL AND package_environment_id IS NULL AND package_environment_digest IS NULL AND package_entrypoint IS NULL AND effective_config_json = '{}' AND effective_config_digest IS NULL AND agent_instance_config_revision IS NULL AND host_protocol_version IS NULL AND sdk_api_version IS NULL) OR (execution_kind = 'package' AND installed_package_version_id IS NOT NULL AND package_content_digest IS NOT NULL AND package_environment_id IS NOT NULL AND package_environment_digest IS NOT NULL AND package_entrypoint IS NOT NULL AND effective_config_digest IS NOT NULL AND agent_instance_config_revision IS NOT NULL AND host_protocol_version IS NOT NULL AND sdk_api_version IS NOT NULL)",
+            name="execution_snapshot_shape",
+        ),
+        ForeignKeyConstraint(
+            ["installed_package_version_id"],
+            ["installed_package_versions.id"],
+            name="fk_runs_installed_package_version_id_installed_package_versions",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["package_environment_id"],
+            ["package_environments.id"],
+            name="fk_runs_package_environment_id_package_environments",
+            ondelete="RESTRICT",
+        ),
         Index("ix_runs_agent_instance_id_id", "agent_instance_id", "id"),
+        Index("ix_runs_installed_package_version_id", "installed_package_version_id"),
+        Index("ix_runs_package_environment_id", "package_environment_id"),
         {"sqlite_autoincrement": True},
     )
 
@@ -193,6 +394,19 @@ class RunRecord(Base):
         Integer, nullable=False, server_default="3"
     )
     tool_grant_cutoff_id: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    execution_kind: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="builtin"
+    )
+    installed_package_version_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    package_content_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    package_environment_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    package_environment_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    package_entrypoint: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    effective_config_json: Mapped[str] = mapped_column(Text, nullable=False, server_default="{}")
+    effective_config_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    agent_instance_config_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    host_protocol_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    sdk_api_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
     output_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     finish_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)

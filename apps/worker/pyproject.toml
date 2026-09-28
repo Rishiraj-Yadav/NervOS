@@ -11,6 +11,7 @@ dependencies = [
     "nervos-core",
     "nervos-models",
     "nervos-mcp",
+    "nervos-package-host",
     "pydantic-settings>=2,<3",
 ]
 
@@ -18,6 +19,7 @@ dependencies = [
 nervos-core = { workspace = true }
 nervos-models = { workspace = true }
 nervos-mcp = { workspace = true }
+nervos-package-host = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nervos_worker"]

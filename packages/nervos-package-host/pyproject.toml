@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nervos-package-host"
+version = "0.1.0"
+description = "Internal isolated subprocess host for NervOS agent packages."
+requires-python = ">=3.12"
+dependencies = ["nervos-sdk"]
+
+[tool.uv.sources]
+nervos-sdk = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nervos_package_host"]

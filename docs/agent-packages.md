@@ -3,8 +3,11 @@
 ## Status
 
 **Target architecture / historical design input.** The canonical Stage-G architecture is now
-`docs/stage-g/README.md` (accepted G0 freeze) with ADRs 0024–0026. Where this
-document's historical proposals conflict with the Stage-G master plan, the master plan wins.
+`docs/stage-g/README.md` (accepted G0 freeze) with ADRs 0024–0026. G3's transactional
+installation, durable registry, immutable Run pinning, and package-host execution path are complete
+and externally accepted; G4 lifecycle/product surfaces are not started. Where this document's
+historical proposals conflict with the Stage-G master plan or implemented G3 contracts, the Stage-G
+master plan and accepted implementation win.
 
 ## Purpose
 

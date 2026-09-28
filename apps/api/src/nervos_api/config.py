@@ -30,6 +30,7 @@ class Settings(BaseSettings):
 
     environment: Environment = "development"
     database_path: Path = Path("~/.nervos/nervos.db")
+    package_store: Path = Path("~/.nervos/packages")
     app_origin: str = "http://localhost:5173"
     log_level: LogLevel = "INFO"
     # Global hard bound on accepted-but-unfinished Jobs. It is enforced inside the submission
@@ -50,7 +51,7 @@ class Settings(BaseSettings):
     mcp_stdio_servers: str = ""
     mcp_credential_aliases: str = ""
 
-    @field_validator("database_path", mode="before")
+    @field_validator("database_path", "package_store", mode="before")
     @classmethod
     def reject_blank_database_path(cls, value: object) -> object:
         """Reject an empty environment value before Path coercion."""
@@ -65,6 +66,15 @@ class Settings(BaseSettings):
         path = value.expanduser().resolve(strict=False)
         if path.is_dir():
             raise ValueError("database path must identify a file")
+        return path
+
+    @field_validator("package_store")
+    @classmethod
+    def normalize_package_store(cls, value: Path) -> Path:
+        """Expand and resolve the package store without creating it."""
+        path = value.expanduser().resolve(strict=False)
+        if path.exists() and not path.is_dir():
+            raise ValueError("package store must identify a directory")
         return path
 
     @field_validator("app_origin")

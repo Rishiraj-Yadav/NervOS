@@ -36,6 +36,11 @@ def test_metadata_contains_exact_application_tables() -> None:
         "conversation_compactions",
         "memory_items",
         "memory_versions",
+        "package_environments",
+        "installed_package_versions",
+        "installed_package_files",
+        "installed_package_dependencies",
+        "agent_instance_package_bindings",
     }
 
 
@@ -75,7 +80,11 @@ def test_b1_metadata_has_exact_indexes_and_restrictive_foreign_keys() -> None:
     assert {index.name for index in instance_table.indexes} == {
         "ix_agent_instances_owner_user_id_id"
     }
-    assert {index.name for index in run_table.indexes} == {"ix_runs_agent_instance_id_id"}
+    assert {index.name for index in run_table.indexes} == {
+        "ix_runs_agent_instance_id_id",
+        "ix_runs_installed_package_version_id",
+        "ix_runs_package_environment_id",
+    }
     assert {fk.ondelete for fk in instance_table.foreign_keys} == {"RESTRICT"}
     assert {fk.ondelete for fk in run_table.foreign_keys} == {"RESTRICT"}
     assert not any(

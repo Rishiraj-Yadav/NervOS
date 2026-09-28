@@ -20,6 +20,7 @@ from pathlib import Path
 from nervos_core.application.agent_definitions import create_composite_agent_definition_resolver
 from nervos_core.application.scheduler import SchedulerService
 from nervos_core.infrastructure.database import create_sqlite_engine
+from nervos_core.infrastructure.database.packages import SqlInstalledPackageDefinitionSource
 from nervos_core.infrastructure.database.triggers import SqlAlchemyTriggerPersistence
 from nervos_core.infrastructure.scheduling import create_schedule_evaluator
 from sqlalchemy import Engine
@@ -27,7 +28,7 @@ from sqlalchemy import Engine
 from nervos_scheduler.config import SchedulerSettings
 
 #: The one migration revision this process understands. F4 ships migration 0012.
-EXPECTED_SCHEMA_REVISION = "0012_stage_f4_conversation_lifecycle"
+EXPECTED_SCHEMA_REVISION = "0013_stage_g3_package_registry"
 
 
 def utc_now() -> datetime:
@@ -54,7 +55,7 @@ def create_scheduler(settings: SchedulerSettings) -> SchedulerComposition:
     engine = create_sqlite_engine(settings.database_path)
     persistence = SqlAlchemyTriggerPersistence(engine)
     service = SchedulerService(
-        create_composite_agent_definition_resolver(),
+        create_composite_agent_definition_resolver([SqlInstalledPackageDefinitionSource(engine)]),
         persistence,
         create_schedule_evaluator(),
     )

@@ -98,6 +98,19 @@ class ToolLoopHandler(Protocol):
     ) -> ChatOutcome: ...
 
 
+class PackageRunExecutionPort(Protocol):
+    """Worker-owned package execution for one already-claimed Attempt."""
+
+    async def run(
+        self,
+        completion: ModelCompletion,
+        run: Run,
+        claim: ClaimHandle,
+        elapsed_ms: int,
+        snapshot: ContextSnapshotData | None = None,
+    ) -> ChatOutcome: ...
+
+
 class RunExecutor:
     """Execute one trusted Run with exactly one bounded model request."""
 
@@ -106,10 +119,12 @@ class RunExecutor:
         handlers: TrustedAgentHandlerResolver,
         monotonic: MonotonicClock = system_monotonic_nanoseconds,
         tool_loop: ToolLoopHandler | None = None,
+        package_execution: PackageRunExecutionPort | None = None,
     ) -> None:
         self._handlers = handlers
         self._monotonic = monotonic
         self._tool_loop = tool_loop
+        self._package_execution = package_execution
 
     async def execute(
         self,
@@ -160,6 +175,10 @@ class RunExecutor:
         closed as an internal execution error rather than silently degrading to a single call the
         Run never authorized.
         """
+        if run.executable.execution_kind.value == "package":
+            if self._package_execution is None or claim is None:
+                raise ModelProviderError(INTERNAL_EXECUTION_ERROR)
+            return await self._package_execution.run(completion, run, claim, 0, snapshot=snapshot)
         if run.limits.max_tool_calls <= 0:
             handler = self._handlers.resolve(
                 AgentDefinitionId(run.agent_key, run.agent_definition_version)

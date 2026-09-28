@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 
+from nervos_core.domain.execution import BUILTIN_EXECUTABLE_SNAPSHOT, RunExecutableSnapshot
 from nervos_core.domain.jobs import JobStatus
 
 OUTCOME_CODE_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
@@ -219,6 +220,7 @@ class Run:
     # `0` for a tool-free Run, which is why no definition needs a special case: a budget of zero
     # tools snapshots nothing, and D2's evaluator then denies every tool against the default `0`.
     tool_grant_cutoff_id: int = 0
+    executable: RunExecutableSnapshot = BUILTIN_EXECUTABLE_SNAPSHOT
 
     def __post_init__(self) -> None:
         if self.id <= 0 or self.agent_instance_id <= 0:

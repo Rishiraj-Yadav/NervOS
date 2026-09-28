@@ -9,6 +9,7 @@ from pydantic import ValidationError
 VARIABLES = (
     "NERVOS_ENVIRONMENT",
     "NERVOS_DATABASE_PATH",
+    "NERVOS_PACKAGE_STORE",
     "NERVOS_APP_ORIGIN",
     "NERVOS_LOG_LEVEL",
     "NERVOS_MAX_PENDING_JOBS",
@@ -44,6 +45,7 @@ def test_the_api_settings_cannot_represent_a_provider_credential(
     assert set(dumped) == {
         "environment",
         "database_path",
+        "package_store",
         "app_origin",
         "log_level",
         "max_pending_jobs",

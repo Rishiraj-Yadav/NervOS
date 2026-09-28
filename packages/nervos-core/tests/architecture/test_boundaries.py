@@ -153,18 +153,6 @@ def test_g1_sdk_and_core_remain_independent() -> None:
 
 def test_g1_does_not_add_package_execution_or_persistence() -> None:
     """G1 is metadata/resolution only, with no G2/G3 execution or storage authority."""
-    core_text = "\n".join(path.read_text(encoding="utf-8") for path in python_files(CORE_SOURCE))
-    worker_text = "\n".join(
-        path.read_text(encoding="utf-8") for path in python_files(WORKER_SOURCE)
-    )
-    forbidden_symbols = (
-        "PackageExecutionAdapter",
-        "InstalledPackageRecord",
-        "PackageInstallationRecord",
-        "PackageApplicationService",
-    )
-
-    assert not any(symbol in core_text or symbol in worker_text for symbol in forbidden_symbols)
     manifest_parser = CORE_APPLICATION / "package_manifest.py"
     assert manifest_parser.is_file(), "G1 ships the manifest parser"
     assert "subprocess" not in manifest_parser.read_text(encoding="utf-8")
@@ -211,10 +199,6 @@ def test_g2_ships_the_builder_and_verifier_without_installation() -> None:
     for name in G2_MODULES:
         assert (CORE_APPLICATION / name).is_file(), f"G2 ships {name}"
 
-    core_text = "\n".join(path.read_text(encoding="utf-8") for path in python_files(CORE_SOURCE))
-    worker_text = "\n".join(
-        path.read_text(encoding="utf-8") for path in python_files(WORKER_SOURCE)
-    )
     g2_text = "\n".join(
         (CORE_APPLICATION / name).read_text(encoding="utf-8") for name in G2_MODULES
     )
@@ -228,9 +212,6 @@ def test_g2_ships_the_builder_and_verifier_without_installation() -> None:
         "executable_ref",
     ):
         assert symbol not in g2_text, symbol
-    assert "PackageExecutionAdapter" not in core_text
-    assert "PackageExecutionAdapter" not in worker_text
-
     # No G2 module may reach for a process, the database, or the control plane.
     for name in G2_MODULES:
         text = (CORE_APPLICATION / name).read_text(encoding="utf-8")
@@ -269,16 +250,19 @@ def test_g2_has_no_network_resolver() -> None:
             assert forbidden not in text, (name, forbidden)
 
 
-def test_g2_adds_no_migration_and_no_package_tables() -> None:
-    """G2 is format-only: the middle of the migration chain and the table set are unchanged."""
+def test_g3_adds_the_approved_package_registry_tables() -> None:
+    """G3 owns the package registry; earlier migrations and unrelated tables remain stable."""
     migrations = sorted((ROOT / "apps" / "api" / "alembic" / "versions").glob("0*.py"))
-    assert migrations[-1].stem == "0012_stage_f4_conversation_lifecycle"
-    assert not list((ROOT / "apps" / "api" / "alembic" / "versions").glob("0013*"))
+    assert migrations[-1].stem == "0013_stage_g3_package_registry"
 
     tables = set(re.findall(r'__tablename__ = "([a-z_]+)"', ORM_MODELS.read_text(encoding="utf-8")))
-    assert tables == EXPECTED_TABLES
-    for forbidden in ("package", "installed", "registry"):
-        assert not any(forbidden in table for table in tables), forbidden
+    assert tables == EXPECTED_TABLES | {
+        "package_environments",
+        "installed_package_versions",
+        "installed_package_files",
+        "installed_package_dependencies",
+        "agent_instance_package_bindings",
+    }
 
 
 def test_g2_keeps_package_and_python_wheel_identity_separate() -> None:
@@ -455,6 +439,7 @@ def test_b3_route_surface_and_migration_freeze() -> None:
         "0011_stage_f3_scoped_memory.py",
         # F4 adds conversation lifecycle (active/archived/deleted) state.
         "0012_stage_f4_conversation_lifecycle.py",
+        "0013_stage_g3_package_registry.py",
     ]
     # The Worker refuses to run against a schema it does not expect, so the pinned revision and
     # the migration head are one fact in two places. Letting them drift bricks the supervised
@@ -518,7 +503,13 @@ def test_the_persisted_schema_is_exactly_the_reviewed_table_set() -> None:
     No milestone added a pointer column to `jobs`.
     """
     tables = set(re.findall(r'__tablename__ = "([a-z_]+)"', ORM_MODELS.read_text(encoding="utf-8")))
-    assert tables == EXPECTED_TABLES
+    assert tables == EXPECTED_TABLES | {
+        "package_environments",
+        "installed_package_versions",
+        "installed_package_files",
+        "installed_package_dependencies",
+        "agent_instance_package_bindings",
+    }
     # The one table C6 adds is scheduling metadata, so it must stay incapable of becoming a
     # second queue: no cached count can drift, and it holds no execution authority.
     fairness = (
@@ -1335,12 +1326,11 @@ def test_the_frontend_gained_only_event_vocabulary() -> None:
         assert forbidden not in timeline, forbidden
 
 
-def test_the_migration_head_is_exactly_0012_and_no_0013_exists() -> None:
-    """F4 adds conversation lifecycle, and nothing beyond that head."""
+def test_the_migration_head_is_exactly_0013_stage_g3_package_registry() -> None:
+    """G3 extends the frozen F4 head with the approved package registry migration."""
     versions = ROOT / "apps" / "api" / "alembic" / "versions"
     discovered = sorted(path.name for path in versions.glob("*.py"))
-    assert discovered[-1] == "0012_stage_f4_conversation_lifecycle.py"
-    assert not any(name.startswith("0013") for name in discovered), discovered
+    assert discovered[-1] == "0013_stage_g3_package_registry.py"
 
 
 def test_nervos_mcp_depends_only_on_public_sdk_surfaces() -> None:
@@ -1608,7 +1598,7 @@ def test_the_scheduler_declares_its_own_schema_expectation() -> None:
     scheduler_app = (ROOT / "apps" / "scheduler" / "src" / "nervos_scheduler" / "app.py").read_text(
         encoding="utf-8"
     )
-    assert 'EXPECTED_SCHEMA_REVISION = "0012_stage_f4_conversation_lifecycle"' in scheduler_app
+    assert 'EXPECTED_SCHEMA_REVISION = "0013_stage_g3_package_registry"' in scheduler_app
     assert "nervos_worker" not in scheduler_app
     main = (ROOT / "apps" / "scheduler" / "src" / "nervos_scheduler" / "main.py").read_text(
         encoding="utf-8"
