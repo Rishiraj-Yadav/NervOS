@@ -881,6 +881,8 @@ def test_c7_adds_only_the_reviewed_observability_surface() -> None:
         "mcp_connections.py",
         # F3 is authorized the memories resource family.
         "memories.py",
+        # G4 is authorized the packages resource family.
+        "packages.py",
         "runs.py",
         "setup.py",
         # E4 is authorized exactly one new control-plane resource family: triggers.

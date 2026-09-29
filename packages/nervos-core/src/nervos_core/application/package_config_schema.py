@@ -140,6 +140,35 @@ def validate_config_schema(schema: Mapping[str, object]) -> PackageConfigSchema:
     return PackageConfigSchema(root=cast("Mapping[str, JsonValue]", schema_copy))
 
 
+def extract_immutable_property_names(schema: PackageConfigSchema) -> frozenset[str]:
+    """Return all property names annotated with x-nervos-immutable: true."""
+    props = schema.root.get("properties")
+    if not isinstance(props, dict):
+        return frozenset()
+    immutable: set[str] = set()
+    for name, child in props.items():
+        if isinstance(child, dict) and child.get("x-nervos-immutable") is True:
+            immutable.add(str(name))
+    return frozenset(immutable)
+
+
+def check_immutable_fields(
+    current_config: Mapping[str, object],
+    new_config: Mapping[str, object],
+    immutable_fields: frozenset[str],
+) -> None:
+    """Ensure no immutable configuration field has changed value."""
+    from nervos_core.domain.package_query import ImmutableConfigViolation
+
+    for field in immutable_fields:
+        if (field in current_config or field in new_config) and current_config.get(
+            field
+        ) != new_config.get(field):
+            raise ImmutableConfigViolation(
+                f"Immutable configuration field '{field}' cannot be modified."
+            )
+
+
 def parse_config_json(raw: str | bytes | bytearray) -> dict[str, JsonValue]:
     """Parse one raw user configuration JSON document without applying schema defaults."""
     parsed = _loads_bounded(raw, error_type=PackageConfigValidationError)

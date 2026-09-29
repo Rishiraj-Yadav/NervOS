@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nervos-cli"
+version = "0.1.0"
+description = "NervOS package lifecycle and management CLI"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28,<1",
+]
+
+[project.scripts]
+nervos = "nervos_cli.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nervos_cli"]

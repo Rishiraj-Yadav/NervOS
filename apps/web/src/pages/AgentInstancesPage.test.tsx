@@ -6,6 +6,7 @@ import {
   apiAgentInstance,
   apiError,
   authenticatedHandler,
+  packagesHandler,
   renderRoute,
   setupStatusHandler,
 } from "../test/agentFixtures";
@@ -15,6 +16,7 @@ function signedIn(extra?: { items?: unknown[] }) {
   return [
     setupStatusHandler(true),
     authenticatedHandler(),
+    packagesHandler(),
     http.get("/api/v1/agent-instances", () =>
       HttpResponse.json({ items: extra?.items ?? [], next_before_id: null }),
     ),

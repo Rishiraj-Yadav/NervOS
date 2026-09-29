@@ -38,6 +38,7 @@ type Validator<T> = (value: unknown) => value is T;
 interface RequestOptions {
   method?: "GET" | "POST" | "PATCH" | "DELETE";
   body?: unknown;
+  formData?: FormData;
 }
 
 const API_PREFIX = "/api/v1";
@@ -75,11 +76,21 @@ export async function apiRequestNoContent(
 
 async function request(path: string, options: RequestOptions): Promise<Response> {
   try {
+    let headers: Record<string, string> | undefined;
+    let body: BodyInit | undefined;
+
+    if (options.formData !== undefined) {
+      body = options.formData;
+    } else if (options.body !== undefined) {
+      headers = { "Content-Type": "application/json" };
+      body = JSON.stringify(options.body);
+    }
+
     return await fetch(`${API_PREFIX}${path}`, {
       method: options.method ?? "GET",
       credentials: "include",
-      headers: options.body === undefined ? undefined : { "Content-Type": "application/json" },
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      headers,
+      body,
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {

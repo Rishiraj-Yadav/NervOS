@@ -21,6 +21,11 @@ from nervos_core.application.authentication import (
 from nervos_core.application.conversations import ConversationService
 from nervos_core.application.mcp_connection_service import McpConnectionService
 from nervos_core.application.memory import MemoryService
+from nervos_core.application.package_environment import PackageEnvironmentBuilder
+from nervos_core.application.package_health import SubprocessPackageHealthChecker
+from nervos_core.application.package_installation import PackageApplicationService
+from nervos_core.application.package_query import PackageQueryService
+from nervos_core.application.package_storage import PackageStore
 from nervos_core.application.run_cancellation import RunCancellationService
 from nervos_core.application.triggers import TriggerManagementService
 from nervos_core.application.webhooks import (
@@ -40,7 +45,10 @@ from nervos_core.infrastructure.database.mcp_connections import (
     SqlAlchemyMcpConnectionPersistence,
 )
 from nervos_core.infrastructure.database.memory import SqlAlchemyMemoryPersistence
-from nervos_core.infrastructure.database.packages import SqlInstalledPackageDefinitionSource
+from nervos_core.infrastructure.database.packages import (
+    SqlAlchemyPackageRegistryPersistence,
+    SqlInstalledPackageDefinitionSource,
+)
 from nervos_core.infrastructure.database.triggers import SqlAlchemyTriggerPersistence
 from nervos_core.infrastructure.scheduling import create_schedule_evaluator
 from nervos_core.infrastructure.security import Argon2PasswordHasher, SecureSessionTokens
@@ -170,6 +178,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         agent_service,
         clock=utc_now,
     )
+    package_store = PackageStore(resolved_settings.package_store)
+    package_persistence = SqlAlchemyPackageRegistryPersistence(engine)
+    package_env_builder = PackageEnvironmentBuilder(package_store.environments_root)
+    package_health_checker = SubprocessPackageHealthChecker()
+    package_application_service = PackageApplicationService(
+        package_persistence,
+        package_store,
+        package_env_builder,
+        package_health_checker,
+        clock=utc_now,
+    )
+    package_query_service = PackageQueryService(package_persistence, package_store)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
@@ -195,6 +215,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.trigger_management_service = trigger_management_service
     app.state.conversation_service = conversation_service
     app.state.memory_service = memory_service
+    app.state.package_application_service = package_application_service
+    app.state.package_query_service = package_query_service
     app.add_exception_handler(Exception, unexpected_error_handler)
     app.add_exception_handler(AuthenticationError, authentication_error_handler)
     app.add_exception_handler(InvalidOrigin, authentication_error_handler)

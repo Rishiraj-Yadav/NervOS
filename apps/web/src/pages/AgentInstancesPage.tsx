@@ -3,31 +3,54 @@ import { Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 
 import { MODEL_PROVIDERS } from "../api/providers";
+import { packagesQuery } from "../api/packageQueries";
 import { agentInstancesQuery, useCreateAgentInstance } from "../api/queries";
 import { ErrorState, InlineError, LoadingState } from "../components/AsyncState";
 import { Brand } from "../components/Brand";
+import { ConfigSchemaForm } from "../components/ConfigSchemaForm";
 
-// The single trusted definition this milestone exposes. It is never chosen implicitly.
-const DEFINITION_KEY = "nervos.chat";
-const DEFINITION_VERSION = "1";
+const BUILTIN_KEY = "nervos.chat";
+const BUILTIN_VERSION = "1";
 
 export function AgentInstancesPage() {
   const instances = useQuery(agentInstancesQuery());
+  const activePackages = useQuery(packagesQuery("active"));
   const createInstance = useCreateAgentInstance();
   const navigate = useNavigate();
   const [showForm, setShowForm] = useState(false);
+
+  const [selectedDefinition, setSelectedDefinition] = useState("nervos.chat v1");
+  const [packageConfig, setPackageConfig] = useState<Record<string, unknown>>({});
+
+  const isPackage = selectedDefinition !== "nervos.chat v1";
+  const [selectedKey, selectedVersion] = isPackage
+    ? selectedDefinition.split("@")
+    : [BUILTIN_KEY, BUILTIN_VERSION];
 
   async function handleCreate(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
     try {
-      const created = await createInstance.mutateAsync({
-        agent_key: DEFINITION_KEY,
-        agent_definition_version: DEFINITION_VERSION,
+      const payload: {
+        agent_key: string;
+        agent_definition_version: string;
+        display_name: string;
+        model_provider: string;
+        model_name: string;
+        package_config?: Record<string, unknown>;
+      } = {
+        agent_key: selectedKey,
+        agent_definition_version: selectedVersion,
         display_name: String(data.get("display_name") ?? ""),
         model_provider: String(data.get("model_provider") ?? ""),
         model_name: String(data.get("model_name") ?? ""),
-      });
+      };
+
+      if (isPackage) {
+        payload.package_config = packageConfig;
+      }
+
+      const created = await createInstance.mutateAsync(payload);
       await navigate(`/agents/${created.id}`);
     } catch {
       // Rendered from the mutation's error state below.
@@ -39,6 +62,9 @@ export function AgentInstancesPage() {
       <header className="topbar">
         <Brand />
         <div className="account-actions">
+          <Link className="button-link secondary" to="/packages">
+            Packages
+          </Link>
           <Link className="button-link secondary" to="/dashboard">
             Dashboard
           </Link>
@@ -116,15 +142,22 @@ export function AgentInstancesPage() {
               <p className="field-hint">A label for you. It does not have to be unique.</p>
 
               <label htmlFor="agent_definition">Agent definition</label>
-              <input
+              <select
                 id="agent_definition"
-                type="text"
-                value={`${DEFINITION_KEY} v${DEFINITION_VERSION}`}
-                readOnly
-                aria-describedby="agent_definition_hint"
-              />
-              <p className="field-hint" id="agent_definition_hint">
-                The exact trusted definition this milestone supports. It cannot be changed.
+                value={selectedDefinition}
+                onChange={(e) => setSelectedDefinition(e.target.value)}
+              >
+                <option value="nervos.chat v1">
+                  nervos.chat v1
+                </option>
+                {activePackages.data?.items.map((pkg) => (
+                  <option key={`${pkg.package_id}@${pkg.package_version}`} value={`${pkg.package_id}@${pkg.package_version}`}>
+                    {pkg.display_name} ({pkg.package_id}@{pkg.package_version})
+                  </option>
+                ))}
+              </select>
+              <p className="field-hint">
+                Choose a built-in agent or an active installed package.
               </p>
 
               <label htmlFor="model_provider">Model provider</label>
@@ -151,6 +184,16 @@ export function AgentInstancesPage() {
                 Enter the provider&apos;s model identifier exactly. NervOS does not check whether it
                 exists until you run the agent, and an unavailable model fails safely.
               </p>
+
+              {isPackage && (
+                <div className="pt-2 border-t dark:border-gray-700">
+                  <ConfigSchemaForm
+                    schema={{}}
+                    initialConfig={packageConfig}
+                    onChange={setPackageConfig}
+                  />
+                </div>
+              )}
 
               <button type="submit" disabled={createInstance.isPending}>
                 {createInstance.isPending ? "Creating…" : "Create agent"}

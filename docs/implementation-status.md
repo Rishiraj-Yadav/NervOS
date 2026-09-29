@@ -53,9 +53,12 @@ with Ed25519, and detects tampering without importing or executing package code.
 transactional package installation, durable registry, exact package-definition resolution,
 content-addressed offline Python 3.12 environments, immutable Run executable/config snapshots, and
 package-host execution — is COMPLETE and externally accepted.** It preserves the existing Run → Job
-→ Attempt → Worker authority, adds no G4 product lifecycle surface, and remains a pre-Stage-H
-runtime/dependency-isolation boundary rather than a hostile-code sandbox. Persistent publisher trust
-and sandboxing remain out of scope.
+→ Attempt → Worker authority and remains a pre-Stage-H runtime/dependency-isolation boundary rather
+than a hostile-code sandbox. **G4 — Package Lifecycle Product Surface — is COMPLETE / EXTERNALLY ACCEPTED, PENDING MERGE.** It adds authenticated package inspection/install/list/detail APIs, atomic
+package-backed AgentInstance creation, schema-validated config updates, side-by-side rebind/rollback,
+obligation-aware removal with `pending_removal`, a thin API-backed CLI, and Packages/Agent lifecycle
+web UI. No migration 0014 was added; G4 uses the existing 0013 schema. Persistent publisher trust and
+sandboxing remain out of scope.
 
 Stage C — Persistent execution engine is COMPLETE. The C0 architecture freeze, the C1 durable execution foundation, C2 — asynchronous submission and minimal durable Worker execution — C3 — Worker registry/health, expired-lease reconciliation, and fencing hardening — C4 — the safe execution retry engine — C5 — owner cancellation and Attempt execution-timeout orchestration — C6 — authoritative global/per-Agent/per-provider execution concurrency, durable Agent fairness, and full admission backpressure — C7 — public read-only execution observability, the Run Events API, the execution timeline, and the polling model — and C8 — integrated deterministic Stage C acceptance and closeout — are implemented, externally reviewed, and accepted.
 
@@ -108,7 +111,7 @@ The next planned stage is **Stage G — Agent package system**.
 - [x] G1 — Versioned manifest + public Agent SDK contracts + package-aware definition-resolution contracts (complete, externally accepted, and merged)
 - [x] G2 — Deterministic `.nervos` builder + secure verifier (**complete; externally accepted**)
 - [x] G3 — Transactional installation + durable registry + package-backed execution (**complete; externally accepted**)
-- [ ] G4 — Lifecycle: upgrade / version coexistence / rollback / uninstall + CLI/API/UI
+- [x] G4 — Lifecycle: upgrade / version coexistence / rollback / uninstall + CLI/API/UI (**complete; externally accepted**)
 - [ ] G5 — Integrated acceptance and Stage-G closeout
 
 **E0 is architecture frozen and externally accepted.** It delivered governance only and changed no

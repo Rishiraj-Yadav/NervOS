@@ -72,8 +72,8 @@ Outcome: agents become installable software.
 - **G1 — Versioned manifest + public Agent SDK + definition-resolution contracts:** manifest/domain types, strict manifest parser, SemVer/identity/compatibility/config-schema validation, `nervos-sdk`, resolver/source interfaces, in-memory/static package definition source, built-in compatibility. **Complete, externally accepted, and merged.** No durable package tables.
 - **G2 — deterministic `.nervos` builder + verifier:** canonical package construction, archive validation, content digest, Ed25519 verification, tamper detection, pure-Python wheelhouse validation, cross-platform safe format. **Complete; externally accepted.** No installation, durable registry, package execution, persistent publisher trust, or sandbox.
 - **G3 — Transactional installation + durable registry + package-backed execution:** package-registry migration, SQL-backed definition source, installation state machine, storage, isolated dependency environment, config snapshot + immutable Run semantics, exact executable pinning, package-host subprocess, activation health check. **Complete; externally accepted.**
-- **G4 — Lifecycle:** side-by-side versions, explicit upgrade/rebind with capability delta, rollback, uninstall, unified CLI/API/UI lifecycle surfaces. **Not started; next.**
-- **G5 — Integrated acceptance and Stage-G closeout.**
+- **G4 — Lifecycle:** side-by-side versions, explicit upgrade/rebind with capability delta, rollback, uninstall, unified CLI/API/UI lifecycle surfaces. **Complete; externally accepted, pending merge.**
+- **G5 — Integrated acceptance and Stage-G closeout.** **Next.**
 
 ## Stage H — Security isolation
 

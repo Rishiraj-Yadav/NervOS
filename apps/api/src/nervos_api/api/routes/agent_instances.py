@@ -14,11 +14,14 @@ from nervos_api.api.dependencies import (
     CurrentUserDependency,
     ModelProviderCatalogDependency,
     OriginDependency,
+    PackageApplicationServiceDependency,
 )
 from nervos_api.api.errors import UnsupportedB3AgentDefinition
 from nervos_api.api.schemas import (
+    AgentInstanceConfigPatchRequest,
     AgentInstanceCreateRequest,
     AgentInstancePageResponse,
+    AgentInstanceRebindRequest,
     AgentInstanceResponse,
     AgentInstanceUpdateRequest,
 )
@@ -90,19 +93,73 @@ def create_agent_instance(
     origin: OriginDependency,
     user: CurrentUserDependency,
     service: AgentServiceDependency,
+    package_service: PackageApplicationServiceDependency,
     catalog: ModelProviderCatalogDependency,
 ) -> AgentInstanceResponse:
     """Explicitly create one owned Agent Instance; nothing is ever created implicitly."""
     del origin
-    definition_id = require_trusted_definition(body.agent_key, body.agent_definition_version)
     require_known_provider(body.model_provider, catalog)
-    instance = service.create_instance(
-        user.id,
-        definition_id,
-        body.display_name,
-        body.model_provider,
-        body.model_name,
-        enabled=body.enabled,
+    if body.package_config is None:
+        definition_id = require_trusted_definition(body.agent_key, body.agent_definition_version)
+        instance = service.create_instance(
+            user.id,
+            definition_id,
+            body.display_name,
+            body.model_provider,
+            body.model_name,
+            enabled=body.enabled,
+        )
+        return AgentInstanceResponse.from_domain(instance)
+
+    instance, _ = package_service.create_package_instance(
+        owner_user_id=user.id,
+        package_id=body.agent_key,
+        package_version=body.agent_definition_version,
+        display_name=body.display_name,
+        model_provider=body.model_provider,
+        model_name=body.model_name,
+        config=body.package_config or {},
+    )
+    return AgentInstanceResponse.from_domain(instance)
+
+
+@router.patch("/{agent_instance_id}/config", response_model=AgentInstanceResponse)
+def patch_agent_instance_config(
+    agent_instance_id: int,
+    body: AgentInstanceConfigPatchRequest,
+    origin: OriginDependency,
+    user: CurrentUserDependency,
+    service: AgentServiceDependency,
+    package_service: PackageApplicationServiceDependency,
+) -> AgentInstanceResponse:
+    """Update configuration for future runs of an agent instance."""
+    del origin
+    package_service.update_instance_config(
+        owner_user_id=user.id,
+        agent_instance_id=agent_instance_id,
+        config=body.config,
+        expected_config_revision=body.expected_config_revision,
+    )
+    instance = service.get_instance(user.id, agent_instance_id)
+    return AgentInstanceResponse.from_domain(instance)
+
+
+@router.post("/{agent_instance_id}/rebind", response_model=AgentInstanceResponse)
+def rebind_agent_instance(
+    agent_instance_id: int,
+    body: AgentInstanceRebindRequest,
+    origin: OriginDependency,
+    user: CurrentUserDependency,
+    package_service: PackageApplicationServiceDependency,
+) -> AgentInstanceResponse:
+    """Rebind an agent instance to an active package version (upgrade or rollback)."""
+    del origin
+    instance, _ = package_service.rebind_instance(
+        owner_user_id=user.id,
+        agent_instance_id=agent_instance_id,
+        target_package_version=body.target_package_version,
+        config=body.config,
+        expected_config_revision=body.expected_config_revision,
     )
     return AgentInstanceResponse.from_domain(instance)
 

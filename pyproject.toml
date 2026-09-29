@@ -10,6 +10,7 @@ package = false
 [tool.uv.workspace]
 members = [
     "apps/api",
+    "apps/cli",
     "apps/scheduler",
     "apps/worker",
     "packages/nervos-core",
@@ -30,9 +31,21 @@ dev = [
 
 [tool.pytest.ini_options]
 addopts = "--strict-config --strict-markers"
+pythonpath = [
+    "apps/api/src",
+    "apps/cli/src",
+    "apps/scheduler/src",
+    "apps/worker/src",
+    "packages/nervos-core/src",
+    "packages/nervos-mcp/src",
+    "packages/nervos-models/src",
+    "packages/nervos-sdk/src",
+    "packages/nervos-package-host/src",
+]
 testpaths = [
     "tests",
     "apps/api/tests",
+    "apps/cli/tests",
     "apps/scheduler/tests",
     "apps/worker/tests",
     "packages/nervos-core/tests",
@@ -51,12 +64,18 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
 [tool.ruff.lint.per-file-ignores]
 ".codex/**" = ["E501"]
+"apps/api/tests/integration/test_agent_instance_package_routes.py" = ["E402", "E501"]
 "apps/api/tests/integration/test_migrations.py" = ["E501"]
+"apps/api/tests/integration/test_package_routes.py" = ["E402", "E501"]
 "packages/nervos-core/tests/integration/test_package_installation_service.py" = ["E402", "E501"]
+"packages/nervos-core/tests/integration/test_package_lifecycle_mutations.py" = ["E402", "E501"]
+"packages/nervos-core/tests/integration/test_package_rebind_concurrency.py" = ["E402", "E501"]
 "packages/nervos-core/tests/integration/test_package_registry_persistence.py" = ["E402", "E501", "F401"]
 "packages/nervos-core/tests/integration/test_stage_g3_acceptance.py" = ["E402", "E501", "F401", "F841"]
+"packages/nervos-core/tests/integration/test_stage_g4_acceptance.py" = ["E402", "E501", "F401", "F841"]
 "packages/nervos-core/tests/unit/test_package_host_protocol.py" = ["E501"]
 "packages/nervos-core/tests/unit/test_package_installation_domain.py" = ["F401"]
+"packages/nervos-core/tests/unit/test_package_query.py" = ["E402", "E501"]
 "packages/nervos-core/tests/unit/test_package_storage.py" = ["E501", "F401", "I001", "RUF059"]
 "packages/nervos-package-host/tests/test_runner.py" = ["F401"]
 
@@ -69,6 +88,8 @@ include = [
     "apps/api/src",
     "apps/api/alembic",
     "apps/api/tests",
+    "apps/cli/src",
+    "apps/cli/tests",
     "apps/scheduler/src",
     "apps/scheduler/tests",
     "apps/worker/src",
@@ -92,6 +113,7 @@ exclude = [
 ]
 extraPaths = [
     "apps/api/src",
+    "apps/cli/src",
     "apps/scheduler/src",
     "apps/worker/src",
     "packages/nervos-core/src",

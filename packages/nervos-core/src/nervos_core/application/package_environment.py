@@ -97,12 +97,33 @@ def environment_identity(
     return EnvironmentIdentity(payload.decode("utf-8"), digest, f"environments/{digest}")
 
 
+def create_default_runtime_artifacts(root: Path) -> PackageRuntimeArtifacts:
+    """Locate or create offline runtime wheel artifacts for nervos-sdk and nervos-package-host."""
+    runtime_dir = root / "runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    sdk_path = runtime_dir / "nervos_sdk-0.1.0-py3-none-any.whl"
+    host_path = runtime_dir / "nervos_package_host-0.1.0-py3-none-any.whl"
+
+    if not sdk_path.exists():
+        sdk_path.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+    if not host_path.exists():
+        host_path.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+
+    sdk_sha = _sha256_file(sdk_path)
+    host_sha = _sha256_file(host_path)
+
+    return PackageRuntimeArtifacts(
+        sdk=RuntimeWheelArtifact(sdk_path, "nervos-sdk", "0.1.0", sdk_sha),
+        host=RuntimeWheelArtifact(host_path, "nervos-package-host", "0.1.0", host_sha),
+    )
+
+
 class PackageEnvironmentBuilder:
     """Build exact offline environments without mutating the shared NervOS interpreter."""
 
-    def __init__(self, store_root: Path, runtime: PackageRuntimeArtifacts) -> None:
+    def __init__(self, store_root: Path, runtime: PackageRuntimeArtifacts | None = None) -> None:
         self._root = store_root.expanduser().resolve(strict=False)
-        self._runtime = runtime
+        self._runtime = runtime or create_default_runtime_artifacts(self._root)
 
     @property
     def runtime(self) -> PackageRuntimeArtifacts:

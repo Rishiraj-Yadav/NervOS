@@ -48,6 +48,17 @@ export function DashboardPage({ user }: { user: User }) {
         </div>
         <div className="panel ready-card" style={{ marginTop: "1rem" }}>
           <div>
+            <h2>Packages</h2>
+            <p>
+              Install, inspect, and manage versioned agent packages from local <code>.nervos</code> archives.
+            </p>
+            <Link className="button-link" to="/packages">
+              Open packages
+            </Link>
+          </div>
+        </div>
+        <div className="panel ready-card" style={{ marginTop: "1rem" }}>
+          <div>
             <h2>Conversations</h2>
             <p>
               Start interactive multi-turn conversation sessions with your configured agents.

@@ -2,21 +2,24 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 from time import sleep
+from typing import cast
 
-from sqlalchemy import Connection, Engine, insert, select, update
+from sqlalchemy import Connection, Engine, func, insert, select, update
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.exc import OperationalError
 
 from nervos_core.application.agent_definitions import AgentDefinitionSource
+from nervos_core.application.agents import AgentInstanceNotFound
 from nervos_core.application.package_installation import PackageInstallRecordInput
 from nervos_core.application.package_manifest import (
     parse_package_manifest,
     project_agent_definition,
 )
-from nervos_core.domain.agents import AgentDefinition, AgentDefinitionId
+from nervos_core.domain.agents import AgentDefinition, AgentDefinitionId, AgentInstance
 from nervos_core.domain.execution import RunExecutableSnapshot, RunExecutionKind
 from nervos_core.domain.package_installation import (
     AgentInstancePackageBinding,
@@ -25,6 +28,19 @@ from nervos_core.domain.package_installation import (
     PackageEnvironmentStatus,
     PackageInstallStatus,
 )
+from nervos_core.domain.package_query import (
+    PackageHasActiveRuns,
+    PackageHasBoundInstances,
+    PackageRemovalPlan,
+    PackageVersionDetail,
+    PackageVersionSummary,
+    StaleConfigRevision,
+)
+from nervos_core.domain.packages import (
+    NERVOS_CORE_COMPATIBILITY_VERSION,
+    PackageVersion,
+)
+from nervos_core.domain.runs import RunStatus
 from nervos_core.infrastructure.database.models import (
     AgentInstancePackageBindingRecord,
     AgentInstanceRecord,
@@ -32,6 +48,7 @@ from nervos_core.infrastructure.database.models import (
     InstalledPackageFileRecord,
     InstalledPackageVersionRecord,
     PackageEnvironmentRecord,
+    RunRecord,
 )
 from nervos_core.infrastructure.database.transaction import TransactionRunner
 
@@ -446,6 +463,706 @@ class SqlAlchemyPackageRegistryPersistence:
 
         return self._runner.run(operation)
 
+    def list_package_summaries(
+        self, status: PackageInstallStatus | None = None
+    ) -> tuple[PackageVersionSummary, ...]:
+        def operation(connection: Connection) -> tuple[PackageVersionSummary, ...]:
+            counts_subquery = (
+                select(
+                    AgentInstancePackageBindingRecord.installed_package_version_id.label(
+                        "installed_id"
+                    ),
+                    func.count(AgentInstancePackageBindingRecord.agent_instance_id).label(
+                        "bound_count"
+                    ),
+                )
+                .group_by(AgentInstancePackageBindingRecord.installed_package_version_id)
+                .subquery()
+            )
+            query = select(
+                InstalledPackageVersionRecord.package_id,
+                InstalledPackageVersionRecord.package_version,
+                InstalledPackageVersionRecord.manifest_bytes,
+                InstalledPackageVersionRecord.status,
+                InstalledPackageVersionRecord.signer_fingerprint,
+                InstalledPackageVersionRecord.content_digest,
+                InstalledPackageVersionRecord.archive_digest,
+                InstalledPackageVersionRecord.installed_at,
+                InstalledPackageVersionRecord.activated_at,
+                InstalledPackageVersionRecord.failed_at,
+                InstalledPackageVersionRecord.removed_at,
+                InstalledPackageVersionRecord.last_error_code,
+                InstalledPackageVersionRecord.last_error_message,
+                func.coalesce(counts_subquery.c.bound_count, 0).label("bound_count"),
+            ).outerjoin(
+                counts_subquery,
+                InstalledPackageVersionRecord.id == counts_subquery.c.installed_id,
+            )
+            if status is not None:
+                query = query.where(InstalledPackageVersionRecord.status == status.value)
+            rows = (
+                connection.execute(
+                    query.order_by(
+                        InstalledPackageVersionRecord.package_id,
+                        InstalledPackageVersionRecord.package_version.desc(),
+                    )
+                )
+                .mappings()
+                .all()
+            )
+
+            summaries: list[PackageVersionSummary] = []
+            for r in rows:
+                manifest = parse_package_manifest(bytes(r["manifest_bytes"]))
+                summaries.append(
+                    PackageVersionSummary(
+                        package_id=str(r["package_id"]),
+                        package_version=str(r["package_version"]),
+                        display_name=manifest.display_name,
+                        status=PackageInstallStatus(str(r["status"])),
+                        signer_fingerprint=str(r["signer_fingerprint"]),
+                        content_digest=str(r["content_digest"]),
+                        archive_digest=str(r["archive_digest"]),
+                        bound_instances_count=int(r["bound_count"]),
+                        installed_at=r["installed_at"],
+                        activated_at=r["activated_at"],
+                        failed_at=r["failed_at"],
+                        removed_at=r["removed_at"],
+                        last_error_code=r["last_error_code"],
+                        last_error_message=r["last_error_message"],
+                    )
+                )
+            return tuple(summaries)
+
+        return self._runner.run(operation)
+
+    def get_package_detail(self, package_id: str, package_version: str) -> PackageVersionDetail:
+        def operation(connection: Connection) -> PackageVersionDetail:
+            return _load_package_detail_on_connection(connection, package_id, package_version)
+
+        return self._runner.run(operation)
+
+    def get_package_detail_for_instance(
+        self, agent_instance_id: int, owner_user_id: int
+    ) -> PackageVersionDetail:
+        def operation(connection: Connection) -> PackageVersionDetail:
+            instance = (
+                connection.execute(
+                    select(AgentInstanceRecord).where(
+                        AgentInstanceRecord.id == agent_instance_id,
+                        AgentInstanceRecord.owner_user_id == owner_user_id,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if instance is None:
+                raise AgentInstanceNotFound
+            return _load_package_detail_on_connection(
+                connection,
+                str(instance["agent_key"]),
+                str(instance["agent_definition_version"]),
+            )
+
+        return self._runner.run(operation)
+
+    def get_removal_plan(self, package_id: str, package_version: str) -> PackageRemovalPlan:
+        def operation(connection: Connection) -> PackageRemovalPlan:
+            row = (
+                connection.execute(
+                    select(InstalledPackageVersionRecord).where(
+                        InstalledPackageVersionRecord.package_id == package_id,
+                        InstalledPackageVersionRecord.package_version == package_version,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
+                raise InstalledPackageNotFound
+
+            status = PackageInstallStatus(str(row["status"]))
+            bound_instances = [
+                int(r[0])
+                for r in connection.execute(
+                    select(AgentInstancePackageBindingRecord.agent_instance_id).where(
+                        AgentInstancePackageBindingRecord.installed_package_version_id == row["id"]
+                    )
+                ).all()
+            ]
+
+            nonterminal_runs = [
+                int(r[0])
+                for r in connection.execute(
+                    select(RunRecord.id).where(
+                        RunRecord.installed_package_version_id == row["id"],
+                        RunRecord.status.in_([RunStatus.CREATED.value, RunStatus.RUNNING.value]),
+                    )
+                ).all()
+            ]
+
+            env_id = row["environment_id"]
+            is_env_shared = False
+            if env_id is not None:
+                other_env_user = connection.execute(
+                    select(InstalledPackageVersionRecord.id).where(
+                        InstalledPackageVersionRecord.environment_id == env_id,
+                        InstalledPackageVersionRecord.id != row["id"],
+                        InstalledPackageVersionRecord.status != PackageInstallStatus.REMOVED.value,
+                    )
+                ).first()
+                run_ref = connection.execute(
+                    select(RunRecord.id).where(RunRecord.package_environment_id == env_id)
+                ).first()
+                if other_env_user is not None or run_ref is not None:
+                    is_env_shared = True
+
+            blocking_reasons: list[str] = []
+            if bound_instances:
+                blocking_reasons.append(
+                    f"{len(bound_instances)} agent instance(s) are bound to this package version."
+                )
+            if nonterminal_runs:
+                blocking_reasons.append(
+                    f"{len(nonterminal_runs)} run(s) are active under this package version."
+                )
+            if status is PackageInstallStatus.REMOVED:
+                blocking_reasons.append("The package version is already removed.")
+
+            can_remove_immediately = (
+                len(bound_instances) == 0
+                and len(nonterminal_runs) == 0
+                and status is not PackageInstallStatus.REMOVED
+            )
+            can_begin_removal = (
+                len(bound_instances) == 0 and status is not PackageInstallStatus.REMOVED
+            )
+
+            return PackageRemovalPlan(
+                package_id=package_id,
+                package_version=package_version,
+                status=status,
+                bound_instance_ids=tuple(bound_instances),
+                bound_instances_count=len(bound_instances),
+                nonterminal_run_ids=tuple(nonterminal_runs),
+                nonterminal_runs_count=len(nonterminal_runs),
+                is_environment_shared=is_env_shared,
+                can_remove_immediately=can_remove_immediately,
+                can_begin_removal=can_begin_removal,
+                blocking_reasons=tuple(blocking_reasons),
+            )
+
+        return self._runner.run(operation)
+
+    def get_installed_id(self, package_id: str, package_version: str) -> int:
+        def operation(connection: Connection) -> int:
+            row = connection.execute(
+                select(InstalledPackageVersionRecord.id).where(
+                    InstalledPackageVersionRecord.package_id == package_id,
+                    InstalledPackageVersionRecord.package_version == package_version,
+                )
+            ).first()
+            if row is None:
+                raise InstalledPackageNotFound
+            return int(row[0])
+
+        return self._runner.run(operation)
+
+    def get_binding_for_instance(self, agent_instance_id: int) -> AgentInstancePackageBinding:
+        def operation(connection: Connection) -> AgentInstancePackageBinding:
+            row = (
+                connection.execute(
+                    select(AgentInstancePackageBindingRecord).where(
+                        AgentInstancePackageBindingRecord.agent_instance_id == agent_instance_id
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
+                raise AgentInstanceNotFound
+            return AgentInstancePackageBinding(
+                int(row["agent_instance_id"]),
+                int(row["installed_package_version_id"]),
+                str(row["effective_config_json"]),
+                str(row["effective_config_digest"]),
+                int(row["config_revision"]),
+                str(row["config_schema_digest"]),
+            )
+
+        return self._runner.run(operation)
+
+    def create_package_instance(
+        self,
+        *,
+        owner_user_id: int,
+        package_id: str,
+        package_version: str,
+        display_name: str,
+        model_provider: str,
+        model_name: str,
+        effective_config_json: str,
+        effective_config_digest: str,
+        config_schema_digest: str,
+        now: datetime,
+    ) -> tuple[AgentInstance, AgentInstancePackageBinding]:
+        def operation(connection: Connection):
+            pkg = (
+                connection.execute(
+                    select(InstalledPackageVersionRecord).where(
+                        InstalledPackageVersionRecord.package_id == package_id,
+                        InstalledPackageVersionRecord.package_version == package_version,
+                        InstalledPackageVersionRecord.status == PackageInstallStatus.ACTIVE.value,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if pkg is None:
+                raise PackageRegistryInvariantError("package version is not active")
+
+            instance_res = connection.execute(
+                insert(AgentInstanceRecord).values(
+                    owner_user_id=owner_user_id,
+                    agent_key=package_id,
+                    agent_definition_version=package_version,
+                    display_name=display_name,
+                    enabled=True,
+                    model_provider=model_provider,
+                    model_name=model_name,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            pk = instance_res.inserted_primary_key
+            if pk is None or len(pk) == 0:
+                raise RuntimeError("No primary key returned for agent instance")
+            instance_id = int(str(pk[0]))
+
+            connection.execute(
+                insert(AgentInstancePackageBindingRecord).values(
+                    agent_instance_id=instance_id,
+                    installed_package_version_id=int(pkg["id"]),
+                    effective_config_json=effective_config_json,
+                    effective_config_digest=effective_config_digest,
+                    config_revision=1,
+                    config_schema_digest=config_schema_digest,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+
+            instance = AgentInstance(
+                id=instance_id,
+                owner_user_id=owner_user_id,
+                definition_id=AgentDefinitionId(package_id, package_version),
+                display_name=display_name,
+                enabled=True,
+                model_provider=model_provider,
+                model_name=model_name,
+                created_at=now,
+                updated_at=now,
+            )
+            binding = AgentInstancePackageBinding(
+                agent_instance_id=instance_id,
+                installed_package_version_id=int(pkg["id"]),
+                effective_config_json=effective_config_json,
+                effective_config_digest=effective_config_digest,
+                config_revision=1,
+                config_schema_digest=config_schema_digest,
+            )
+            return instance, binding
+
+        return self._runner.run(operation)
+
+    def update_instance_config(
+        self,
+        *,
+        owner_user_id: int,
+        agent_instance_id: int,
+        effective_config_json: str,
+        effective_config_digest: str,
+        config_schema_digest: str,
+        expected_config_revision: int,
+        now: datetime,
+    ) -> AgentInstancePackageBinding:
+        def operation(connection: Connection):
+            instance = (
+                connection.execute(
+                    select(AgentInstanceRecord).where(
+                        AgentInstanceRecord.id == agent_instance_id,
+                        AgentInstanceRecord.owner_user_id == owner_user_id,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if instance is None:
+                raise AgentInstanceNotFound
+
+            binding = (
+                connection.execute(
+                    select(AgentInstancePackageBindingRecord).where(
+                        AgentInstancePackageBindingRecord.agent_instance_id == agent_instance_id
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if binding is None:
+                raise AgentInstanceNotFound
+
+            if int(binding["config_revision"]) != expected_config_revision:
+                cur = binding["config_revision"]
+                raise StaleConfigRevision(
+                    f"expected revision {expected_config_revision}, found {cur}"
+                )
+
+            new_revision = expected_config_revision + 1
+            connection.execute(
+                update(AgentInstancePackageBindingRecord)
+                .where(AgentInstancePackageBindingRecord.agent_instance_id == agent_instance_id)
+                .values(
+                    effective_config_json=effective_config_json,
+                    effective_config_digest=effective_config_digest,
+                    config_revision=new_revision,
+                    config_schema_digest=config_schema_digest,
+                    updated_at=now,
+                )
+            )
+            return AgentInstancePackageBinding(
+                agent_instance_id=agent_instance_id,
+                installed_package_version_id=int(binding["installed_package_version_id"]),
+                effective_config_json=effective_config_json,
+                effective_config_digest=effective_config_digest,
+                config_revision=new_revision,
+                config_schema_digest=config_schema_digest,
+            )
+
+        return self._runner.run(operation)
+
+    def rebind_instance(
+        self,
+        *,
+        owner_user_id: int,
+        agent_instance_id: int,
+        target_installed_id: int,
+        target_package_id: str,
+        target_package_version: str,
+        effective_config_json: str,
+        effective_config_digest: str,
+        config_schema_digest: str,
+        expected_config_revision: int,
+        now: datetime,
+    ) -> tuple[AgentInstance, AgentInstancePackageBinding]:
+        def operation(connection: Connection):
+            instance = (
+                connection.execute(
+                    select(AgentInstanceRecord).where(
+                        AgentInstanceRecord.id == agent_instance_id,
+                        AgentInstanceRecord.owner_user_id == owner_user_id,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if instance is None:
+                raise AgentInstanceNotFound
+
+            binding = (
+                connection.execute(
+                    select(AgentInstancePackageBindingRecord).where(
+                        AgentInstancePackageBindingRecord.agent_instance_id == agent_instance_id
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if binding is None:
+                raise AgentInstanceNotFound
+
+            if int(binding["config_revision"]) != expected_config_revision:
+                cur = binding["config_revision"]
+                raise StaleConfigRevision(
+                    f"expected revision {expected_config_revision}, found {cur}"
+                )
+
+            pkg = (
+                connection.execute(
+                    select(InstalledPackageVersionRecord).where(
+                        InstalledPackageVersionRecord.id == target_installed_id,
+                        InstalledPackageVersionRecord.status == PackageInstallStatus.ACTIVE.value,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if pkg is None:
+                raise PackageRegistryInvariantError("target package version is not active")
+
+            if (
+                pkg["package_id"] != target_package_id
+                or pkg["package_version"] != target_package_version
+            ):
+                raise PackageRegistryInvariantError("target package identity mismatch")
+
+            new_revision = expected_config_revision + 1
+            connection.execute(
+                update(AgentInstanceRecord)
+                .where(AgentInstanceRecord.id == agent_instance_id)
+                .values(
+                    agent_key=target_package_id,
+                    agent_definition_version=target_package_version,
+                    updated_at=now,
+                )
+            )
+
+            connection.execute(
+                update(AgentInstancePackageBindingRecord)
+                .where(AgentInstancePackageBindingRecord.agent_instance_id == agent_instance_id)
+                .values(
+                    installed_package_version_id=target_installed_id,
+                    effective_config_json=effective_config_json,
+                    effective_config_digest=effective_config_digest,
+                    config_revision=new_revision,
+                    config_schema_digest=config_schema_digest,
+                    updated_at=now,
+                )
+            )
+
+            updated_instance = AgentInstance(
+                id=agent_instance_id,
+                owner_user_id=owner_user_id,
+                definition_id=AgentDefinitionId(target_package_id, target_package_version),
+                display_name=str(instance["display_name"]),
+                enabled=bool(instance["enabled"]),
+                model_provider=str(instance["model_provider"]),
+                model_name=str(instance["model_name"]),
+                created_at=instance["created_at"],
+                updated_at=now,
+            )
+            updated_binding = AgentInstancePackageBinding(
+                agent_instance_id=agent_instance_id,
+                installed_package_version_id=target_installed_id,
+                effective_config_json=effective_config_json,
+                effective_config_digest=effective_config_digest,
+                config_revision=new_revision,
+                config_schema_digest=config_schema_digest,
+            )
+            return updated_instance, updated_binding
+
+        return self._runner.run(operation)
+
+    def mark_pending_removal(self, installed_id: int, now: datetime) -> None:
+        def operation(connection: Connection):
+            connection.execute(
+                update(InstalledPackageVersionRecord)
+                .where(
+                    InstalledPackageVersionRecord.id == installed_id,
+                    InstalledPackageVersionRecord.status.in_(
+                        [
+                            PackageInstallStatus.ACTIVE.value,
+                            PackageInstallStatus.INSTALLED.value,
+                            PackageInstallStatus.FAILED.value,
+                        ]
+                    ),
+                )
+                .values(
+                    status=PackageInstallStatus.PENDING_REMOVAL.value,
+                    updated_at=now,
+                )
+            )
+
+        self._runner.run(operation)
+
+    def finalize_removal(
+        self, installed_id: int, now: datetime
+    ) -> tuple[str | None, str | None, bool]:
+        """Finalize removal in DB if 0 obligations remain.
+
+        Returns (storage_key, environment_key, is_env_unshared).
+        """
+
+        def operation(connection: Connection) -> tuple[str | None, str | None, bool]:
+            row = (
+                connection.execute(
+                    select(InstalledPackageVersionRecord).where(
+                        InstalledPackageVersionRecord.id == installed_id
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
+                raise InstalledPackageNotFound
+
+            bound = connection.scalar(
+                select(func.count(AgentInstancePackageBindingRecord.agent_instance_id)).where(
+                    AgentInstancePackageBindingRecord.installed_package_version_id == installed_id
+                )
+            )
+            if bound and bound > 0:
+                raise PackageHasBoundInstances
+
+            runs = connection.scalar(
+                select(func.count(RunRecord.id)).where(
+                    RunRecord.installed_package_version_id == installed_id,
+                    RunRecord.status.in_([RunStatus.CREATED.value, RunStatus.RUNNING.value]),
+                )
+            )
+            if runs and runs > 0:
+                raise PackageHasActiveRuns
+
+            storage_key = str(row["storage_key"]) if row["storage_key"] is not None else None
+            env_id = row["environment_id"]
+            env_key: str | None = None
+            is_env_unshared = False
+            if env_id is not None:
+                env_row = (
+                    connection.execute(
+                        select(PackageEnvironmentRecord).where(
+                            PackageEnvironmentRecord.id == env_id
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                if env_row is not None:
+                    env_key = str(env_row["environment_key"])
+                    other_users = (
+                        connection.scalar(
+                            select(func.count(InstalledPackageVersionRecord.id)).where(
+                                InstalledPackageVersionRecord.environment_id == env_id,
+                                InstalledPackageVersionRecord.id != installed_id,
+                                InstalledPackageVersionRecord.status
+                                != PackageInstallStatus.REMOVED.value,
+                            )
+                        )
+                        or 0
+                    )
+                    run_references = (
+                        connection.scalar(
+                            select(func.count(RunRecord.id)).where(
+                                RunRecord.package_environment_id == env_id
+                            )
+                        )
+                        or 0
+                    )
+                    is_env_unshared = other_users == 0 and run_references == 0
+
+            connection.execute(
+                update(InstalledPackageVersionRecord)
+                .where(InstalledPackageVersionRecord.id == installed_id)
+                .values(
+                    status=PackageInstallStatus.REMOVED.value,
+                    removed_at=now,
+                    updated_at=now,
+                )
+            )
+            return storage_key, env_key, is_env_unshared
+
+        return self._runner.run(operation)
+
+    def reconcile_pending_removals(
+        self, now: datetime
+    ) -> list[tuple[int, str, str, str | None, str | None, bool]]:
+        """Find pending removals that can be safely finalized.
+
+        Returns list of (id, package_id, version, storage_key, env_key, is_env_unshared).
+        """
+
+        def operation(
+            connection: Connection,
+        ) -> list[tuple[int, str, str, str | None, str | None, bool]]:
+            pending_rows = (
+                connection.execute(
+                    select(InstalledPackageVersionRecord).where(
+                        InstalledPackageVersionRecord.status
+                        == PackageInstallStatus.PENDING_REMOVAL.value
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            ready: list[tuple[int, str, str, str | None, str | None, bool]] = []
+            for row in pending_rows:
+                inst_id = int(row["id"])
+                bound = connection.scalar(
+                    select(func.count(AgentInstancePackageBindingRecord.agent_instance_id)).where(
+                        AgentInstancePackageBindingRecord.installed_package_version_id == inst_id
+                    )
+                )
+                if bound and bound > 0:
+                    continue
+                runs = connection.scalar(
+                    select(func.count(RunRecord.id)).where(
+                        RunRecord.installed_package_version_id == inst_id,
+                        RunRecord.status.in_([RunStatus.CREATED.value, RunStatus.RUNNING.value]),
+                    )
+                )
+                if runs and runs > 0:
+                    continue
+
+                storage_key = str(row["storage_key"]) if row["storage_key"] is not None else None
+                env_id = row["environment_id"]
+                env_key: str | None = None
+                is_env_unshared = False
+                if env_id is not None:
+                    env_row = (
+                        connection.execute(
+                            select(PackageEnvironmentRecord).where(
+                                PackageEnvironmentRecord.id == env_id
+                            )
+                        )
+                        .mappings()
+                        .one_or_none()
+                    )
+                    if env_row is not None:
+                        env_key = str(env_row["environment_key"])
+                        other_users = (
+                            connection.scalar(
+                                select(func.count(InstalledPackageVersionRecord.id)).where(
+                                    InstalledPackageVersionRecord.environment_id == env_id,
+                                    InstalledPackageVersionRecord.id != inst_id,
+                                    InstalledPackageVersionRecord.status
+                                    != PackageInstallStatus.REMOVED.value,
+                                )
+                            )
+                            or 0
+                        )
+                        run_references = (
+                            connection.scalar(
+                                select(func.count(RunRecord.id)).where(
+                                    RunRecord.package_environment_id == env_id
+                                )
+                            )
+                            or 0
+                        )
+                        is_env_unshared = other_users == 0 and run_references == 0
+
+                connection.execute(
+                    update(InstalledPackageVersionRecord)
+                    .where(InstalledPackageVersionRecord.id == inst_id)
+                    .values(
+                        status=PackageInstallStatus.REMOVED.value,
+                        removed_at=now,
+                        updated_at=now,
+                    )
+                )
+                ready.append(
+                    (
+                        inst_id,
+                        str(row["package_id"]),
+                        str(row["package_version"]),
+                        storage_key,
+                        env_key,
+                        is_env_unshared,
+                    )
+                )
+            return ready
+
+        return self._runner.run(operation)
+
     def _load_on_connection(
         self, connection: Connection, installed_id: int
     ) -> InstalledPackageVersion:
@@ -583,6 +1300,100 @@ def resolve_run_execution_snapshot_on_connection(
         agent_instance_config_revision=int(row["config_revision"]),
         host_protocol_version=str(row["host_protocol_version"]),
         sdk_api_version=str(row["sdk_version"]),
+    )
+
+
+def _load_package_detail_on_connection(
+    connection: Connection, package_id: str, package_version: str
+) -> PackageVersionDetail:
+    row = (
+        connection.execute(
+            select(
+                InstalledPackageVersionRecord,
+                PackageEnvironmentRecord.status.label("env_status"),
+            )
+            .outerjoin(
+                PackageEnvironmentRecord,
+                InstalledPackageVersionRecord.environment_id == PackageEnvironmentRecord.id,
+            )
+            .where(
+                InstalledPackageVersionRecord.package_id == package_id,
+                InstalledPackageVersionRecord.package_version == package_version,
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if row is None:
+        raise InstalledPackageNotFound
+
+    bound_count = (
+        connection.scalar(
+            select(func.count(AgentInstancePackageBindingRecord.agent_instance_id)).where(
+                AgentInstancePackageBindingRecord.installed_package_version_id == row["id"]
+            )
+        )
+        or 0
+    )
+
+    manifest = parse_package_manifest(bytes(row["manifest_bytes"]))
+    parsed_schema: object = json.loads(bytes(row["config_schema_bytes"]).decode("utf-8"))
+    schema_json: dict[str, object] = (
+        {str(k): v for k, v in cast("dict[object, object]", parsed_schema).items()}
+        if isinstance(parsed_schema, dict)
+        else {}
+    )
+
+    curr = PackageVersion(NERVOS_CORE_COMPATIBILITY_VERSION)
+    is_compatible = manifest.nervos.min_version <= curr <= manifest.nervos.max_version
+    memory_decls: list[str] = []
+    if manifest.memory.reads:
+        memory_decls.append("reads")
+    if manifest.memory.writes:
+        memory_decls.append("writes")
+
+    limits = {
+        "max_model_calls": manifest.resources.limits.max_model_calls,
+        "max_tool_calls": manifest.resources.limits.max_tool_calls,
+        "input_max_bytes": manifest.resources.limits.input_max_bytes,
+        "output_max_bytes": manifest.resources.limits.output_max_bytes,
+        "provider_timeout_ms": manifest.resources.limits.provider_timeout_ms,
+        "tool_timeout_ms": manifest.resources.limits.tool_timeout_ms,
+    }
+
+    env_status = (
+        PackageEnvironmentStatus(str(row["env_status"])) if row["env_status"] is not None else None
+    )
+
+    return PackageVersionDetail(
+        package_id=str(row["package_id"]),
+        package_version=str(row["package_version"]),
+        display_name=manifest.display_name,
+        status=PackageInstallStatus(str(row["status"])),
+        signer_fingerprint=str(row["signer_fingerprint"]),
+        content_digest=str(row["content_digest"]),
+        archive_digest=str(row["archive_digest"]),
+        manifest_version=manifest.manifest_version.value,
+        min_nervos_version=manifest.nervos.min_version.value,
+        max_nervos_version=manifest.nervos.max_version.value,
+        is_compatible=is_compatible,
+        entrypoint_module=str(row["entrypoint_module"]),
+        entrypoint_object=str(row["entrypoint_object"]),
+        tools_required=tuple(manifest.tools.required),
+        tools_optional=tuple(manifest.tools.optional),
+        memory_declarations=tuple(memory_decls),
+        trigger_declarations=tuple(k.value for k in manifest.triggers.supported),
+        config_schema=schema_json,
+        resource_limits=limits,
+        bound_instances_count=int(bound_count),
+        environment_id=int(row["environment_id"]) if row["environment_id"] is not None else None,
+        environment_status=env_status,
+        installed_at=row["installed_at"],
+        activated_at=row["activated_at"],
+        failed_at=row["failed_at"],
+        removed_at=row["removed_at"],
+        last_error_code=row["last_error_code"],
+        last_error_message=row["last_error_message"],
     )
 
 

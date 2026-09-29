@@ -118,6 +118,10 @@ export function authenticatedHandler() {
   return http.get("/api/v1/auth/me", () => HttpResponse.json(API_USER));
 }
 
+export function packagesHandler(items: unknown[] = []) {
+  return http.get("/api/v1/packages", () => HttpResponse.json({ items }));
+}
+
 export async function renderRoute(path: string) {
   const result = renderWithRouter(appRoutes, { initialEntries: [path] });
   return { user: userEvent.setup(), ...result };
