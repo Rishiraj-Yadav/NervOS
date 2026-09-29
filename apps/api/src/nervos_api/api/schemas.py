@@ -70,6 +70,7 @@ class AgentInstanceCreateRequest(BaseModel):
     model_provider: str
     model_name: str
     enabled: bool = True
+    package_config: dict[str, object] | None = None
 
 
 class AgentInstanceUpdateRequest(BaseModel):
@@ -781,3 +782,115 @@ class MemoryVersionResponse(BaseModel):
 class MemoryVersionPageResponse(BaseModel):
     items: list[MemoryVersionResponse]
     next_before_version: int | None
+
+
+class AgentInstanceConfigPatchRequest(BaseModel):
+    """Update configuration for future runs of an agent instance."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    config: dict[str, object]
+    expected_config_revision: int
+
+
+class AgentInstanceRebindRequest(BaseModel):
+    """Rebind an agent instance to a new active package version."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    target_package_version: str
+    config: dict[str, object] | None = None
+    expected_config_revision: int
+
+
+class PackageInspectionResponse(BaseModel):
+    package_id: str
+    package_version: str
+    display_name: str
+    manifest_version: str
+    signer_fingerprint: str
+    content_digest: str
+    archive_digest: str
+    min_nervos_version: str
+    max_nervos_version: str | None
+    is_compatible: bool
+    entrypoint_module: str
+    entrypoint_object: str
+    tools_required: list[str]
+    tools_optional: list[str]
+    memory_declarations: list[str]
+    trigger_declarations: list[str]
+    config_schema: dict[str, object]
+    resource_limits: dict[str, int]
+
+
+class PackageVersionSummaryResponse(BaseModel):
+    package_id: str
+    package_version: str
+    display_name: str
+    status: str
+    signer_fingerprint: str
+    content_digest: str
+    archive_digest: str
+    bound_instances_count: int
+    installed_at: datetime | None
+    activated_at: datetime | None
+    failed_at: datetime | None
+    removed_at: datetime | None
+    last_error_code: str | None
+    last_error_message: str | None
+
+
+class PackageVersionDetailResponse(BaseModel):
+    package_id: str
+    package_version: str
+    display_name: str
+    status: str
+    signer_fingerprint: str
+    content_digest: str
+    archive_digest: str
+    manifest_version: str
+    min_nervos_version: str
+    max_nervos_version: str | None
+    is_compatible: bool
+    entrypoint_module: str
+    entrypoint_object: str
+    tools_required: list[str]
+    tools_optional: list[str]
+    memory_declarations: list[str]
+    trigger_declarations: list[str]
+    config_schema: dict[str, object]
+    resource_limits: dict[str, int]
+    bound_instances_count: int
+    environment_id: int | None
+    environment_status: str | None
+    installed_at: datetime | None
+    activated_at: datetime | None
+    failed_at: datetime | None
+    removed_at: datetime | None
+    last_error_code: str | None
+    last_error_message: str | None
+
+
+class PackageVersionPageResponse(BaseModel):
+    items: list[PackageVersionSummaryResponse]
+
+
+class PackageRemovalPlanResponse(BaseModel):
+    package_id: str
+    package_version: str
+    status: str
+    bound_instance_ids: list[int]
+    bound_instances_count: int
+    nonterminal_run_ids: list[int]
+    nonterminal_runs_count: int
+    is_environment_shared: bool
+    can_remove_immediately: bool
+    can_begin_removal: bool
+    blocking_reasons: list[str]
+
+
+class PackageRemovalResponse(BaseModel):
+    package_id: str
+    package_version: str
+    outcome: str

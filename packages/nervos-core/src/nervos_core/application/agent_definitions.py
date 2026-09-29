@@ -71,6 +71,8 @@ class CompositeAgentDefinitionResolver:
         builtins: AgentDefinitionSource,
         package_sources: Iterable[AgentDefinitionSource] = (),
     ) -> None:
+        self._builtins = builtins
+        self._package_sources = tuple(package_sources)
         entries: dict[AgentDefinitionId, AgentDefinition] = {}
         builtin_identities: set[AgentDefinitionId] = set()
         for definition in builtins.list_definitions():
@@ -79,7 +81,7 @@ class CompositeAgentDefinitionResolver:
             entries[definition.identity] = definition
             builtin_identities.add(definition.identity)
 
-        for source in package_sources:
+        for source in self._package_sources:
             for definition in source.list_definitions():
                 if definition.identity.agent_key.startswith("nervos."):
                     raise DuplicateAgentDefinition
@@ -87,13 +89,18 @@ class CompositeAgentDefinitionResolver:
                     raise DuplicateAgentDefinition
                 entries[definition.identity] = definition
 
-        self._entries = entries
+        self._builtin_entries = {d.identity: d for d in builtins.list_definitions()}
 
     def resolve(self, definition_id: AgentDefinitionId) -> AgentDefinition:
-        try:
-            return self._entries[definition_id]
-        except KeyError as error:
-            raise UnknownAgentDefinition from error
+        if definition_id in self._builtin_entries:
+            return self._builtin_entries[definition_id]
+        if definition_id.agent_key.startswith("nervos."):
+            raise UnknownAgentDefinition
+        for source in self._package_sources:
+            for definition in source.list_definitions():
+                if definition.identity == definition_id:
+                    return definition
+        raise UnknownAgentDefinition
 
 
 def create_builtin_definition_registry() -> BuiltInAgentDefinitionRegistry:

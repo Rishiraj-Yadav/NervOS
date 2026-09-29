@@ -167,6 +167,33 @@ class PackageStore:
     def cleanup_staging(self, staged: StagedPackageArtifact) -> None:
         shutil.rmtree(staged.directory, ignore_errors=True)
 
+    def remove_payload(self, storage_key: str) -> bool:
+        """Safely delete the published payload directory if it exists."""
+        target = self.root / Path(*storage_key.split("/"))
+        if target.exists() and target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+            # Safely prune empty version/package directories up to packages_root
+            try:
+                parent = target.parent
+                while parent != self.packages_root and parent.is_dir():
+                    if not any(parent.iterdir()):
+                        parent.rmdir()
+                        parent = parent.parent
+                    else:
+                        break
+            except OSError:
+                pass
+            return True
+        return False
+
+    def remove_environment(self, environment_key: str) -> bool:
+        """Safely delete an environment directory if it exists."""
+        target = self.root / Path(*environment_key.split("/"))
+        if target.exists() and target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+            return True
+        return False
+
     def reconcile_orphan_staging(self, durable_operation_ids: frozenset[str]) -> tuple[str, ...]:
         """Controlled startup cleanup; callers must run this before accepting new installs."""
         if not self.staging_root.exists():

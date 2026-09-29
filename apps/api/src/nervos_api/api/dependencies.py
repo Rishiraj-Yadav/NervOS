@@ -16,6 +16,8 @@ from nervos_core.application.conversations import ConversationService
 from nervos_core.application.mcp_connection_service import McpConnectionService
 from nervos_core.application.memory import MemoryService
 from nervos_core.application.model_providers import ModelProviderCatalog
+from nervos_core.application.package_installation import PackageApplicationService
+from nervos_core.application.package_query import PackageQueryService
 from nervos_core.application.run_cancellation import RunCancellationService
 from nervos_core.application.triggers import TriggerManagementService
 
@@ -79,6 +81,16 @@ def get_memory_service(request: Request) -> MemoryService:
     return cast(MemoryService, request.app.state.memory_service)
 
 
+def get_package_application_service(request: Request) -> PackageApplicationService:
+    """Return the node-global package application service."""
+    return cast(PackageApplicationService, request.app.state.package_application_service)
+
+
+def get_package_query_service(request: Request) -> PackageQueryService:
+    """Return the read-only package query service."""
+    return cast(PackageQueryService, request.app.state.package_query_service)
+
+
 def require_configured_origin(
     request: Request,
     settings: Annotated[Settings, Depends(get_settings)],
@@ -128,6 +140,14 @@ ConversationServiceDependency = Annotated[
 MemoryServiceDependency = Annotated[
     MemoryService,
     Depends(get_memory_service),
+]
+PackageApplicationServiceDependency = Annotated[
+    PackageApplicationService,
+    Depends(get_package_application_service),
+]
+PackageQueryServiceDependency = Annotated[
+    PackageQueryService,
+    Depends(get_package_query_service),
 ]
 OriginDependency = Annotated[None, Depends(require_configured_origin)]
 CurrentUserDependency = Annotated[PublicUser, Depends(get_current_user)]

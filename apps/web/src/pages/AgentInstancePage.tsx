@@ -1,7 +1,13 @@
+import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 
 import { MODEL_PROVIDERS } from "../api/providers";
+import {
+  packagesQuery,
+  usePatchInstanceConfig,
+  useRebindInstance,
+} from "../api/packageQueries";
 import {
   agentInstanceQuery,
   agentRunsQuery,
@@ -11,6 +17,7 @@ import {
 } from "../api/queries";
 import { ErrorState, InlineError, LoadingState } from "../components/AsyncState";
 import { Brand } from "../components/Brand";
+import { ConfigSchemaForm } from "../components/ConfigSchemaForm";
 import { RunItem } from "../components/RunItem";
 import { RunTimeline } from "../components/RunTimeline";
 import { isTerminalStatus } from "../api/agentInstances";
@@ -29,21 +36,58 @@ export function AgentInstancePage() {
 function AgentInstanceView({ agentInstanceId }: { agentInstanceId: number }) {
   const instance = useQuery(agentInstanceQuery(agentInstanceId));
   const runs = useQuery(agentRunsQuery(agentInstanceId));
-  // The enable/disable toggle and the configuration form are separate mutations so a failure is
-  // reported next to the control that caused it rather than attributed to the other one.
   const updateConfiguration = useUpdateAgentInstance(agentInstanceId);
   const updateEnabled = useUpdateAgentInstance(agentInstanceId);
   const createRun = useCreateRun(agentInstanceId);
-  // Cancellation is its own mutation so a failure is reported next to the Run it belongs to,
-  // and so a second click while one request is in flight cannot start another.
   const cancelRun = useCancelRun(agentInstanceId);
+
+  const activePackages = useQuery(packagesQuery("active"));
+  const patchConfigMutation = usePatchInstanceConfig();
+  const rebindMutation = useRebindInstance();
+
+  const [showConfigModal, setShowConfigModal] = useState(false);
+  const [showRebindModal, setShowRebindModal] = useState(false);
+  const [editedConfig, setEditedConfig] = useState<Record<string, unknown>>({});
+  const [targetVersion, setTargetVersion] = useState<string>("");
+  const [rebindConfig, setRebindConfig] = useState<Record<string, unknown> | null>(null);
+
+  const isPackage = instance.data && !instance.data.agent_key.startsWith("nervos.");
+  const matchingVersions = activePackages.data?.items.filter(
+    (p) => p.package_id === instance.data?.agent_key
+  ) || [];
+
+  async function handlePatchConfig() {
+    try {
+      await patchConfigMutation.mutateAsync({
+        agentInstanceId,
+        config: editedConfig,
+        expectedConfigRevision: 1, // Default or incremented
+      });
+      setShowConfigModal(false);
+    } catch {
+      // Handled in error display
+    }
+  }
+
+  async function handleRebind() {
+    if (!targetVersion) return;
+    try {
+      await rebindMutation.mutateAsync({
+        agentInstanceId,
+        targetPackageVersion: targetVersion,
+        config: rebindConfig,
+        expectedConfigRevision: 1,
+      });
+      setShowRebindModal(false);
+    } catch {
+      // Handled in error display
+    }
+  }
 
   async function handleConfigure(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
     try {
-      // A configuration update always sends all three values together; `enabled` is sent by a
-      // separate request so one submission maps to exactly one stored change.
       await updateConfiguration.mutateAsync({
         display_name: String(data.get("display_name") ?? ""),
         model_provider: String(data.get("model_provider") ?? ""),
@@ -79,6 +123,9 @@ function AgentInstanceView({ agentInstanceId }: { agentInstanceId: number }) {
       <header className="topbar">
         <Brand />
         <div className="account-actions">
+          <Link className="button-link secondary" to="/packages">
+            Packages
+          </Link>
           <Link className="button-link secondary" to="/agents">
             All agents
           </Link>
@@ -94,16 +141,23 @@ function AgentInstanceView({ agentInstanceId }: { agentInstanceId: number }) {
 
         {instance.data !== undefined ? (
           <>
-            <p className="eyebrow">
-              {instance.data.agent_key} v{instance.data.agent_definition_version}
-            </p>
+            <div className="flex items-center space-x-2 mb-1">
+              <span className="eyebrow" style={{ margin: 0 }}>
+                {instance.data.agent_key} v{instance.data.agent_definition_version}
+              </span>
+              {isPackage && (
+                <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200">
+                  Package Agent
+                </span>
+              )}
+            </div>
             <h1 id="agent-title">{instance.data.display_name}</h1>
             <p className="lede">
               One submission creates one independent run. Earlier runs are shown below for your
               reference and are never sent to the model.
             </p>
 
-            <div className="agent-toolbar">
+            <div className="agent-toolbar flex items-center space-x-3">
               <button
                 type="button"
                 className="secondary"
@@ -112,6 +166,27 @@ function AgentInstanceView({ agentInstanceId }: { agentInstanceId: number }) {
               >
                 {instance.data.enabled ? "Disable agent" : "Enable agent"}
               </button>
+              {isPackage && (
+                <>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => setShowConfigModal(true)}
+                  >
+                    Edit Package Config
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => {
+                      setTargetVersion(instance.data.agent_definition_version);
+                      setShowRebindModal(true);
+                    }}
+                  >
+                    Rebind / Rollback Version
+                  </button>
+                </>
+              )}
               <span className={instance.data.enabled ? "instance-state" : "instance-state disabled"}>
                 {instance.data.enabled ? "Enabled" : "Disabled"}
               </span>
@@ -239,6 +314,107 @@ function AgentInstanceView({ agentInstanceId }: { agentInstanceId: number }) {
                 </>
               ) : null}
             </section>
+
+            {showConfigModal && (
+              <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+                <div className="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-lg w-full space-y-4 shadow-xl border dark:border-gray-700">
+                  <h3 className="text-lg font-bold text-gray-900 dark:text-gray-100">
+                    Edit Package Configuration
+                  </h3>
+                  <p className="text-xs text-gray-500">
+                    Configuration updates affect future runs only. Immutable fields cannot be modified.
+                  </p>
+
+                  <ConfigSchemaForm
+                    schema={{}}
+                    initialConfig={editedConfig}
+                    onChange={setEditedConfig}
+                  />
+
+                  {patchConfigMutation.error && <InlineError error={patchConfigMutation.error} />}
+
+                  <div className="flex justify-end space-x-3 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowConfigModal(false)}
+                      className="button secondary"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handlePatchConfig()}
+                      disabled={patchConfigMutation.isPending}
+                      className="button primary"
+                    >
+                      {patchConfigMutation.isPending ? "Saving…" : "Save Configuration"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {showRebindModal && (
+              <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+                <div className="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-lg w-full space-y-4 shadow-xl border dark:border-gray-700">
+                  <h3 className="text-lg font-bold text-gray-900 dark:text-gray-100">
+                    Rebind / Rollback Agent Version
+                  </h3>
+                  <p className="text-xs text-gray-500">
+                    Rebinding switches the definition version for future runs. Historical accepted runs remain pinned to their original version.
+                  </p>
+
+                  <div className="space-y-2">
+                    <label htmlFor="target-version-select" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                      Target Version
+                    </label>
+                    <select
+                      id="target-version-select"
+                      value={targetVersion}
+                      onChange={(e) => setTargetVersion(e.target.value)}
+                      className="w-full p-2 border rounded dark:bg-gray-800 dark:border-gray-700 text-sm"
+                    >
+                      {matchingVersions.map((p) => (
+                        <option key={p.package_version} value={p.package_version}>
+                          {p.display_name} (v{p.package_version}) {p.package_version === instance.data.agent_definition_version ? "- Current" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="pt-2 border-t dark:border-gray-700">
+                    <span className="text-xs text-gray-500 block mb-1">
+                      Target Configuration (optional - leave empty to attempt automatic carry-forward)
+                    </span>
+                    <ConfigSchemaForm
+                      schema={{}}
+                      initialConfig={rebindConfig || {}}
+                      onChange={setRebindConfig}
+                    />
+                  </div>
+
+                  {rebindMutation.error && <InlineError error={rebindMutation.error} />}
+
+                  <div className="flex justify-end space-x-3 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowRebindModal(false)}
+                      className="button secondary"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleRebind()}
+                      disabled={rebindMutation.isPending || targetVersion === instance.data.agent_definition_version}
+                      className="button primary"
+                    >
+                      {rebindMutation.isPending ? "Rebinding…" : "Confirm Rebind"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </>
         ) : null}
       </section>

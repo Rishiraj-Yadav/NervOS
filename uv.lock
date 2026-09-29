@@ -9,6 +9,7 @@ resolution-markers = [
 [manifest]
 members = [
     "nervos-api",
+    "nervos-cli",
     "nervos-core",
     "nervos-mcp",
     "nervos-models",
@@ -883,6 +884,7 @@ dependencies = [
     { name = "nervos-mcp" },
     { name = "nervos-models" },
     { name = "pydantic-settings" },
+    { name = "python-multipart" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -894,8 +896,20 @@ requires-dist = [
     { name = "nervos-mcp", editable = "packages/nervos-mcp" },
     { name = "nervos-models", editable = "packages/nervos-models" },
     { name = "pydantic-settings", specifier = ">=2,<3" },
+    { name = "python-multipart", specifier = ">=0.0.18,<1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30,<1" },
 ]
+
+[[package]]
+name = "nervos-cli"
+version = "0.1.0"
+source = { editable = "apps/cli" }
+dependencies = [
+    { name = "httpx" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "httpx", specifier = ">=0.28,<1" }]
 
 [[package]]
 name = "nervos-core"

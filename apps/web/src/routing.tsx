@@ -12,6 +12,9 @@ import { DashboardPage } from "./pages/DashboardPage";
 import { LoginPage } from "./pages/LoginPage";
 import { MemoriesPage } from "./pages/MemoriesPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
+import { PackagesPage } from "./pages/PackagesPage";
+import { PackageInstallPage } from "./pages/PackageInstallPage";
+import { PackageDetailPage } from "./pages/PackageDetailPage";
 import { SetupPage } from "./pages/SetupPage";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -21,6 +24,9 @@ import {
   useOutletContext,
 } from "react-router-dom";
 
+export function PackagesRoute() { return <SessionView page="packages" />; }
+export function PackageInstallRoute() { return <SessionView page="package-install" />; }
+export function PackageDetailRoute() { return <SessionView page="package-detail" />; }
 export function AutomationsRoute() { return <SessionView page="automations" />; }
 export function AutomationRoute() { return <SessionView page="automation" />; }
 export function NewAutomationRoute() { return <SessionView page="new-automation" />; }
@@ -83,7 +89,7 @@ export function NotFoundRoute() {
   return <NotFoundPage />;
 }
 
-function SessionView({ page }: { page: "home" | "setup" | "login" | "agents" | "agent" | "automations" | "automation" | "new-automation" | "conversations" | "conversation" | "memories" }) {
+function SessionView({ page }: { page: "home" | "setup" | "login" | "agents" | "agent" | "packages" | "package-install" | "package-detail" | "automations" | "automation" | "new-automation" | "conversations" | "conversation" | "memories" }) {
   const session = useOutletContext<Session>();
   const location = useLocation();
 
@@ -102,6 +108,9 @@ function SessionView({ page }: { page: "home" | "setup" | "login" | "agents" | "
     return <AgentInstancesPage />;
   }
   if (page === "agent") return <AgentInstancePage />;
+  if (page === "packages") return <PackagesPage />;
+  if (page === "package-install") return <PackageInstallPage />;
+  if (page === "package-detail") return <PackageDetailPage />;
   if (page === "automations") return <AutomationsPage />;
   if (page === "automation") return <AutomationPage />;
   if (page === "new-automation") return <NewAutomationPage />;

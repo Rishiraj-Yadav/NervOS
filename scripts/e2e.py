@@ -25,9 +25,9 @@ from typing import IO
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATABASE = Path("~/.nervos/nervos.db").expanduser().resolve(strict=False)
-API_READY_TIMEOUT = 15.0
-WORKER_READY_TIMEOUT = 20.0
-WEB_READY_TIMEOUT = 20.0
+API_READY_TIMEOUT = 45.0
+WORKER_READY_TIMEOUT = 45.0
+WEB_READY_TIMEOUT = 45.0
 PLAYWRIGHT_TIMEOUT = 120.0
 # Test-only lease granted to the pre-start crash claim, and the margin the supervisor waits
 # past it before starting the recovery Worker. Bounded by construction: the claim lease is

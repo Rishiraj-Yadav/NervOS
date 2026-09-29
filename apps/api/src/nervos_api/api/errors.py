@@ -38,6 +38,14 @@ from nervos_core.application.model_providers import (
     ModelProviderUnavailable,
     UnknownModelProvider,
 )
+from nervos_core.application.package_config_schema import (
+    PackageConfigSchemaError,
+    PackageConfigValidationError,
+)
+from nervos_core.application.package_installation import (
+    PackageAuthorizationMismatch,
+    PackageHealthCheckFailed,
+)
 from nervos_core.application.run_cancellation import RunNotCancellable
 from nervos_core.application.tool_permissions import McpConnectionNotFound
 from nervos_core.application.triggers import (
@@ -56,9 +64,22 @@ from nervos_core.domain.memory import (
     MemoryScopeCapacityExceeded,
     StaleMemoryVersion,
 )
+from nervos_core.domain.package_query import (
+    ConfigCarryForwardIncompatible,
+    ImmutableConfigViolation,
+    IncompatiblePackageVersion,
+    PackageHasActiveRuns,
+    PackageHasBoundInstances,
+    StaleConfigRevision,
+)
 from nervos_core.domain.runs import InvalidRun
 from nervos_core.domain.scheduling import ScheduleCalculationError
 from nervos_core.domain.triggers import InvalidTrigger
+from nervos_core.infrastructure.database.packages import (
+    InstalledPackageNotFound,
+    PackageIdentityConflict,
+    PackageInstallInProgress,
+)
 
 from nervos_api.api.schemas import ErrorDetail, ErrorResponse
 
@@ -268,6 +289,71 @@ AGENT_ERROR_MAP: dict[type[Exception], tuple[int, str, str]] = {
         404,
         "conversation_not_found",
         "The conversation was not found.",
+    ),
+    PackageAuthorizationMismatch: (
+        400,
+        "package_authorization_mismatch",
+        "The approved package metadata does not match the verified archive.",
+    ),
+    IncompatiblePackageVersion: (
+        400,
+        "incompatible_nervos_version",
+        "The package is not compatible with this version of NervOS.",
+    ),
+    InstalledPackageNotFound: (
+        404,
+        "package_version_not_found",
+        "The requested package version was not found.",
+    ),
+    PackageIdentityConflict: (
+        409,
+        "package_identity_conflict",
+        "A package with this identifier and version already exists with different contents.",
+    ),
+    PackageInstallInProgress: (
+        409,
+        "package_install_in_progress",
+        "An installation for this package version is currently in progress.",
+    ),
+    PackageHasBoundInstances: (
+        409,
+        "package_has_bound_instances",
+        "The package version cannot be removed because agent instances are bound to it.",
+    ),
+    PackageHasActiveRuns: (
+        409,
+        "package_has_active_runs",
+        "The package version has active runs and cannot be immediately removed.",
+    ),
+    StaleConfigRevision: (
+        409,
+        "stale_config_revision",
+        "The agent instance configuration was modified concurrently. Please refresh.",
+    ),
+    ImmutableConfigViolation: (
+        422,
+        "immutable_configuration_modified",
+        "An immutable configuration field cannot be modified.",
+    ),
+    ConfigCarryForwardIncompatible: (
+        422,
+        "config_carry_forward_incompatible",
+        "The current configuration is incompatible with the target package version.",
+    ),
+    PackageConfigValidationError: (
+        422,
+        "package_config_validation_error",
+        "The provided configuration is invalid for this package schema.",
+    ),
+    PackageConfigSchemaError: (
+        422,
+        "package_config_schema_error",
+        "The package configuration schema is invalid.",
+    ),
+    PackageHealthCheckFailed: (
+        422,
+        "package_health_check_failed",
+        "The package activation health check failed.",
     ),
 }
 

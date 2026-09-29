@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -9,7 +10,13 @@ from pathlib import Path
 from typing import BinaryIO, Protocol
 
 from nervos_core.application.package_archive import ArchiveValidationProfile, BoundedArchiveReader
-from nervos_core.application.package_config_schema import parse_config_schema_json, validate_config
+from nervos_core.application.package_config_schema import (
+    PackageConfigValidationError,
+    check_immutable_fields,
+    extract_immutable_property_names,
+    parse_config_schema_json,
+    validate_config,
+)
 from nervos_core.application.package_environment import PackageEnvironmentBuilder
 from nervos_core.application.package_integrity import canonical_json_bytes, sha256_hex
 from nervos_core.application.package_storage import PackageStore, StagedPackageArtifact
@@ -19,11 +26,19 @@ from nervos_core.application.package_verification import (
     MANIFEST_PATH,
     VerifiedPackage,
 )
+from nervos_core.domain.agents import AgentInstance
 from nervos_core.domain.package_installation import (
     AgentInstancePackageBinding,
     InstalledPackageVersion,
     PackageEnvironment,
     PackageInstallAuthorization,
+)
+from nervos_core.domain.package_query import (
+    ConfigCarryForwardIncompatible,
+    PackageHasBoundInstances,
+    PackageRemovalOutcome,
+    PackageRemovalPlan,
+    PackageVersionDetail,
 )
 
 
@@ -99,6 +114,70 @@ class PackageRegistryPersistence(Protocol):
         config_schema_digest: str,
         now: datetime,
     ) -> AgentInstancePackageBinding: ...
+
+    def create_package_instance(
+        self,
+        *,
+        owner_user_id: int,
+        package_id: str,
+        package_version: str,
+        display_name: str,
+        model_provider: str,
+        model_name: str,
+        effective_config_json: str,
+        effective_config_digest: str,
+        config_schema_digest: str,
+        now: datetime,
+    ) -> tuple[AgentInstance, AgentInstancePackageBinding]: ...
+
+    def update_instance_config(
+        self,
+        *,
+        owner_user_id: int,
+        agent_instance_id: int,
+        effective_config_json: str,
+        effective_config_digest: str,
+        config_schema_digest: str,
+        expected_config_revision: int,
+        now: datetime,
+    ) -> AgentInstancePackageBinding: ...
+
+    def rebind_instance(
+        self,
+        *,
+        owner_user_id: int,
+        agent_instance_id: int,
+        target_installed_id: int,
+        target_package_id: str,
+        target_package_version: str,
+        effective_config_json: str,
+        effective_config_digest: str,
+        config_schema_digest: str,
+        expected_config_revision: int,
+        now: datetime,
+    ) -> tuple[AgentInstance, AgentInstancePackageBinding]: ...
+
+    def get_package_detail(self, package_id: str, package_version: str) -> PackageVersionDetail: ...
+
+    def get_installed_id(self, package_id: str, package_version: str) -> int: ...
+
+    def get_binding_for_instance(self, agent_instance_id: int) -> AgentInstancePackageBinding: ...
+
+    def get_package_detail_for_instance(
+        self, agent_instance_id: int, owner_user_id: int
+    ) -> PackageVersionDetail: ...
+
+    def get_removal_plan(self, package_id: str, package_version: str) -> PackageRemovalPlan: ...
+
+    def mark_pending_removal(self, installed_id: int, now: datetime) -> None: ...
+
+    def finalize_removal(
+        self, installed_id: int, now: datetime
+    ) -> tuple[str | None, str | None, bool]: ...
+
+    def reconcile_pending_removals(
+        self, now: datetime
+    ) -> list[tuple[int, str, str, str | None, str | None, bool]]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +286,153 @@ class PackageApplicationService:
             config_schema_digest=sha256_hex(schema_bytes),
             now=self._clock(),
         )
+
+    def create_package_instance(
+        self,
+        *,
+        owner_user_id: int,
+        package_id: str,
+        package_version: str,
+        display_name: str,
+        model_provider: str,
+        model_name: str,
+        config: Mapping[str, object],
+    ) -> tuple[AgentInstance, AgentInstancePackageBinding]:
+        detail = self._registry.get_package_detail(package_id, package_version)
+        if detail.status.value != "active":
+            raise ValueError(f"Package {package_id}@{package_version} is not active.")
+        schema = parse_config_schema_json(canonical_json_bytes(detail.config_schema))
+        effective = validate_config(schema, config)
+        payload = canonical_json_bytes(effective)
+        schema_bytes = canonical_json_bytes(detail.config_schema)
+        return self._registry.create_package_instance(
+            owner_user_id=owner_user_id,
+            package_id=package_id,
+            package_version=package_version,
+            display_name=display_name,
+            model_provider=model_provider,
+            model_name=model_name,
+            effective_config_json=payload.decode("utf-8"),
+            effective_config_digest=sha256_hex(payload),
+            config_schema_digest=sha256_hex(schema_bytes),
+            now=self._clock(),
+        )
+
+    def update_instance_config(
+        self,
+        *,
+        owner_user_id: int,
+        agent_instance_id: int,
+        config: Mapping[str, object],
+        expected_config_revision: int,
+    ) -> AgentInstancePackageBinding:
+        detail = self._registry.get_package_detail_for_instance(agent_instance_id, owner_user_id)
+        current_binding = self._registry.get_binding_for_instance(agent_instance_id)
+        schema = parse_config_schema_json(canonical_json_bytes(detail.config_schema))
+        effective = validate_config(schema, config)
+
+        immutable_fields = extract_immutable_property_names(schema)
+        current_config = json.loads(current_binding.effective_config_json)
+        check_immutable_fields(current_config, effective, immutable_fields)
+
+        payload = canonical_json_bytes(effective)
+        schema_bytes = canonical_json_bytes(detail.config_schema)
+        return self._registry.update_instance_config(
+            owner_user_id=owner_user_id,
+            agent_instance_id=agent_instance_id,
+            effective_config_json=payload.decode("utf-8"),
+            effective_config_digest=sha256_hex(payload),
+            config_schema_digest=sha256_hex(schema_bytes),
+            expected_config_revision=expected_config_revision,
+            now=self._clock(),
+        )
+
+    def rebind_instance(
+        self,
+        *,
+        owner_user_id: int,
+        agent_instance_id: int,
+        target_package_version: str,
+        config: Mapping[str, object] | None,
+        expected_config_revision: int,
+    ) -> tuple[AgentInstance, AgentInstancePackageBinding]:
+        current_detail = self._registry.get_package_detail_for_instance(
+            agent_instance_id, owner_user_id
+        )
+        current_binding = self._registry.get_binding_for_instance(agent_instance_id)
+        target_detail = self._registry.get_package_detail(
+            current_detail.package_id, target_package_version
+        )
+        if target_detail.status.value != "active":
+            target_id = current_detail.package_id
+            raise ValueError(f"Target {target_id}@{target_package_version} is not active.")
+
+        target_schema = parse_config_schema_json(canonical_json_bytes(target_detail.config_schema))
+
+        if config is not None:
+            effective = validate_config(target_schema, config)
+        else:
+            current_config = json.loads(current_binding.effective_config_json)
+            try:
+                effective = validate_config(target_schema, current_config)
+            except PackageConfigValidationError as err:
+                raise ConfigCarryForwardIncompatible(
+                    f"Current configuration is incompatible with {target_package_version}: {err}"
+                ) from err
+
+        immutable_fields = extract_immutable_property_names(target_schema)
+        current_config = json.loads(current_binding.effective_config_json)
+        check_immutable_fields(current_config, effective, immutable_fields)
+
+        payload = canonical_json_bytes(effective)
+        schema_bytes = canonical_json_bytes(target_detail.config_schema)
+        target_installed_id = self._registry.get_installed_id(
+            target_detail.package_id, target_package_version
+        )
+        return self._registry.rebind_instance(
+            owner_user_id=owner_user_id,
+            agent_instance_id=agent_instance_id,
+            target_installed_id=target_installed_id,
+            target_package_id=target_detail.package_id,
+            target_package_version=target_package_version,
+            effective_config_json=payload.decode("utf-8"),
+            effective_config_digest=sha256_hex(payload),
+            config_schema_digest=sha256_hex(schema_bytes),
+            expected_config_revision=expected_config_revision,
+            now=self._clock(),
+        )
+
+    def remove_package(self, package_id: str, package_version: str) -> PackageRemovalOutcome:
+        plan = self._registry.get_removal_plan(package_id, package_version)
+        if plan.bound_instances_count > 0:
+            msg = (
+                f"Cannot remove package {package_id}@{package_version}: "
+                f"{plan.bound_instances_count} bound instances."
+            )
+            raise PackageHasBoundInstances(msg)
+        installed_id = self._registry.get_installed_id(package_id, package_version)
+        if plan.nonterminal_runs_count > 0:
+            self._registry.mark_pending_removal(installed_id, self._clock())
+            return PackageRemovalOutcome.PENDING_REMOVAL
+
+        storage_key, env_key, is_env_unshared = self._registry.finalize_removal(
+            installed_id, self._clock()
+        )
+        if storage_key:
+            self._store.remove_payload(storage_key)
+        if env_key and is_env_unshared:
+            self._store.remove_environment(env_key)
+        return PackageRemovalOutcome.REMOVED
+
+    def reconcile_pending_removals(self) -> int:
+        """Find pending removals with 0 obligations and finalize physical and DB cleanup."""
+        ready_items = self._registry.reconcile_pending_removals(self._clock())
+        for _, _, _, storage_key, env_key, is_env_unshared in ready_items:
+            if storage_key:
+                self._store.remove_payload(storage_key)
+            if env_key and is_env_unshared:
+                self._store.remove_environment(env_key)
+        return len(ready_items)
 
     @staticmethod
     def _require_authorization(
