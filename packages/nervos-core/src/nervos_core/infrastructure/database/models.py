@@ -249,6 +249,7 @@ class InstalledPackageDependencyRecord(Base):
 
     __tablename__ = "installed_package_dependencies"
     __table_args__ = (
+        UniqueConstraint("installed_package_version_id", "distribution_name"),
         UniqueConstraint("installed_package_version_id", "filename"),
         CheckConstraint(SHA256_SQL.format(column="sha256"), name="sha256_hex"),
         CheckConstraint("byte_length > 0", name="byte_length_positive"),

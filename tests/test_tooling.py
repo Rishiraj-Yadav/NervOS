@@ -102,6 +102,7 @@ def test_bootstrap_installs_locked_dependencies_then_chromium(
     assert bootstrap.main([]) == 0
     assert commands == [
         ["uv-bin", "sync", "--frozen", "--all-packages"],
+        ["uv-bin", "run", "python", "scripts/prepare_runtime_artifacts.py"],
         ["pnpm-bin", "install", "--frozen-lockfile"],
         [
             "pnpm-bin",
@@ -133,6 +134,7 @@ def test_bootstrap_skip_browser_installs_no_chromium(
     assert bootstrap.main(["--skip-browser"]) == 0
     assert commands == [
         ["uv-bin", "sync", "--frozen", "--all-packages"],
+        ["uv-bin", "run", "python", "scripts/prepare_runtime_artifacts.py"],
         ["pnpm-bin", "install", "--frozen-lockfile"],
     ]
 

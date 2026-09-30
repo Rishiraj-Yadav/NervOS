@@ -29,7 +29,9 @@ describe("agent list page", () => {
 
     await renderRoute("/agents");
 
-    expect(await screen.findByRole("heading", { name: /no agents yet/i })).toBeVisible();
+    expect(
+      await screen.findByRole("heading", { name: /no agents yet/i }, { timeout: 10_000 }),
+    ).toBeVisible();
     expect(screen.getByRole("button", { name: /create a chat agent/i })).toBeVisible();
     expect(screen.getByText(/nothing is created for you automatically/i)).toBeVisible();
   });

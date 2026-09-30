@@ -14,9 +14,12 @@ from pathlib import Path
 
 from nervos_core.application.package_integrity import canonical_json_bytes
 from nervos_core.application.package_verification import VerifiedPackage
-from nervos_core.application.package_wheel import normalized_distribution_name
+from nervos_core.application.package_wheel import inspect_wheel, normalized_distribution_name
 
 HOST_PROTOCOL_VERSION = "1"
+# Frozen compatibility contract emitted by nervos-sdk; distribution packaging version is tracked
+# separately in the wheel digest/environment identity.
+SDK_API_VERSION = "0.1"
 _NERVOS_RUNTIME_DISTRIBUTIONS = frozenset({"nervos-sdk", "nervos-package-host"})
 
 
@@ -98,24 +101,50 @@ def environment_identity(
 
 
 def create_default_runtime_artifacts(root: Path) -> PackageRuntimeArtifacts:
-    """Locate or create offline runtime wheel artifacts for nervos-sdk and nervos-package-host."""
-    runtime_dir = root / "runtime"
-    runtime_dir.mkdir(parents=True, exist_ok=True)
+    """Load bootstrap-prepared runtime wheels; installation never builds or downloads them."""
+    # ``root`` is the package store's environments directory. Runtime artifacts live beside it,
+    # under the same controlled package-store root prepared by bootstrap.
+    runtime_dir = root.parent / "runtime"
     sdk_path = runtime_dir / "nervos_sdk-0.1.0-py3-none-any.whl"
     host_path = runtime_dir / "nervos_package_host-0.1.0-py3-none-any.whl"
-
-    if not sdk_path.exists():
-        sdk_path.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
-    if not host_path.exists():
-        host_path.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+    if not sdk_path.is_file() or not host_path.is_file():
+        raise PackageEnvironmentError(
+            "runtime artifacts are unavailable; run the runtime-artifact preparation script "
+            "during bootstrap"
+        )
 
     sdk_sha = _sha256_file(sdk_path)
     host_sha = _sha256_file(host_path)
 
-    return PackageRuntimeArtifacts(
+    artifacts = PackageRuntimeArtifacts(
         sdk=RuntimeWheelArtifact(sdk_path, "nervos-sdk", "0.1.0", sdk_sha),
         host=RuntimeWheelArtifact(host_path, "nervos-package-host", "0.1.0", host_sha),
     )
+    _validate_runtime_wheel(artifacts.sdk)
+    _validate_runtime_wheel(artifacts.host)
+    return artifacts
+
+
+def _validate_runtime_wheel(artifact: RuntimeWheelArtifact) -> None:
+    """Prove the bootstrap artifact is a real, exact NervOS runtime wheel before use."""
+    try:
+        metadata = inspect_wheel(artifact.path, filename=artifact.path.name)
+    except ValueError as error:
+        raise PackageEnvironmentError("runtime wheel artifact is invalid") from error
+    if metadata.name != normalized_distribution_name(artifact.distribution_name):
+        raise PackageEnvironmentError("runtime wheel distribution identity mismatch")
+    if metadata.version != artifact.version:
+        raise PackageEnvironmentError("runtime wheel version mismatch")
+    # A metadata-only ZIP is installable enough for pip to accept, but cannot be a runtime.
+    # Require at least one actual Python module outside its dist-info directory.
+    import zipfile
+
+    with zipfile.ZipFile(artifact.path) as archive:
+        if not any(
+            item.filename.endswith(".py") and ".dist-info/" not in item.filename
+            for item in archive.infolist()
+        ):
+            raise PackageEnvironmentError("runtime wheel has no importable payload")
 
 
 class PackageEnvironmentBuilder:
@@ -133,7 +162,9 @@ class PackageEnvironmentBuilder:
         self, verified: VerifiedPackage, payload_root: Path
     ) -> tuple[EnvironmentIdentity, Path]:
         identity = environment_identity(verified, self._runtime)
-        destination = self._root / identity.relative_key
+        # ``store_root`` is PackageStore.environments_root, while the persisted key is relative to
+        # PackageStore.root (``environments/<digest>``). Use only the digest beneath this root.
+        destination = self._root / identity.digest
         if destination.exists():
             self.validate(destination, identity)
             return identity, destination
@@ -146,9 +177,15 @@ class PackageEnvironmentBuilder:
                 payload_root / "dependencies" / "wheels" / wheel.filename
                 for wheel in sorted(verified.dependencies, key=lambda item: item.filename)
             ]
+            agent_filename = (
+                f"{verified.agent_wheel.name.replace('-', '_')}-"
+                f"{verified.agent_wheel.version}-py3-none-any.whl"
+            )
+            pip_agent_wheel = temp / agent_filename
+            shutil.copyfile(payload_root / "agent.whl", pip_agent_wheel)
             wheels = [
                 *dependency_paths,
-                payload_root / "agent.whl",
+                pip_agent_wheel,
                 self._runtime.sdk.path,
                 self._runtime.host.path,
             ]
@@ -171,6 +208,7 @@ class PackageEnvironmentBuilder:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+            pip_agent_wheel.unlink()
             metadata = temp / ".nervos-environment.json"
             metadata.write_text(identity.canonical_json, encoding="utf-8", newline="\n")
             self.validate(temp, identity)

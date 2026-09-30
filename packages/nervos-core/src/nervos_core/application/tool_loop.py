@@ -3,12 +3,14 @@
 This is the loop ADR 0017 describes. Four rules shape everything in it:
 
 **The loop is NervOS's.** No provider SDK executes anything: an adapter reports that a model asked
-for a tool, and this loop decides whether the call happens. A provider shipping its own executor
-would change nothing here.
+for a tool, and the shared single-call mediator decides whether the call happens. The loop owns
+catalog presentation and multi-turn orchestration; a provider shipping its own executor would
+change nothing here.
 
-**Authority is live, twice.** The catalog decides what may be *offered*; D2's predicate decides,
-freshly, whether a specific call may *run* -- once when the call is requested, and again inside the
-single transaction that commits the start. An entry in the catalog authorizes nothing on its own.
+**Authority is live, twice.** The catalog decides what may be *offered*; the shared mediator asks
+D2's predicate freshly whether a specific call may *run* -- once when the call is requested, and
+again inside the single transaction that commits the start. An entry in the catalog authorizes
+nothing on its own.
 
 **Every external effect is bracketed by durable state.** A tool call is recorded as `requested`
 before it is dispatched and as `started` immediately before, so the boundary between "we intended to
@@ -28,14 +30,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
+import nervos_core.application.tool_invocation_mediator as _tool_invocation_mediator
 from nervos_core.application.model_completion import (
-    EXECUTION_CANCELLED,
     INTERNAL_EXECUTION_ERROR,
     MODEL_RATE_LIMITED,
     MODEL_RESPONSE_INVALID,
     TOOL_CATALOG_INVALID,
     TOOL_LOOP_LIMIT,
-    TOOL_OUTCOME_UNKNOWN,
     AssistantTurn,
     ConversationTurn,
     ModelCompletion,
@@ -46,7 +47,6 @@ from nervos_core.application.model_completion import (
     StopOutcome,
     ToolCall,
     ToolResultTurn,
-    safe_error_message,
 )
 from nervos_core.application.tool_catalog import (
     ToolCatalog,
@@ -55,27 +55,21 @@ from nervos_core.application.tool_catalog import (
     assemble_tool_catalog,
     gather_descriptors,
 )
+from nervos_core.application.tool_invocation_mediator import (
+    ToolInvocationMediator,
+    bounded_observation,
+)
 from nervos_core.application.tool_invocations import (
     ClaimHandle,
-    InvocationRequest,
-    RecordOutcomeKind,
-    RefusalOutcomeKind,
-    StartOutcomeKind,
     ToolInvocationPersistence,
     parse_arguments,
-    result_envelope,
 )
 from nervos_core.application.tool_permissions import ToolPermissionEvaluator
-from nervos_core.application.tool_registry import (
-    ToolExecutionFailure,
-    ToolOutcomeUnknown,
-    ToolRegistry,
-)
-from nervos_core.application.tool_schema import validate_instance
+from nervos_core.application.tool_registry import ToolRegistry
 from nervos_core.application.trusted_chat import ChatOutcome, final_chat_outcome
 from nervos_core.domain.context import ContextSnapshotData
 from nervos_core.domain.runs import Run, RunStatus
-from nervos_core.domain.tools import JsonValue, ToolSourceRef, canonical_json_text
+from nervos_core.domain.tools import ToolSourceRef
 
 # Bounded in-Attempt retries for one rate-limited model turn. The ladder is the same frozen
 # exponential Stage C already uses, reused rather than restated; there is no jitter, so a given
@@ -88,21 +82,25 @@ _RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
 _UNKNOWN_TOOL_NOTE = "The requested tool is not available to this agent."
 _INVALID_ARGUMENTS_NOTE = "The tool call arguments were not valid for this tool."
 _DENIED_NOTE = "The tool call was denied."
+STRUCTURED_OMITTED_NOTE = _tool_invocation_mediator.STRUCTURED_OMITTED_NOTE
+TEXT_TRUNCATED_NOTE = _tool_invocation_mediator.TEXT_TRUNCATED_NOTE
 
 # Truncation disclosures. They are fixed, so a payload carrying one can be measured exactly before
 # it is used, and they are short enough to fit inside the smallest legal result limit.
-STRUCTURED_OMITTED_NOTE = "\n[NervOS: structured result omitted to fit this run's result limit.]"
-TEXT_TRUNCATED_NOTE = "\n[NervOS: tool result truncated to fit this run's result limit.]"
-
 # Printable ASCII, the provider call-id contract. Every permitted character is one byte, so the
 # byte bound and the character bound are the same bound.
 _PRINTABLE_ASCII = frozenset(chr(code) for code in range(0x20, 0x7F))
 MAX_PROVIDER_CALL_ID_BYTES = 128
-
-# The durable `tool_invocations` columns bound an error pair at 1..64 and 1..512 characters (D1's
-# `error_bounds`). The message bound is restated here so the loop can guarantee what it writes is
-# storable rather than discovering it as an integrity error after the call already ran.
 MAX_DURABLE_ERROR_MESSAGE_CHARS = 512
+
+
+def durable_error_message(error_code: str, message: str | None) -> str:
+    """Bound a tool's safe static failure text to the durable audit column contract."""
+    if message is not None and 1 <= len(message) <= MAX_DURABLE_ERROR_MESSAGE_CHARS:
+        return message
+    from nervos_core.application.model_completion import safe_error_message
+
+    return safe_error_message(error_code)
 
 
 class AttemptUsagePersistence(Protocol):
@@ -115,16 +113,6 @@ class AttemptUsagePersistence(Protocol):
     def persist_attempt_usage(
         self, claim: ClaimHandle, *, usage: ModelUsage, now: datetime
     ) -> bool: ...
-
-
-@dataclass(frozen=True, slots=True)
-class Observation:
-    """One tool result as the model will see it, and whether anything was withheld."""
-
-    text: str
-    structured: JsonValue | None
-    is_error: bool
-    truncated: bool
 
 
 @dataclass
@@ -176,68 +164,6 @@ def _add(left: int | None, right: int | None) -> int | None:
     return left + right
 
 
-def bounded_observation(
-    *,
-    text: str,
-    structured: JsonValue | None,
-    is_error: bool,
-    max_bytes: int,
-) -> Observation:
-    """Reduce one tool result to a model-visible payload inside `max_bytes`.
-
-    Three deterministic steps, in order: the whole result; then the text with the structured value
-    dropped whole and disclosed; then a UTF-8-safe head of the text with a truncation disclosed.
-    Structured JSON is never partially emitted -- a sliced JSON document is not a smaller fact, it
-    is a different and false one.
-    """
-    if _observation_bytes(text, structured) <= max_bytes:
-        return Observation(text, structured, is_error, truncated=False)
-
-    if structured is not None:
-        omitted = text + STRUCTURED_OMITTED_NOTE
-        if _observation_bytes(omitted, None) <= max_bytes:
-            return Observation(omitted, None, is_error, truncated=True)
-
-    budget = max_bytes - len(TEXT_TRUNCATED_NOTE.encode("utf-8"))
-    return Observation(
-        _utf8_head(text, budget) + TEXT_TRUNCATED_NOTE, None, is_error, truncated=True
-    )
-
-
-def _observation_bytes(text: str, structured: JsonValue | None) -> int:
-    """Measure the provider-neutral model-visible payload.
-
-    Provider wire wrappers -- block envelopes, JSON escaping -- are a provider's cost and are never
-    what this limit bounds. What is bounded is what the observation itself says.
-    """
-    size = len(text.encode("utf-8"))
-    if structured is not None:
-        size += 1 + len(canonical_json_text(structured).encode("utf-8"))
-    return size
-
-
-def _utf8_head(text: str, budget: int) -> str:
-    """Return the longest prefix of `text` fitting `budget` bytes, never splitting a code point."""
-    if budget <= 0:
-        return ""
-    return text.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
-
-
-def durable_error_message(error_code: str, message: str | None) -> str:
-    """Return an error message that the durable columns can actually store.
-
-    A tool's declared message is bounded static text by its own contract, so this normally returns
-    it unchanged. It exists for the case where it is not: an unrecordable message must not turn a
-    *known* failure into an unrecorded one, because the invocation would then be left `started` --
-    and `started` means "this may have had an effect", which is the opposite of what a tool that
-    reported its own failure told us. Falling back to the code's static message keeps the row
-    truthful, and the code still carries the classification.
-    """
-    if message is not None and 1 <= len(message) <= MAX_DURABLE_ERROR_MESSAGE_CHARS:
-        return message
-    return safe_error_message(error_code)
-
-
 class ToolLoop:
     """Execute one tool-enabled Run as a bounded sequence of model turns and tool calls."""
 
@@ -253,16 +179,19 @@ class ToolLoop:
         clock: Callable[[], datetime],
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         synchronizer: ToolSourceSynchronizer | None = None,
+        mediator: ToolInvocationMediator | None = None,
     ) -> None:
         self._registry = registry
         self._source_ref = source_ref
         self._authorize = authorize
-        self._invocations = invocations
         self._usage = usage
         self._system_instruction = system_instruction
         self._clock = clock
         self._sleep = sleep
         self._synchronizer = synchronizer
+        self._mediator = mediator or ToolInvocationMediator(
+            registry=registry, authorize=authorize, invocations=invocations, clock=clock
+        )
 
     async def run(
         self,
@@ -453,128 +382,34 @@ class ToolLoop:
         if arguments is None:
             await self._refuse(run, claim, state, call.call_id, _INVALID_ARGUMENTS_NOTE)
             return
-        if validate_instance(entry.canonical_input_schema, arguments) is not None:
-            await self._refuse(run, claim, state, call.call_id, _INVALID_ARGUMENTS_NOTE)
-            return
-
-        descriptor = entry.descriptor
-        decision = self._authorize.check_permission(
-            run_id=run.id, tool_definition_id=descriptor.tool_definition_id
-        )
         state.tool_sequence += 1
-        requested = self._invocations.record_requested(
+        outcome = await self._mediator.invoke(
+            descriptor=entry.descriptor,
+            arguments=arguments,
+            run=run,
             claim=claim,
-            request=InvocationRequest(
-                run_id=run.id,
-                job_id=claim.job_id,
-                attempt_id=claim.attempt_id,
-                tool_sequence=state.tool_sequence,
-                tool_definition_id=descriptor.tool_definition_id,
-                source_kind=descriptor.source_kind,
-                source_id=descriptor.source_id,
-                upstream_name=descriptor.upstream_name,
-                model_name=descriptor.model_name,
-                definition_fingerprint=descriptor.fingerprint,
-                provider_call_id=call.call_id,
-                permission_decision=decision,
-                arguments=arguments,
-            ),
-            now=self._clock(),
+            tool_sequence=state.tool_sequence,
+            provider_call_id=call.call_id,
+            usage=state.usage,
         )
-        if requested.kind is RecordOutcomeKind.FENCED or requested.invocation_id is None:
-            # No row exists, so nothing may be dispatched; the durable owner of this Job settles
-            # its final state.
-            raise ModelProviderError(INTERNAL_EXECUTION_ERROR, usage=state.usage)
-
-        if not decision.allowed:
-            # The first check already answered "was this allowed when requested?", and the answer
-            # was no. The call is closed as denied rather than routed through the start boundary to
-            # be refused a second time.
-            self._invocations.mark_denied(
-                claim=claim,
-                invocation_id=requested.invocation_id,
-                decision=decision,
-                now=self._clock(),
-            )
+        if outcome.denied:
             self._observe_failure(run, state, call.call_id, _DENIED_NOTE)
             return
-
-        started = self._invocations.mark_started(
-            claim=claim, invocation_id=requested.invocation_id, now=self._clock()
-        )
-        if started.kind is StartOutcomeKind.FENCED:
+        if outcome.invalid_arguments:
+            self._observe_failure(run, state, call.call_id, _INVALID_ARGUMENTS_NOTE)
+            return
+        result = outcome.result
+        if result is None:
             raise ModelProviderError(INTERNAL_EXECUTION_ERROR, usage=state.usage)
-        if started.kind is StartOutcomeKind.CANCELLED:
-            # Cancellation before the start boundary is a refusal, not ambiguity: the call
-            # provably did not run, so the loop stops with no observation and the durable owner of
-            # this Job settles the Run's terminal state.
-            raise ModelProviderError(EXECUTION_CANCELLED, usage=state.usage)
-        if started.kind is StartOutcomeKind.DENIED:
-            self._observe_failure(run, state, call.call_id, _DENIED_NOTE)
+        if outcome.failed:
+            self._observe_failure(run, state, call.call_id, result.text)
             return
-
-        executor = self._registry.executor(descriptor.source_ref)
-        try:
-            # The deadline is owned here, around the dispatch alone: a call that ran past it is
-            # ambiguous rather than failed, because the timeout says nothing about whether the
-            # effect landed.
-            async with asyncio.timeout(run.limits.tool_timeout_ms / 1000):
-                result = await executor.execute(descriptor, arguments)
-        except TimeoutError:
-            self._invocations.mark_ambiguous(
-                claim=claim,
-                invocation_id=requested.invocation_id,
-                error_code=TOOL_OUTCOME_UNKNOWN,
-                error_message=safe_error_message(TOOL_OUTCOME_UNKNOWN),
-                now=self._clock(),
-            )
-            raise ModelProviderError(TOOL_OUTCOME_UNKNOWN, usage=state.usage) from None
-        except ToolExecutionFailure as failure:
-            self._failed_invocation(state, claim, requested.invocation_id, failure)
-            self._observe_failure(run, state, call.call_id, failure.message)
-            return
-        except ToolOutcomeUnknown:
-            # An executor that lost the answer rather than obtaining one. This is the same
-            # ambiguity the timeout above models, reached deliberately instead of by accident: the
-            # call may have landed, so it is recorded ambiguous and the Run fails without an
-            # observation -- a model told "the result is unknown" would simply ask again, and one
-            # Requested call may not produce two effects.
-            self._invocations.mark_ambiguous(
-                claim=claim,
-                invocation_id=requested.invocation_id,
-                error_code=TOOL_OUTCOME_UNKNOWN,
-                error_message=safe_error_message(TOOL_OUTCOME_UNKNOWN),
-                now=self._clock(),
-            )
-            raise ModelProviderError(TOOL_OUTCOME_UNKNOWN, usage=state.usage) from None
-        except asyncio.CancelledError:
-            # The caller withdrew the task -- an outer deadline or shutdown. The invocation is left
-            # truthfully `started`: the call happened, and this Worker may not say how it ended.
-            raise
-        except Exception:
-            # An unclassified exception is a defect in our own dispatch path, and it is never
-            # reported as the tool's own rejection.
-            self._close_failed(
-                claim, requested.invocation_id, INTERNAL_EXECUTION_ERROR, usage=state.usage
-            )
-            raise ModelProviderError(INTERNAL_EXECUTION_ERROR, usage=state.usage) from None
-
-        envelope = result_envelope(text=result.text, structured=result.structured)
         observation = bounded_observation(
             text=result.text,
             structured=result.structured,
             is_error=False,
             max_bytes=run.limits.tool_result_max_bytes,
         )
-        if not self._invocations.mark_succeeded(
-            claim=claim,
-            invocation_id=requested.invocation_id,
-            envelope=envelope,
-            now=self._clock(),
-        ):
-            # The call happened, but its outcome could not be recorded. Continuing would build a
-            # conversation on a call whose durable state is still `started`.
-            raise ModelProviderError(INTERNAL_EXECUTION_ERROR, usage=state.usage)
         state.consecutive_failures = 0
         state.turns.append(
             ToolResultTurn(
@@ -584,42 +419,6 @@ class ToolLoop:
                 is_error=False,
             )
         )
-
-    def _failed_invocation(
-        self,
-        state: _LoopState,
-        claim: ClaimHandle,
-        invocation_id: int,
-        failure: ToolExecutionFailure,
-    ) -> None:
-        """Record a locally classified tool failure.
-
-        The code is the tool's own closed vocabulary member and the message is the bounded static
-        text D3 guarantees is safe to record, so nothing provider-supplied or argument-derived is
-        ever persisted.
-        """
-        self._close_failed(
-            claim, invocation_id, failure.reason.value, usage=state.usage, message=failure.message
-        )
-
-    def _close_failed(
-        self,
-        claim: ClaimHandle,
-        invocation_id: int,
-        error_code: str,
-        *,
-        usage: ModelUsage,
-        message: str | None = None,
-    ) -> None:
-        if self._invocations.mark_failed(
-            claim=claim,
-            invocation_id=invocation_id,
-            error_code=error_code,
-            error_message=durable_error_message(error_code, message),
-            now=self._clock(),
-        ):
-            return
-        raise ModelProviderError(INTERNAL_EXECUTION_ERROR, usage=usage)
 
     async def _refuse(
         self,
@@ -642,11 +441,7 @@ class ToolLoop:
         the same consecutive-failure increment, the same loop limit -- because D6 adds an audit
         fact and changes no loop semantics.
         """
-        outcome = self._invocations.record_pre_dispatch_refusal(claim=claim, now=self._clock())
-        if outcome.kind is RefusalOutcomeKind.CANCELLED:
-            raise ModelProviderError(EXECUTION_CANCELLED, usage=state.usage)
-        if outcome.kind is RefusalOutcomeKind.FENCED:
-            raise ModelProviderError(INTERNAL_EXECUTION_ERROR, usage=state.usage)
+        self._mediator.record_pre_dispatch_refusal(claim=claim, usage=state.usage)
         self._observe_failure(run, state, call_id, note)
 
     def _observe_failure(self, run: Run, state: _LoopState, call_id: str, note: str) -> None:

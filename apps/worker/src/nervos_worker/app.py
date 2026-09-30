@@ -23,6 +23,7 @@ from nervos_core.application.lease_reclamation import LeaseReclaimer
 from nervos_core.application.model_completion import ModelCompletion
 from nervos_core.application.retry_policy import PRODUCTION_RETRY_POLICY
 from nervos_core.application.run_execution import RunExecutor
+from nervos_core.application.tool_invocation_mediator import ToolInvocationMediator
 from nervos_core.application.tool_loop import ToolLoop
 from nervos_core.application.trusted_chat import (
     NERVOS_TOOL_CHAT_SYSTEM_INSTRUCTION,
@@ -37,6 +38,7 @@ from nervos_core.infrastructure.database.jobs import SqlAlchemyJobExecutionPersi
 from nervos_core.infrastructure.database.mcp_connections import (
     SqlAlchemyMcpConnectionPersistence,
 )
+from nervos_core.infrastructure.database.packages import SqlAlchemyPackageRegistryPersistence
 from nervos_core.infrastructure.database.tool_definitions import (
     SqlAlchemyToolDefinitionPersistence,
 )
@@ -137,11 +139,20 @@ def create_worker(settings: WorkerSettings | None = None) -> WorkerComposition:
         definitions=tool_definitions,
         gateway=mcp_gateway,
     )
+    tool_authority = SqlAlchemyToolPermissionEvaluator(engine)
+    tool_invocations = SqlAlchemyToolInvocationPersistence(engine)
+    tool_mediator = ToolInvocationMediator(
+        registry=tool_registry,
+        authorize=tool_authority,
+        invocations=tool_invocations,
+        clock=utc_now,
+    )
+    package_persistence = SqlAlchemyPackageRegistryPersistence(engine)
     tool_loop = ToolLoop(
         registry=tool_registry,
         source_ref=BUILTIN_SOURCE_REF,
-        authorize=SqlAlchemyToolPermissionEvaluator(engine),
-        invocations=SqlAlchemyToolInvocationPersistence(engine),
+        authorize=tool_authority,
+        invocations=tool_invocations,
         usage=persistence,
         system_instruction=NERVOS_TOOL_CHAT_SYSTEM_INSTRUCTION,
         clock=utc_now,
@@ -149,6 +160,7 @@ def create_worker(settings: WorkerSettings | None = None) -> WorkerComposition:
         # re-synchronised from durable connection state. This is what lets a connection created by
         # the control plane after this process started become usable without a restart.
         synchronizer=mcp_synchronizer,
+        mediator=tool_mediator,
     )
     conversations = SqlAlchemyConversationPersistence(engine)
     execution = JobExecutionService(
@@ -156,7 +168,12 @@ def create_worker(settings: WorkerSettings | None = None) -> WorkerComposition:
         RunExecutor(
             create_builtin_handler_registry(),
             tool_loop=tool_loop,
-            package_execution=PackageExecutionAdapter(resolved.package_store),
+            package_execution=PackageExecutionAdapter(
+                resolved.package_store,
+                mediator=tool_mediator,
+                registry=tool_registry,
+                packages=package_persistence,
+            ),
         ),
         completions,
         utc_now,

@@ -1,6 +1,6 @@
 # NervOS
 
-NervOS is a self-hosted AI-agent runtime and management platform. The repository has completed **Stages A through F**, and the next milestone is **Stage G — Agent package system**.
+NervOS is a self-hosted AI-agent runtime and management platform. **Stages A through G are complete and externally accepted, pending the Stage-G closeout merge. Stage H — Security isolation — is next and has not started.**
 
 The A1 repository/tooling foundation, A2 API/configuration/database foundation, A3 local-authentication boundary, A4 React dashboard foundation, A5 deterministic browser journey, and A6 continuous-integration/security-scanning milestone are implemented. The browser supports first-run setup, cookie-backed login/session restoration, a protected minimal dashboard, and server-confirmed logout.
 

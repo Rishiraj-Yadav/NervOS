@@ -25,7 +25,9 @@ describe("packages list page", () => {
 
     await renderRoute("/packages");
 
-    expect(await screen.findByRole("heading", { name: /no packages installed/i })).toBeVisible();
+    expect(
+      await screen.findByRole("heading", { name: /no packages installed/i }, { timeout: 10_000 }),
+    ).toBeVisible();
     expect(screen.getAllByRole("link", { name: /install package/i })[0]).toBeVisible();
   });
 

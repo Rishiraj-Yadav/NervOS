@@ -17,7 +17,7 @@ from nervos_core.application.package_config_schema import (
     parse_config_schema_json,
     validate_config,
 )
-from nervos_core.application.package_environment import PackageEnvironmentBuilder
+from nervos_core.application.package_environment import SDK_API_VERSION, PackageEnvironmentBuilder
 from nervos_core.application.package_integrity import canonical_json_bytes, sha256_hex
 from nervos_core.application.package_storage import PackageStore, StagedPackageArtifact
 from nervos_core.application.package_verification import (
@@ -238,7 +238,7 @@ class PackageApplicationService:
                 environment_digest=identity.digest,
                 environment_key_json=identity.canonical_json,
                 environment_key=identity.relative_key,
-                sdk_version=self._environment_builder.runtime.sdk.version,
+                sdk_version=SDK_API_VERSION,
                 sdk_wheel_digest=self._environment_builder.runtime.sdk.sha256,
                 host_version=self._environment_builder.runtime.host.version,
                 host_wheel_digest=self._environment_builder.runtime.host.sha256,
@@ -249,7 +249,7 @@ class PackageApplicationService:
             self._health_checker.check(
                 environment=environment_path,
                 entrypoint=staged.verified.manifest.runtime.entrypoint,
-                expected_sdk_api_version=self._environment_builder.runtime.sdk.version,
+                expected_sdk_api_version=SDK_API_VERSION,
             )
             active = self._registry.mark_active(installed.id, self._clock())
             return PackageInstallResult(active, staged.archive_digest)

@@ -91,6 +91,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     uv, pnpm = validate_prerequisites()
     run([uv, "sync", "--frozen", "--all-packages"])
+    run([uv, "run", "python", "scripts/prepare_runtime_artifacts.py"])
     run([pnpm, "install", "--frozen-lockfile"])
     if args.skip_browser:
         print("NervOS Stage A dependencies are ready (Playwright Chromium skipped).")
