@@ -19,7 +19,11 @@ from nervos_core.application.model_completion import (
     StopOutcome,
 )
 from nervos_core.application.queue_policy import PRODUCTION_QUEUE_POLICY, QueuePolicy
-from nervos_core.application.run_execution import RunExecutor, ToolLoopHandler
+from nervos_core.application.run_execution import (
+    PackageRunExecutionPort,
+    RunExecutor,
+    ToolLoopHandler,
+)
 from nervos_core.application.trusted_chat import create_builtin_handler_registry
 from nervos_core.domain.runs import STAGE_B_LIMITS, RunLimits
 from nervos_core.infrastructure.database import create_sqlite_engine
@@ -231,6 +235,7 @@ def build_execution_service(
     clock: Callable[[], datetime] | None = None,
     policy: QueuePolicy = PRODUCTION_QUEUE_POLICY,
     tool_loop: ToolLoopHandler | None = None,
+    package_execution: PackageRunExecutionPort | None = None,
 ) -> tuple[SqlAlchemyJobExecutionPersistence, JobExecutionService]:
     """Compose the shipped execution service over disposable persistence.
 
@@ -241,7 +246,11 @@ def build_execution_service(
     persistence = SqlAlchemyJobExecutionPersistence(engine, policy=policy, sleep=lambda _: None)
     service = JobExecutionService(
         persistence,
-        RunExecutor(create_builtin_handler_registry(), tool_loop=tool_loop),
+        RunExecutor(
+            create_builtin_handler_registry(),
+            tool_loop=tool_loop,
+            package_execution=package_execution,
+        ),
         completions,
         clock or (lambda: NOW),
     )
@@ -265,6 +274,7 @@ def build_worker(
     clock: Callable[[], datetime] | None = None,
     policy: QueuePolicy = PRODUCTION_QUEUE_POLICY,
     tool_loop: ToolLoopHandler | None = None,
+    package_execution: PackageRunExecutionPort | None = None,
 ) -> Worker:
     """Compose the shipped Worker loop over disposable persistence.
 
@@ -278,7 +288,9 @@ def build_worker(
     now = clock or (lambda: NOW)
     # The orchestration clock must be the same object the Worker uses: a start committed with a
     # clock behind the claim's own heartbeat would violate the ordering the schema enforces.
-    _persistence, execution = build_execution_service(engine, completions, now, policy, tool_loop)
+    _persistence, execution = build_execution_service(
+        engine, completions, now, policy, tool_loop, package_execution
+    )
     registry = WorkerRegistry(_persistence, worker_id, clock=now)
     worker = Worker(
         _persistence,

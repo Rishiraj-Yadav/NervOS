@@ -245,7 +245,7 @@ def web_ready(status: int, body: bytes, content_type: str) -> bool:
     return status == 200 and "text/html" in content_type.lower() and bool(body)
 
 
-def e2e_environment(database: Path, web_origin: str) -> dict[str, str]:
+def e2e_environment(database: Path, package_store: Path, web_origin: str) -> dict[str, str]:
     """Build the child-process environment for an offline, credential-free E2E run.
 
     The provider credential is removed explicitly rather than merely left unused. An operator
@@ -259,6 +259,7 @@ def e2e_environment(database: Path, web_origin: str) -> dict[str, str]:
         {
             "NERVOS_ENVIRONMENT": "test",
             "NERVOS_DATABASE_PATH": str(database),
+            "NERVOS_PACKAGE_STORE": str(package_store),
             "NERVOS_APP_ORIGIN": web_origin,
             "NERVOS_LOG_LEVEL": "WARNING",
         }
@@ -275,6 +276,8 @@ def run_e2e() -> int:
     with tempfile.TemporaryDirectory(prefix="nervos-a5-e2e-") as directory:
         temporary = Path(directory)
         database = (temporary / "nervos-e2e.db").resolve()
+        package_store = (temporary / "packages").resolve()
+        package_file = (temporary / "browser-runtime-demo.nervos").resolve()
         if database == DEFAULT_DATABASE:
             raise RuntimeError("E2E database resolved to the default NervOS database")
         api_log_path = temporary / "api.log"
@@ -311,7 +314,7 @@ def run_e2e() -> int:
         web_port = web_reservation.port
         api_origin = f"http://127.0.0.1:{api_port}"
         web_origin = f"http://127.0.0.1:{web_port}"
-        environment = e2e_environment(database, web_origin)
+        environment = e2e_environment(database, package_store, web_origin)
         worker_environment = {
             **environment,
             "NERVOS_WORKER_READY_FILE": str(worker_marker),
@@ -350,10 +353,48 @@ def run_e2e() -> int:
             "NERVOS_E2E_CANCEL_INPUT": CANCEL_INPUT,
             "NERVOS_E2E_TOOL_INPUT": TOOL_INPUT,
             "NERVOS_E2E_TOOL_GRANT_ACK": str(tool_grant_ack),
+            "NERVOS_E2E_PACKAGE_FILE": str(package_file),
         }
         pnpm = resolve_required_command("pnpm")
 
         try:
+            package_store.mkdir(parents=True, exist_ok=True)
+            runtime_preparation = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/prepare_runtime_artifacts.py",
+                    "--destination",
+                    str(package_store / "runtime"),
+                ],
+                cwd=ROOT,
+                env=environment,
+                capture_output=True,
+                check=False,
+                timeout=180,
+                shell=False,
+                text=True,
+            )
+            if runtime_preparation.returncode != 0:
+                raise RuntimeError(
+                    "E2E runtime artifact preparation failed with exit code "
+                    f"{runtime_preparation.returncode}:\n"
+                    f"{runtime_preparation.stdout}{runtime_preparation.stderr}"
+                )
+            package_build = subprocess.run(
+                [sys.executable, "tests/e2e_support/build_stage_g_package.py", str(package_file)],
+                cwd=ROOT,
+                env=environment,
+                capture_output=True,
+                check=False,
+                timeout=30,
+                shell=False,
+                text=True,
+            )
+            if package_build.returncode != 0:
+                raise RuntimeError(
+                    "E2E package fixture build failed with exit code "
+                    f"{package_build.returncode}:\n{package_build.stdout}{package_build.stderr}"
+                )
             migration = subprocess.run(
                 [sys.executable, "-m", "alembic", "-c", "apps/api/alembic.ini", "upgrade", "head"],
                 cwd=ROOT,

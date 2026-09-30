@@ -25,6 +25,7 @@ from nervos_core.application.job_execution import ClaimedAttempt, JobExecutionSe
 from nervos_core.application.lease_reclamation import LeaseReclaimer
 from nervos_core.application.retry_policy import PRODUCTION_RETRY_POLICY, RetryPolicy
 from nervos_core.application.run_execution import RunExecutor
+from nervos_core.application.tool_invocation_mediator import ToolInvocationMediator
 from nervos_core.application.tool_loop import ToolLoop
 from nervos_core.application.trusted_chat import (
     NERVOS_TOOL_CHAT_SYSTEM_INSTRUCTION,
@@ -32,6 +33,7 @@ from nervos_core.application.trusted_chat import (
 )
 from nervos_core.infrastructure.database import create_sqlite_engine
 from nervos_core.infrastructure.database.jobs import SqlAlchemyJobExecutionPersistence
+from nervos_core.infrastructure.database.packages import SqlAlchemyPackageRegistryPersistence
 from nervos_core.infrastructure.database.schema_revision import require_schema_revision
 from nervos_core.infrastructure.database.tool_definitions import (
     SqlAlchemyToolDefinitionPersistence,
@@ -49,6 +51,7 @@ from nervos_worker.app import (
 )
 from nervos_worker.config import WorkerSettings
 from nervos_worker.identity import generate_worker_id
+from nervos_worker.package_execution import PackageExecutionAdapter
 from nervos_worker.registry import ReclaimLoop, WorkerRegistry
 from nervos_worker.service import Worker
 from sqlalchemy.engine import Engine
@@ -239,18 +242,37 @@ async def run() -> int:
         # source alone is complete, and the catalog still authorizes each call live.
         tool_definitions = SqlAlchemyToolDefinitionPersistence(engine)
         tool_registry = create_builtin_tool_registry(tool_definitions, clock=utc_now)
+        tool_authority = SqlAlchemyToolPermissionEvaluator(engine)
+        tool_invocations = SqlAlchemyToolInvocationPersistence(engine)
+        tool_mediator = ToolInvocationMediator(
+            registry=tool_registry,
+            authorize=tool_authority,
+            invocations=tool_invocations,
+            clock=utc_now,
+        )
         tool_loop = ToolLoop(
             registry=tool_registry,
             source_ref=BUILTIN_SOURCE_REF,
-            authorize=SqlAlchemyToolPermissionEvaluator(engine),
-            invocations=SqlAlchemyToolInvocationPersistence(engine),
+            authorize=tool_authority,
+            invocations=tool_invocations,
             usage=persistence,
             system_instruction=NERVOS_TOOL_CHAT_SYSTEM_INSTRUCTION,
             clock=utc_now,
+            mediator=tool_mediator,
         )
+        package_persistence = SqlAlchemyPackageRegistryPersistence(engine)
         execution = JobExecutionService(
             persistence,
-            RunExecutor(create_builtin_handler_registry(), tool_loop=tool_loop),
+            RunExecutor(
+                create_builtin_handler_registry(),
+                tool_loop=tool_loop,
+                package_execution=PackageExecutionAdapter(
+                    settings.package_store,
+                    mediator=tool_mediator,
+                    registry=tool_registry,
+                    packages=package_persistence,
+                ),
+            ),
             completions,
             utc_now,
             retry_policy=resolve_retry_policy(),

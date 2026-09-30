@@ -1105,17 +1105,19 @@ def test_the_tool_loop_module_imports_no_dangerous_or_provider_specific_module()
             assert module not in imported, (name, module)
 
 
-def test_the_tool_catalog_is_grant_filtered_and_never_a_permission_shortcut() -> None:
+def test_the_tool_catalog_is_grant_filtered_and_the_shared_mediator_reauthorizes() -> None:
     """Catalog membership is presentation, never authority.
 
-    The catalog must consult the D2 evaluator for every candidate, and the loop must still
-    re-authorize each call before dispatch. A catalog that trusted itself, or a loop that trusted
-    the catalog, would be a second authority for the same decision.
+    The catalog consults the D2 evaluator for every candidate, while the shared single-call
+    mediator re-authorizes each dispatch. Neither the loop nor catalog is a second authority.
     """
     catalog = (CORE_APPLICATION / "tool_catalog.py").read_text(encoding="utf-8")
     loop = (CORE_APPLICATION / "tool_loop.py").read_text(encoding="utf-8")
+    mediator = (CORE_APPLICATION / "tool_invocation_mediator.py").read_text(encoding="utf-8")
     assert "check_permission" in catalog
-    assert "check_permission" in loop
+    assert "check_permission" in mediator
+    assert "self._mediator.invoke" in loop
+    assert "check_permission" not in loop
     for forbidden in ("grant_tool", "revoke_tool", "INSERT", "insert("):
         assert forbidden not in catalog, forbidden
 
@@ -1131,11 +1133,13 @@ def test_the_tool_loop_reaches_audit_only_through_the_invocation_port() -> None:
     a second place where tool semantics are decided.
     """
     loop = (CORE_APPLICATION / "tool_loop.py").read_text(encoding="utf-8")
+    mediator = (CORE_APPLICATION / "tool_invocation_mediator.py").read_text(encoding="utf-8")
     for forbidden in ("RunEventType", "run_event", "_append_event", "RunEvent"):
         assert forbidden not in loop, forbidden
-    # The one door it may use, and the only vocabulary it needs to read the result.
-    assert "record_pre_dispatch_refusal" in loop
-    assert "RefusalOutcomeKind" in loop
+    # All lifecycle persistence and refusal mapping live behind the shared mediator.
+    assert "self._mediator.record_pre_dispatch_refusal" in loop
+    assert "record_pre_dispatch_refusal" in mediator
+    assert "RefusalOutcomeKind" in mediator
 
 
 def test_the_tool_event_vocabulary_matches_the_frozen_schema() -> None:

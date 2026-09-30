@@ -1,115 +1,146 @@
 # NervOS Agent Packages
 
-## Status
+## Current status
 
-**Target architecture / historical design input.** The canonical Stage-G architecture is now
-`docs/stage-g/README.md` (accepted G0 freeze) with ADRs 0024–0026. G3's transactional
-installation, durable registry, immutable Run pinning, and package-host execution path are complete
-and externally accepted; G4 lifecycle/product surfaces are not started. Where this document's
-historical proposals conflict with the Stage-G master plan or implemented G3 contracts, the Stage-G
-master plan and accepted implementation win.
+G0–G4 define and implement the local `.nervos` package format, exact versioned registry, package
+AgentInstances, and explicit lifecycle surfaces. **G5 is complete and externally accepted, pending
+merge; Stage G is complete and externally accepted, pending merge.** Bootstrap prepares real local
+SDK/package-host wheels, package ToolPort calls use the shared Stage-D mediator, and real-host plus browser acceptance proves
+the install-to-Run path. Stage H has not started and is next.
+The frozen contract is in `docs/stage-g/README.md` and accepted ADRs 0024–0026.
 
-## Purpose
+Stage G is a dependency-isolation and process-boundary design. It is **not a hostile-code sandbox**.
+Stage H owns OS-level containment, filesystem/network restrictions, resource controls, encrypted
+secret management, interactive approvals, and persistent publisher trust.
 
-An AgentPackage is the distributable software artifact produced by an agent developer and installed into a user's NervOS node.
+## Package artifact and identity
 
-YAML is metadata/configuration. It is not a replacement for complex agent logic.
+A `.nervos` artifact is a ZIP containing a strict `manifest.yaml`, one prebuilt pure-Python
+`py3-none-any` agent wheel, a bounded JSON configuration schema, and integrity/signature metadata.
+Optional assets and a self-contained dependency wheelhouse follow the frozen archive contract. A
+package cannot include database migrations or executable install/configuration hooks.
 
-## Recommended future package shape
+The exact identity is `package_id@package_version`. Package IDs use the NervOS agent-key grammar;
+the reserved `nervos.*` namespace belongs to built-ins. Versions use strict SemVer. Package ID is
+the AgentDefinition key and package version is its definition version. Resolution is exact: there is
+no `latest`, implicit fallback, or automatic upgrade.
+
+The builder produces canonical archive metadata. The verifier checks archive paths and bounds,
+wheelhouse closure, content digests, and Ed25519 signatures without importing or executing package
+code. A valid signature proves integrity and authenticity relative to the key included in that
+artifact; it does **not** establish that the publisher is trusted. NervOS shows the signer
+fingerprint and content digest, and an operator explicitly authorizes installation. There is no
+persistent trust store.
+
+## Install and run
+
+Inspection verifies an artifact and returns bounded safe metadata. It does not execute package code,
+install anything, create an AgentInstance, or persist trust. Installation verifies the artifact
+again, stages an immutable snapshot, checks the authorization against that exact artifact, builds a
+content-addressed Python 3.12 environment from local wheels only, and health-checks the package
+entrypoint before activation.
+
+The runtime's own `nervos-sdk` and `nervos-package-host` wheels are prepared locally by
+`scripts/prepare_runtime_artifacts.py` during `scripts/bootstrap.py`. They are stored under the
+configured package store's `runtime/` directory. Package environment creation validates these real
+wheel files and fails closed if either artifact is missing or invalid; installation does not
+download or fabricate runtime artifacts.
+
+Installing a package version does not create an AgentInstance. An operator creates an ordinary
+owner-scoped AgentInstance from an exact ACTIVE package version and chooses its provider, model, and
+configuration. Configuration is schema-validated by the server, canonicalized, revisioned, and
+snapshotted into every accepted Run. A Run and its retries stay pinned to that package version,
+environment, entrypoint, and configuration even after later config changes or rebinds.
+
+Package execution follows the normal Run → Job → Attempt → Worker path. The Worker launches the
+package in its isolated environment through `nervos-package-host`. Model requests go through the
+existing provider abstraction. For each package ToolPort request, Worker loads the verified manifest
+for the exact installed package version pinned by the Run, requires the name in its required or
+optional tool declarations, resolves it to a portable built-in Stage-D descriptor, then invokes the
+same mediator used by ToolLoop. Stage-D grant evaluation, timeout, executor dispatch, normalized
+results, and `tool_invocations` audit remain the authority. A declaration does not create a grant;
+undeclared or ungranted requests are denied safely. Conversation context comes from the Stage-F
+snapshot. Package code receives no provider credentials, database access, Worker claim authority, or
+direct memory repository access. Package declarations do not grant tools, create triggers, or write
+memory automatically.
+
+## Versions and lifecycle
+
+Multiple exact versions can remain installed side by side. Installing another version does not
+change existing AgentInstances or historical Runs. Rebind and rollback are explicit operations that
+switch an AgentInstance to another compatible ACTIVE version; config is carried forward only when
+the target schema accepts it, otherwise the operator supplies new config. Immutable config paths
+remain protected. Rebind affects future Runs and never rewrites historical Run snapshots.
+
+Removal is obligation-aware. A package version with bound AgentInstances is blocked until those
+instances are explicitly rebound or otherwise unbound. A version with nonterminal Runs enters
+`pending_removal`, rejects new bindings and admissions through that binding, and is finalized after
+those Runs drain. Removed versions retain durable tombstones for historical Run references. An
+environment remains while any durable Run references it, including terminal Runs.
+
+## Dashboard and CLI
+
+The dashboard's **Packages** area supports local artifact inspection, signer/content review,
+explicit installation, package listing/details, AgentInstance creation/configuration, rebind,
+rollback, and removal planning. It uses the authenticated API for lifecycle operations.
+
+The CLI also uses the API; it does not access the database or package store directly. Commands
+include:
 
 ```text
-invoice-reminder.nervos
-  manifest.yaml
-  agent.whl
-  config.schema.json
-  README.md
-  assets/
-  migrations/
-  signature.json
+nervos auth login|logout|status
+nervos package inspect <file>
+nervos package install <file>
+nervos package install <file> --yes --approve-signer <full-fingerprint> --approve-content-digest <full-digest>
+nervos package list|show|uninstall ...
+nervos agent create|config|rebind|rollback ...
 ```
 
-## Manifest responsibilities
+Interactive install displays the signer fingerprint and content digest before asking for approval.
+Noninteractive install requires both complete values; `--yes` alone is rejected. The CLI's local
+session is bounded and its cookie is not printed. Authentication remains a local pre-Stage-H
+operator boundary, not a new API-token or publisher-trust system.
 
-Describe:
+## Deterministic local demo
 
-- package identifier
-- name/publisher/version
-- runtime/entrypoint
-- minimum compatible NervOS version
-- model capabilities
-- tool requirements
-- requested permissions
-- supported triggers
-- configuration schema
-- memory declarations
-- resource limits
+The repository's signed browser-acceptance fixture is also a credential-free local demo. It uses a
+test signing key and returns a fixed result without requesting a model completion; do not use the
+fixture or its key for production packages. From the repository root, prepare dependencies and the
+real SDK/package-host runtime wheels, then build the artifact:
 
-Illustrative example:
-
-```yaml
-id: com.example.invoice-reminder
-name: Invoice Reminder
-version: 1.0.0
-runtime:
-  language: python
-  entrypoint: invoice_reminder:InvoiceReminderAgent
-nervos:
-  min_version: "1.0"
-models:
-  capabilities: [text-generation]
-tools:
-  required: [invoices.read, telegram.send]
-permissions: [invoices.read, telegram.send]
-memory:
-  private: true
-configuration:
-  schema: config.schema.json
+```powershell
+python scripts/bootstrap.py
+python tests/e2e_support/build_stage_g_package.py "$env:TEMP\browser-runtime-demo.nervos"
 ```
 
-## Package vs instance
+Start each service in its own terminal:
 
-The same package can create multiple independent instances:
-
-```text
-Raj's Invoice Reminder
-  schedule = 09:00
-  tool connections = Raj's
-  memory = Raj's
-
-Priya's Invoice Reminder
-  schedule = Monday 10:00
-  tool connections = Priya's
-  memory = Priya's
+```powershell
+uv run python scripts/dev.py api
+uv run python scripts/dev.py worker
+uv run python scripts/dev.py web
 ```
 
-## Target installation flow
+Open `http://localhost:5173`, complete first-run setup if prompted, and open **Packages → Install
+Package**. Select the file created at `$env:TEMP\browser-runtime-demo.nervos`. Review the verified
+signer and content digest and choose **Authorize & Install**. After the package is active, create an
+AgentInstance using `com.acme.browserdemo@1.0.0`, choose a provider and an unused model label, and
+submit a Run. Those fields are required, but the fixture does not call ModelPort and needs no live
+provider credential; it returns `stage-g-browser-runtime-ok` without contacting OpenAI, Anthropic,
+or a package registry. Bootstrap must complete first so package installation can consume the
+prepared local runtime wheels.
 
-```text
-select/download package
-  -> verify hash/signature
-  -> parse manifest
-  -> compatibility check
-  -> show permissions
-  -> user approval
-  -> create isolated install environment
-  -> install dependencies
-  -> create AgentInstance
-  -> collect config
-  -> connect required tools/models
-  -> create memory namespace
-  -> register triggers
-  -> health check
-  -> ready/active
-```
+## Compatibility and security limits
 
-## Updates
+Package dependencies are installed offline from the artifact's exact wheelhouse alongside the exact
+NervOS-controlled SDK and package-host distributions. No package network resolver or runtime `uv`
+requirement is used. This protects the shared NervOS Python environment and gives installed versions
+repeatable dependency environments.
 
-Updates must preserve user-owned config/memory where compatible, show new permissions, run migrations safely, health-check before activation, and support rollback where practical.
+The package-host subprocess and child environment allowlist are defense-in-depth boundaries, not
+containment against malicious code. Stage G does not prevent a package from accessing the host
+filesystem or network, starting child processes, exhausting resources, or exploiting the operating
+system. Do not install artifacts unless their code and signer are acceptable to the operator.
 
-## Uninstall
-
-Distinguish package code from AgentInstance config, memory, artifacts, credentials, tool connections, and shared data. Never unexpectedly delete user data.
-
-## Security
-
-Marketplace packages are untrusted. Production third-party execution eventually requires containment/sandboxing and explicit tool access rather than unrestricted host access.
+Marketplace discovery and publishing, persistent publisher trust, automatic upgrades, hostile-code
+sandboxing, and multi-agent orchestration are outside Stage G.

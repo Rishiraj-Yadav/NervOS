@@ -41,7 +41,7 @@ in-flight run finalization safety, full minimal `/memories` UI, and private quer
 logout. **F5 — integrated acceptance, regression proof, documentation closeout, and Stage-F completion
 — is complete and externally accepted, closing Stage F.** **Workspace/shared memory is NOT
 implemented; FTS/vector/embedding search is NOT implemented.** **Stage G — Agent package system — is
-in progress: its **G0 — Package Architecture, Protocol, Versioning, Trust, and Lifecycle Freeze — is
+complete and externally accepted, pending merge: its **G0 — Package Architecture, Protocol, Versioning, Trust, and Lifecycle Freeze — is
 COMPLETE, externally accepted, and merged**, with the canonical Stage-G master plan at
 `docs/stage-g/README.md` and source-of-authority ADRs 0024–0026. **G1 — Manifest + Public SDK
 Contracts + Package-Aware Definition Resolution Foundation — is COMPLETE, externally accepted, and
@@ -54,11 +54,7 @@ transactional package installation, durable registry, exact package-definition r
 content-addressed offline Python 3.12 environments, immutable Run executable/config snapshots, and
 package-host execution — is COMPLETE and externally accepted.** It preserves the existing Run → Job
 → Attempt → Worker authority and remains a pre-Stage-H runtime/dependency-isolation boundary rather
-than a hostile-code sandbox. **G4 — Package Lifecycle Product Surface — is COMPLETE / EXTERNALLY ACCEPTED, PENDING MERGE.** It adds authenticated package inspection/install/list/detail APIs, atomic
-package-backed AgentInstance creation, schema-validated config updates, side-by-side rebind/rollback,
-obligation-aware removal with `pending_removal`, a thin API-backed CLI, and Packages/Agent lifecycle
-web UI. No migration 0014 was added; G4 uses the existing 0013 schema. Persistent publisher trust and
-sandboxing remain out of scope.
+than a hostile-code sandbox. **G4 — Package Lifecycle Product Surface — is COMPLETE, externally accepted, and merged.** It adds authenticated package inspection/install/list/detail APIs, atomic package-backed AgentInstance creation, schema-validated config updates, side-by-side rebind/rollback, obligation-aware removal with `pending_removal`, a thin API-backed CLI, and Packages/Agent lifecycle UI. No migration 0014 was added; G4 uses the existing 0013 schema. Persistent publisher trust and sandboxing remain out of scope. **G5 — Integrated acceptance and hardening — is COMPLETE and externally accepted, pending merge. Stage G is COMPLETE and externally accepted, pending merge.** Bootstrap prepares real local SDK/package-host wheels which package environment creation consumes fail-closed. The Worker routes package ToolPort calls from the exact Run-pinned verified manifest through the same Stage-D mediator, grant authority, timeout, executor, result normalization, and durable invocation audit used by ToolLoop. Real package-host acceptance proves granted execution and ungranted denial; the supervised browser journey builds and installs a signed package, creates a package AgentInstance, and executes a Run through the real package environment and host. No migration 0014 was added. Stage H has not started and is next.
 
 Stage C — Persistent execution engine is COMPLETE. The C0 architecture freeze, the C1 durable execution foundation, C2 — asynchronous submission and minimal durable Worker execution — C3 — Worker registry/health, expired-lease reconciliation, and fencing hardening — C4 — the safe execution retry engine — C5 — owner cancellation and Attempt execution-timeout orchestration — C6 — authoritative global/per-Agent/per-provider execution concurrency, durable Agent fairness, and full admission backpressure — C7 — public read-only execution observability, the Run Events API, the execution timeline, and the polling model — and C8 — integrated deterministic Stage C acceptance and closeout — are implemented, externally reviewed, and accepted.
 
@@ -74,7 +70,7 @@ no runtime behaviour. **D1 — durable tool, capability, and audit schema is com
 **D5 — MCP client/gateway and connection lifecycle is complete and accepted**.
 **D6 — tool audit, failure semantics, and C3–C6 integration is complete and accepted**.
 **D7 — integrated acceptance and Stage-D closeout is complete and accepted**.
-The next planned stage is **Stage G — Agent package system**.
+The next planned stage is **Stage H — Security isolation**; it has not started.
 
 ## Stage D milestones
 
@@ -111,8 +107,8 @@ The next planned stage is **Stage G — Agent package system**.
 - [x] G1 — Versioned manifest + public Agent SDK contracts + package-aware definition-resolution contracts (complete, externally accepted, and merged)
 - [x] G2 — Deterministic `.nervos` builder + secure verifier (**complete; externally accepted**)
 - [x] G3 — Transactional installation + durable registry + package-backed execution (**complete; externally accepted**)
-- [x] G4 — Lifecycle: upgrade / version coexistence / rollback / uninstall + CLI/API/UI (**complete; externally accepted**)
-- [ ] G5 — Integrated acceptance and Stage-G closeout
+- [x] G4 — Lifecycle: upgrade / version coexistence / rollback / uninstall + CLI/API/UI (**complete, externally accepted, and merged**)
+- [x] G5 — Integrated acceptance and hardening (complete and externally accepted; pending merge)
 
 **E0 is architecture frozen and externally accepted.** It delivered governance only and changed no
 runtime behaviour. It fixed: that **Stage E decides when a Run exists while Stages C and D continue to

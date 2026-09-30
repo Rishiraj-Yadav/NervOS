@@ -11,6 +11,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import BinaryIO, cast
 
+from nervos_core.application.builtin_tools import BUILTIN_SOURCE_REF
 from nervos_core.application.model_completion import (
     INTERNAL_EXECUTION_ERROR,
     ModelCompletion,
@@ -19,10 +20,15 @@ from nervos_core.application.model_completion import (
 from nervos_core.application.model_completion import (
     ModelRequest as CoreModelRequest,
 )
+from nervos_core.application.package_manifest import parse_package_manifest
+from nervos_core.application.tool_invocation_mediator import ToolInvocationMediator
 from nervos_core.application.tool_invocations import ClaimHandle
+from nervos_core.application.tool_registry import ToolRegistry
 from nervos_core.application.trusted_chat import ChatOutcome
 from nervos_core.domain.context import ContextSnapshotData
 from nervos_core.domain.runs import ModelUsage, Run
+from nervos_core.domain.tools import JsonValue
+from nervos_core.infrastructure.database.packages import SqlAlchemyPackageRegistryPersistence
 from nervos_package_host.wire import (
     HOST_PROTOCOL_VERSION,
     MAX_FRAME_BYTES,
@@ -38,8 +44,18 @@ _HOST_CANCEL_GRACE = 1.0
 class PackageExecutionAdapter:
     """Execute one already-authoritative package Attempt; owns no durable lifecycle state."""
 
-    def __init__(self, package_store: Path) -> None:
+    def __init__(
+        self,
+        package_store: Path,
+        *,
+        mediator: ToolInvocationMediator | None = None,
+        registry: ToolRegistry | None = None,
+        packages: SqlAlchemyPackageRegistryPersistence | None = None,
+    ) -> None:
         self._store = package_store.expanduser().resolve(strict=False)
+        self._mediator = mediator
+        self._registry = registry
+        self._packages = packages
 
     async def run(
         self,
@@ -49,14 +65,31 @@ class PackageExecutionAdapter:
         elapsed_ms: int,
         snapshot: ContextSnapshotData | None = None,
     ) -> ChatOutcome:
-        del claim, elapsed_ms
+        del elapsed_ms
         executable = run.executable
         if (
-            executable.package_environment_digest is None
+            executable.installed_package_version_id is None
+            or executable.package_environment_digest is None
             or executable.package_entrypoint is None
             or executable.host_protocol_version != HOST_PROTOCOL_VERSION
         ):
             raise ModelProviderError(INTERNAL_EXECUTION_ERROR)
+        declared_tools: frozenset[str] = frozenset()
+        if self._packages is not None:
+            try:
+                manifest_bytes, _, _ = self._packages.load_verified_bytes(
+                    executable.installed_package_version_id
+                )
+                manifest = parse_package_manifest(manifest_bytes)
+                if (
+                    manifest.package_id != run.agent_key
+                    or manifest.package_version != run.agent_definition_version
+                ):
+                    raise ValueError("pinned package manifest identity does not match the Run")
+                declared_tools = frozenset((*manifest.tools.required, *manifest.tools.optional))
+            except Exception as error:
+                raise ModelProviderError(INTERNAL_EXECUTION_ERROR) from error
+        tool_sequence = 0
         environment = self._store / "environments" / executable.package_environment_digest
         python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
         if not python.is_file():
@@ -103,26 +136,90 @@ class PackageExecutionAdapter:
                     },
                 ),
             )
+            seen_request_ids: set[str] = set()
             while True:
                 message = await _read_frame(process.stdout)
                 message_type = message["type"]
                 if message_type == "model_request":
+                    request_id = str(message["request_id"])
+                    if request_id in seen_request_ids:
+                        raise HostProtocolError("package host reused a protocol request id")
+                    seen_request_ids.add(request_id)
                     model_response = await self._complete_model(completion, message)
                     await _write_frame(
                         process.stdin,
-                        _message("model_response", str(message["request_id"]), model_response),
+                        _message("model_response", request_id, model_response),
                     )
                     continue
                 if message_type == "tool_request":
-                    # Tool authorization remains the existing Stage-D loop authority. This adapter
-                    # has no independent grant or invocation path, so unintegrated package tool
-                    # calls fail closed rather than bypassing that authority.
+                    request_id = message["request_id"]
+                    if request_id in seen_request_ids:
+                        raise HostProtocolError("package host reused a protocol request id")
+                    seen_request_ids.add(str(request_id))
+                    tool_payload = cast("dict[str, object]", message["payload"])
+                    requested_name = tool_payload.get("name")
+                    raw_arguments = tool_payload.get("arguments", {})
+                    if (
+                        not isinstance(requested_name, str)
+                        or requested_name not in declared_tools
+                        or not isinstance(raw_arguments, dict)
+                        or self._registry is None
+                        or self._mediator is None
+                    ):
+                        tool_response = {
+                            "content": {
+                                "text": "The requested tool is not available to this agent."
+                            },
+                            "is_error": True,
+                        }
+                    else:
+                        descriptors = await self._registry.source(BUILTIN_SOURCE_REF).list_tools()
+                        descriptor = next(
+                            (item for item in descriptors if item.upstream_name == requested_name),
+                            None,
+                        )
+                        if descriptor is None:
+                            tool_response = {
+                                "content": {
+                                    "text": "The requested tool is not available to this agent."
+                                },
+                                "is_error": True,
+                            }
+                        else:
+                            typed_arguments = cast("dict[str, JsonValue]", raw_arguments)
+                            tool_sequence += 1
+                            result = await self._mediator.invoke(
+                                descriptor=descriptor,
+                                arguments=typed_arguments,
+                                run=run,
+                                claim=claim,
+                                tool_sequence=tool_sequence,
+                                provider_call_id=f"package-{claim.attempt_id}-{tool_sequence}",
+                            )
+                            if result.denied or result.result is None:
+                                note = (
+                                    "The tool call arguments were not valid."
+                                    if result.invalid_arguments
+                                    else "The tool call was denied."
+                                )
+                                tool_response = {
+                                    "content": {"text": note},
+                                    "is_error": True,
+                                }
+                            else:
+                                tool_response = {
+                                    "content": {
+                                        "text": result.result.text,
+                                        "structured": result.result.structured,
+                                    },
+                                    "is_error": result.failed,
+                                }
                     await _write_frame(
                         process.stdin,
                         _message(
                             "tool_response",
-                            str(message["request_id"]),
-                            {"content": {}, "is_error": True},
+                            str(request_id),
+                            tool_response,
                         ),
                     )
                     continue

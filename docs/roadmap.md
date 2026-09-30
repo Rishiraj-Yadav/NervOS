@@ -60,20 +60,20 @@ Conversations, messages, deterministic context assembly, agent-private memory, u
 
 **F0 (architecture freeze), F1 (durable Conversations, Turns, Messages, and Run linkage), F2 (ContextBuilder, mandatory RunContextSnapshot, deterministic compaction), F3 (AGENT/USER scoped memory, provenance, and deterministic retrieval), F4 (Conversation and memory lifecycle, delete, and minimal UI), and F5 (Integrated acceptance and Stage-F closeout) are complete and externally accepted.**
 
-Outcome: persistent useful agent context. Stage G is in progress (G0 and G1 complete).
+Outcome: persistent useful agent context. Stage F is complete. Stage G is complete and externally accepted, pending merge; Stage H is next.
 
 ## Stage G — Agent package system
 
 `.nervos` package contract, manifest validation, config schema, dependency install, package verification/signatures, install/update/uninstall/rollback.
 
-Outcome: agents become installable software.
+Outcome: agents become installable software. G0–G5 are complete and externally accepted, pending merge. Stage H has not started and is next.
 
 - **G0 — Package architecture, protocol, versioning, trust, and lifecycle freeze:** canonical Stage-G master plan `docs/stage-g/README.md` and ADRs 0024–0026. Governance/documentation only; **complete, externally accepted, and merged**.
 - **G1 — Versioned manifest + public Agent SDK + definition-resolution contracts:** manifest/domain types, strict manifest parser, SemVer/identity/compatibility/config-schema validation, `nervos-sdk`, resolver/source interfaces, in-memory/static package definition source, built-in compatibility. **Complete, externally accepted, and merged.** No durable package tables.
 - **G2 — deterministic `.nervos` builder + verifier:** canonical package construction, archive validation, content digest, Ed25519 verification, tamper detection, pure-Python wheelhouse validation, cross-platform safe format. **Complete; externally accepted.** No installation, durable registry, package execution, persistent publisher trust, or sandbox.
 - **G3 — Transactional installation + durable registry + package-backed execution:** package-registry migration, SQL-backed definition source, installation state machine, storage, isolated dependency environment, config snapshot + immutable Run semantics, exact executable pinning, package-host subprocess, activation health check. **Complete; externally accepted.**
-- **G4 — Lifecycle:** side-by-side versions, explicit upgrade/rebind with capability delta, rollback, uninstall, unified CLI/API/UI lifecycle surfaces. **Complete; externally accepted, pending merge.**
-- **G5 — Integrated acceptance and Stage-G closeout.** **Next.**
+- **G4 — Lifecycle:** side-by-side versions, explicit upgrade/rebind with capability delta, rollback, uninstall, unified CLI/API/UI lifecycle surfaces. **Complete, externally accepted, and merged.**
+- **G5 — Integrated acceptance and hardening.** Complete and externally accepted, pending merge. Bootstrap prepares real local runtime wheels; package ToolPort requests from the Run-pinned signed manifest use the shared Stage-D mediator and durable audit; real-host tests prove granted execution and ungranted denial; the supervised browser E2E installs and runs a signed package offline. Stage H has not started and is next.
 
 ## Stage H — Security isolation
 
