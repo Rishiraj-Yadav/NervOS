@@ -129,7 +129,7 @@ pnpm workspace members:
 
 - `apps/web`
 
-`apps/worker` is the active Stage C execution plane: a real process entrypoint that owns no HTTP surface, never runs Alembic, and holds provider credentials exclusively. It durably registers its process incarnation, heartbeats that registration, reconciles expired Job claims, claims queued Jobs, renews leases, executes the immutable Run snapshot, and terminalizes Attempt, Job, and Run. `apps/marketplace`, `packages/nervos-sdk`, and `packages/nervos-mcp` remain future placeholders: they are not active workspaces and contain no implemented behavior. `packages/nervos-core` holds the domain/application logic and `packages/nervos-models` holds the concrete model-provider adapters, currently exactly two — canonical `anthropic` and canonical `openai`.
+`apps/worker` is the active Stage C execution plane: a real process entrypoint that owns no HTTP surface, never runs Alembic, and holds provider credentials exclusively. It durably registers its process incarnation, heartbeats that registration, reconciles expired Job claims, claims queued Jobs, renews leases, executes the immutable Run snapshot, and terminalizes Attempt, Job, and Run. `packages/nervos-sdk` supplies the public package Agent contract and `packages/nervos-mcp` implements the mediated MCP integration. Marketplace integration remains future work. `packages/nervos-core` holds the domain/application logic and `packages/nervos-models` holds the concrete model-provider adapters, canonical `anthropic`, `openai`, and `gemini` (Google Gemini Developer API).
 
 ## Configuration and security
 

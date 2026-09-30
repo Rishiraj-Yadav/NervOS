@@ -57,7 +57,7 @@ CANCEL_DISCOVERY_TIMEOUT_SECONDS = 40
 # top of the per-prompt counts in `assert_retry_journey` and `assert_cancellation_journey`, so an
 # unexpected extra invocation anywhere — including a cancelled Run being executed again — still
 # fails the journey.
-TOTAL_PROVIDER_CALLS = 8
+TOTAL_PROVIDER_CALLS = 9
 
 # Stage-D tool journey. One prompt whose scripted model turn asks for the one tool the supervisor
 # grants, then concludes, so the browser observes a real tool lifecycle on the timeline. No grant
@@ -255,6 +255,7 @@ def e2e_environment(database: Path, package_store: Path, web_origin: str) -> dic
     environment = os.environ.copy()
     environment.pop("ANTHROPIC_API_KEY", None)
     environment.pop("OPENAI_API_KEY", None)
+    environment.pop("GEMINI_API_KEY", None)
     environment.update(
         {
             "NERVOS_ENVIRONMENT": "test",

@@ -2,15 +2,15 @@
 
 The API needs no provider at all now: it accepts Runs without a credential and executes none.
 This module therefore reduces to the *production* application plus two negative controls —
-the composition must hold no configured provider (proving the supervisor stripped both keys)
-and must know exactly the two supported provider identifiers. Running the real API with an
+the composition must hold no configured provider (proving the supervisor stripped provider keys)
+and must know every supported provider identifier. Running the real API with an
 unconfigured catalog is a genuine control: any accidental API-side `resolve()` would raise and
 fail the journey loudly instead of silently making a call.
 """
 
 from __future__ import annotations
 
-from deterministic import ANTHROPIC_ID, OPENAI_ID
+from deterministic import ANTHROPIC_ID, GEMINI_ID, OPENAI_ID
 from fastapi import FastAPI
 from nervos_api.app import create_app as create_production_app
 from nervos_core.application.model_providers import ModelProviderCatalog
@@ -23,7 +23,7 @@ def create_app() -> FastAPI:
 
     if catalog.configured_ids:
         raise RuntimeError("production composition had a configured provider credential")
-    for identifier in (ANTHROPIC_ID, OPENAI_ID):
+    for identifier in (ANTHROPIC_ID, OPENAI_ID, GEMINI_ID):
         if not catalog.is_known(identifier):
             raise RuntimeError(f"production composition does not know {identifier}")
     if "run_coordinator" in vars(app.state) or "run_executor" in vars(app.state):

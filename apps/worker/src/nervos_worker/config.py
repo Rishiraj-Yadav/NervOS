@@ -21,6 +21,7 @@ LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
 # deliberately bypassed so the operator's standard process variables are used.
 ANTHROPIC_API_KEY_VARIABLE = "ANTHROPIC_API_KEY"
 OPENAI_API_KEY_VARIABLE = "OPENAI_API_KEY"
+GEMINI_API_KEY_VARIABLE = "GEMINI_API_KEY"
 
 
 class WorkerSettings(BaseSettings):
@@ -60,8 +61,14 @@ class WorkerSettings(BaseSettings):
         repr=False,
         exclude=True,
     )
+    gemini_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=GEMINI_API_KEY_VARIABLE,
+        repr=False,
+        exclude=True,
+    )
 
-    @field_validator("anthropic_api_key", "openai_api_key", mode="before")
+    @field_validator("anthropic_api_key", "openai_api_key", "gemini_api_key", mode="before")
     @classmethod
     def normalize_provider_api_key(cls, value: object) -> object:
         """Treat an absent, empty, or whitespace-only credential as unconfigured."""

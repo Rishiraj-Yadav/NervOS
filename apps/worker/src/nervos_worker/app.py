@@ -115,7 +115,10 @@ def create_worker(settings: WorkerSettings | None = None) -> WorkerComposition:
     openai_secret = (
         resolved.openai_api_key.get_secret_value() if resolved.openai_api_key is not None else None
     )
-    providers = compose_model_providers(anthropic_secret, openai_secret)
+    gemini_secret = (
+        resolved.gemini_api_key.get_secret_value() if resolved.gemini_api_key is not None else None
+    )
+    providers = compose_model_providers(anthropic_secret, openai_secret, gemini_secret)
     completions = resolve_completions(providers)
     tool_definitions = SqlAlchemyToolDefinitionPersistence(engine)
     tool_registry = create_builtin_tool_registry(tool_definitions, clock=utc_now)

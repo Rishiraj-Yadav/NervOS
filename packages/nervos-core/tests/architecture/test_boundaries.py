@@ -347,8 +347,8 @@ def test_provider_sdk_exists_only_in_the_models_infrastructure_package() -> None
         module for path in python_files(MODELS_SOURCE) for module in imported_modules(path)
     }
 
-    # B4 adds a second concrete SDK; the boundary rule is unchanged for both.
-    for sdk in ("anthropic", "openai"):
+    # Concrete SDKs stay in the provider implementation package.
+    for sdk in ("anthropic", "openai", "google.genai"):
         assert not any(module.startswith(sdk) for module in core_imports), sdk
         assert any(module.startswith(sdk) for module in model_imports), sdk
         assert not any(
@@ -375,19 +375,21 @@ def test_api_routes_never_reach_persistence_or_a_provider_adapter() -> None:
         assert not any(module.startswith("sqlalchemy") for module in imports), path
         assert not any(module.startswith("nervos_core.infrastructure") for module in imports), path
         assert not any(
-            module.startswith(("anthropic", "openai", "nervos_models")) for module in imports
+            module.startswith(("anthropic", "openai", "google.genai", "nervos_models"))
+            for module in imports
         ), path
         for forbidden in ("AgentPersistence", "SqlAlchemyAgentPersistence", "Session", "Base"):
             assert forbidden not in text, (path, forbidden)
 
 
-def test_exactly_two_production_providers_are_known() -> None:
-    """Portability is two reviewed adapters, not open-ended discovery."""
+def test_exactly_three_production_providers_are_known() -> None:
+    """Provider portability is explicit, not open-ended discovery."""
     text = (MODELS_SOURCE / "composition.py").read_text(encoding="utf-8")
 
     assert "PROVIDER_ID as ANTHROPIC_PROVIDER_ID" in text
     assert "PROVIDER_ID as OPENAI_PROVIDER_ID" in text
-    assert "known=[ANTHROPIC_PROVIDER_ID, OPENAI_PROVIDER_ID]" in text
+    assert "PROVIDER_ID as GEMINI_PROVIDER_ID" in text
+    assert "known=[ANTHROPIC_PROVIDER_ID, OPENAI_PROVIDER_ID, GEMINI_PROVIDER_ID]" in text
     for dynamic in ("pkgutil", "importlib", "iter_entry_points", "setuptools"):
         assert dynamic not in text, dynamic
 
@@ -396,7 +398,7 @@ def test_trusted_chat_and_execution_stay_provider_neutral() -> None:
     """No provider-specific branch may appear in the shared execution path."""
     for name in ("trusted_chat.py", "run_execution.py", "job_execution.py", "model_completion.py"):
         text = (CORE_APPLICATION / name).read_text(encoding="utf-8")
-        for provider in ("anthropic", "openai", "Anthropic", "OpenAI"):
+        for provider in ("anthropic", "openai", "gemini", "Anthropic", "OpenAI", "Gemini"):
             assert provider not in text, (name, provider)
 
 
@@ -576,12 +578,15 @@ def test_the_control_plane_cannot_execute_or_hold_a_credential() -> None:
             "RunCoordinator",
             "ANTHROPIC_API_KEY",
             "OPENAI_API_KEY",
+            "GEMINI_API_KEY",
             "AsyncAnthropic",
             "AsyncOpenAI",
             "anthropic_api_key",
             "openai_api_key",
+            "gemini_api_key",
             "anthropic",
             "openai",
+            "gemini",
         ):
             assert forbidden not in text, (path, forbidden)
 
@@ -690,10 +695,12 @@ def test_c3_reclamation_did_not_become_a_generic_retry_processor() -> None:
     assert "JobStatus.RETRY_WAIT" not in reclaim_body
 
 
-def test_both_provider_adapters_keep_sdk_retries_disabled() -> None:
+def test_all_provider_adapters_keep_sdk_retries_disabled() -> None:
     for name in ("anthropic.py", "openai.py"):
         text = (MODELS_SOURCE / name).read_text(encoding="utf-8")
         assert "max_retries=0" in text, name
+    gemini = (MODELS_SOURCE / "gemini.py").read_text(encoding="utf-8")
+    assert "HttpRetryOptions(attempts=1)" in gemini
 
 
 def test_base_metadata_create_all_is_not_used() -> None:
@@ -1242,7 +1249,7 @@ def test_the_tool_audit_path_stays_provider_neutral() -> None:
     )
     for path in modules:
         text = path.read_text(encoding="utf-8")
-        for provider in ("anthropic", "openai", "Anthropic", "OpenAI"):
+        for provider in ("anthropic", "openai", "gemini", "Anthropic", "OpenAI", "Gemini"):
             assert provider not in text, (path.name, provider)
 
 
@@ -1355,7 +1362,9 @@ def test_nervos_mcp_never_reaches_the_model_provider_adapters() -> None:
         imports = imported_modules(path)
         assert not any(module.startswith("nervos_models") for module in imports), path
         assert not any(
-            module.startswith(sdk) for sdk in ("anthropic", "openai") for module in imports
+            module.startswith(sdk)
+            for sdk in ("anthropic", "openai", "google.genai")
+            for module in imports
         ), path
 
 

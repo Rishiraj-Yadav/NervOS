@@ -9,6 +9,7 @@ import pytest
 from nervos_core.application.model_completion import ModelRequest, ModelResponse
 from nervos_worker.app import create_worker
 from nervos_worker.config import WorkerSettings
+from nervos_worker.package_execution import package_host_environment
 from sqlalchemy import text
 
 SENTINEL_CREDENTIAL = "SYNTHETIC-LEAK-DO-NOT-PERSIST"
@@ -20,6 +21,9 @@ def test_the_worker_reads_credentials_only_locally(
     """The key builds its client once; nothing reachable afterwards carries the value."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", SENTINEL_CREDENTIAL)
     monkeypatch.setenv("OPENAI_API_KEY", SENTINEL_CREDENTIAL)
+    monkeypatch.setenv("GEMINI_API_KEY", SENTINEL_CREDENTIAL)
+    assert "GEMINI_API_KEY" not in package_host_environment()
+    assert SENTINEL_CREDENTIAL not in str(package_host_environment())
     settings = WorkerSettings(database_path=tmp_path / "creds.db")
 
     with caplog.at_level(logging.DEBUG):

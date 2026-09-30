@@ -7,8 +7,10 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from google.genai import types
 from nervos_core.application.agent_definitions import create_composite_agent_definition_resolver
 from nervos_core.application.agents import AgentService
 from nervos_core.application.builtin_tools import (
@@ -44,6 +46,7 @@ from nervos_core.infrastructure.database.tools import (
     SqlAlchemyToolPermissionPersistence,
 )
 from nervos_models import compose_model_providers
+from nervos_models.gemini import GeminiModelCompletion
 from nervos_worker.package_execution import PackageExecutionAdapter
 from sqlalchemy import text
 
@@ -56,7 +59,7 @@ from package_fixtures import (  # pyright: ignore[reportMissingImports]
     VALID_CONFIG_SCHEMA,
     build_wheel_bytes,
 )
-from support import NOW, RecordingCompletion, build_worker, migrate, run_until_stopped
+from support import NOW, build_worker, migrate, run_until_stopped
 
 ROOT = Path(__file__).resolve().parents[4]
 
@@ -105,18 +108,25 @@ resources:
     max_model_calls: 2
     max_tool_calls: 2
 """
-        entrypoint = b"""from nervos_sdk import AgentResult, ToolRequest
+        entrypoint = b"""from nervos_sdk import AgentResult, ModelMessage, ModelRequest, ToolRequest
 
 class InvoiceAgent:
     async def run(self, context):
+        assert context.model is not None
+        answer = await context.model.complete(
+            ModelRequest(
+                messages=[ModelMessage(role="user", content=context.input["text"])],
+                model="offline-test-model",
+            )
+        )
         result = await context.tools.invoke(
             ToolRequest(name="calculate", arguments={"expression": "19 + 23"})
         )
         if result.is_error:
             return AgentResult(final_message="stage-g-real-runtime-denied")
         value = result.content.get("structured", {}).get("result")
-        return AgentResult(final_message=f"stage-g-real-runtime-ok:{value}")
-"""
+        return AgentResult(final_message=f"stage-g-real-runtime-ok:{value}:{answer.output_text}")
+        """
         agent_wheel = build_wheel_bytes(members={"acme_invoice/agent.py": entrypoint})
         signer = Ed25519PackageSigner.from_private_bytes(TEST_SIGNING_SEED)
         archive = package_build_bytes(
@@ -156,7 +166,7 @@ class InvoiceAgent:
             package_id="com.acme.runtime",
             package_version="1.0.0",
             display_name="Runtime Agent",
-            model_provider="anthropic",
+            model_provider="gemini",
             model_name="offline-test-model",
             config={},
         )
@@ -192,7 +202,26 @@ class InvoiceAgent:
         resolver = create_composite_agent_definition_resolver(
             [SqlInstalledPackageDefinitionSource(engine)]
         )
-        completion = RecordingCompletion()
+
+        class FakeGeminiModels:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            async def generate_content(self, **kwargs: object) -> types.GenerateContentResponse:
+                self.calls.append(kwargs)
+                return types.GenerateContentResponse(
+                    candidates=[
+                        types.Candidate(
+                            content=types.Content(
+                                role="model", parts=[types.Part(text="Gemini package answer")]
+                            ),
+                            finish_reason=types.FinishReason.STOP,
+                        )
+                    ]
+                )
+
+        fake_models = FakeGeminiModels()
+        completion = GeminiModelCompletion(SimpleNamespace(aio=SimpleNamespace(models=fake_models)))  # type: ignore[arg-type]
         agent_service = AgentService(
             SqlAlchemyAgentPersistence(create_session_factory(engine)),
             resolver,
@@ -205,15 +234,16 @@ class InvoiceAgent:
         assert run.executable.package_environment_digest is not None
         worker = build_worker(
             engine,
-            {"anthropic": completion},
+            {"gemini": completion},
             package_execution=adapter,
         )
         await run_until_stopped(worker, engine)
 
         result = agent_service.get_run(1, run.id)
         assert result.status is RunStatus.SUCCEEDED
-        assert result.output_text == "stage-g-real-runtime-ok:42"
-        assert completion.calls == 0
+        assert result.output_text == "stage-g-real-runtime-ok:42:Gemini package answer"
+        assert len(fake_models.calls) == 1
+        assert fake_models.calls[0]["model"] == "offline-test-model"
         with engine.connect() as connection:
             invocation = connection.execute(
                 text("SELECT upstream_name, status FROM tool_invocations WHERE run_id=:run_id"),
@@ -232,7 +262,7 @@ class InvoiceAgent:
         denied_run = agent_service.submit_run(1, instance.id, "request the declared tool again")
         denied_worker = build_worker(
             engine,
-            {"anthropic": completion},
+            {"gemini": completion},
             worker_id="worker-2",
             package_execution=adapter,
         )
@@ -240,6 +270,7 @@ class InvoiceAgent:
         denied_result = agent_service.get_run(1, denied_run.id)
         assert denied_result.status is RunStatus.SUCCEEDED
         assert denied_result.output_text == "stage-g-real-runtime-denied"
+        assert len(fake_models.calls) == 2
         with engine.connect() as connection:
             denied_invocation = connection.execute(
                 text(

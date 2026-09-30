@@ -11,8 +11,10 @@ from pydantic import ValidationError
 CREDENTIAL_VARIABLES = (
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
     "NERVOS_ANTHROPIC_API_KEY",
     "NERVOS_OPENAI_API_KEY",
+    "NERVOS_GEMINI_API_KEY",
 )
 
 
@@ -32,6 +34,7 @@ def test_defaults_match_the_approved_configuration(tmp_path: Path) -> None:
     assert settings.max_active_jobs == 4
     assert settings.worker_ready_file is None
     assert settings.anthropic_api_key is None and settings.openai_api_key is None
+    assert settings.gemini_api_key is None
 
 
 @pytest.mark.parametrize(
@@ -54,6 +57,7 @@ def test_credentials_read_the_exact_external_variables(
     monkeypatch.setenv("ANTHROPIC_API_KEY", "synthetic-anthropic")
     monkeypatch.setenv("OPENAI_API_KEY", "synthetic-openai")
     monkeypatch.setenv("NERVOS_ANTHROPIC_API_KEY", "must-not-be-read")
+    monkeypatch.setenv("GEMINI_API_KEY", "synthetic-gemini")
 
     settings = WorkerSettings()
 
@@ -61,6 +65,8 @@ def test_credentials_read_the_exact_external_variables(
     assert settings.anthropic_api_key.get_secret_value() == "synthetic-anthropic"
     assert settings.openai_api_key is not None
     assert settings.openai_api_key.get_secret_value() == "synthetic-openai"
+    assert settings.gemini_api_key is not None
+    assert settings.gemini_api_key.get_secret_value() == "synthetic-gemini"
 
 
 @pytest.mark.parametrize("blank", ["", "   ", "\t\r\n"])
@@ -69,11 +75,13 @@ def test_a_blank_credential_is_treated_as_unconfigured(
 ) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", blank)
     monkeypatch.setenv("OPENAI_API_KEY", blank)
+    monkeypatch.setenv("GEMINI_API_KEY", blank)
 
     settings = WorkerSettings()
 
     assert settings.anthropic_api_key is None
     assert settings.openai_api_key is None
+    assert settings.gemini_api_key is None
 
 
 def test_no_credential_appears_in_repr_or_serialization(
@@ -81,14 +89,17 @@ def test_no_credential_appears_in_repr_or_serialization(
 ) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "SYNTHETIC-WORKER-CREDENTIAL")
     monkeypatch.setenv("OPENAI_API_KEY", "SYNTHETIC-SECOND-WORKER-CREDENTIAL")
+    monkeypatch.setenv("GEMINI_API_KEY", "SYNTHETIC-GEMINI-WORKER-CREDENTIAL")
 
     settings = WorkerSettings()
 
     for rendered in (repr(settings), str(settings.model_dump()), str(settings)):
         assert "SYNTHETIC-WORKER-CREDENTIAL" not in rendered
         assert "SYNTHETIC-SECOND-WORKER-CREDENTIAL" not in rendered
+        assert "SYNTHETIC-GEMINI-WORKER-CREDENTIAL" not in rendered
     assert "anthropic_api_key" not in settings.model_dump()
     assert "openai_api_key" not in settings.model_dump()
+    assert "gemini_api_key" not in settings.model_dump()
 
 
 def test_database_path_is_expanded_and_resolved(

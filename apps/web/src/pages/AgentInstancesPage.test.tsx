@@ -107,7 +107,7 @@ describe("agent list page", () => {
     expect(screen.getByLabelText("Agent definition")).toHaveValue("nervos.chat v1");
   });
 
-  it("offers exactly the two supported providers and no discovery request", async () => {
+  it("offers the supported providers and no discovery request", async () => {
     let providerListCalls = 0;
     server.use(
       ...signedIn(),
@@ -127,8 +127,42 @@ describe("agent list page", () => {
     expect(options).toEqual([
       { value: "anthropic", label: "Anthropic" },
       { value: "openai", label: "OpenAI" },
+      { value: "gemini", label: "Gemini" },
     ]);
     expect(providerListCalls).toBe(0);
+  });
+
+  it("creates an instance with the explicitly selected Gemini provider", async () => {
+    let body: unknown = null;
+    server.use(
+      ...signedIn(),
+      http.post("/api/v1/agent-instances", async ({ request }) => {
+        body = await request.json();
+        return HttpResponse.json(
+          apiAgentInstance({ display_name: "Gemini Chat", model_provider: "gemini" }),
+          { status: 201 },
+        );
+      }),
+      http.get("/api/v1/agent-instances/1", () =>
+        HttpResponse.json(apiAgentInstance({ display_name: "Gemini Chat", model_provider: "gemini" })),
+      ),
+      http.get("/api/v1/agent-instances/1/runs", () =>
+        HttpResponse.json({ items: [], next_before_id: null }),
+      ),
+    );
+    const { user } = await renderRoute("/agents");
+    await user.click(await screen.findByRole("button", { name: /create a chat agent/i }));
+    await user.type(screen.getByLabelText("Display name"), "Gemini Chat");
+    await user.selectOptions(screen.getByLabelText("Model provider"), "gemini");
+    await user.type(screen.getByLabelText("Model"), "opaque/gemini-model");
+    await user.click(screen.getByRole("button", { name: /^create agent$/i }));
+
+    await screen.findByRole("heading", { name: "Gemini Chat" });
+    expect(body).toMatchObject({
+      display_name: "Gemini Chat",
+      model_provider: "gemini",
+      model_name: "opaque/gemini-model",
+    });
   });
 
   it("creates an instance with the explicitly selected second provider", async () => {

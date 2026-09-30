@@ -167,8 +167,8 @@ test("completes the Stage A setup and authentication journey", async ({ page }) 
   await expect(page.getByRole("heading", { name: /welcome back/i })).toBeVisible();
   await expect(page.getByRole("heading", { name: /nervos is ready/i })).toHaveCount(0);
 
-  // --- Stage B: deterministic two-provider portability journey ---
-  // The supervisor removes both provider credentials and installs two offline fakes.
+  // --- Stage B: deterministic three-provider portability journey ---
+  // The supervisor removes provider credentials and installs offline fakes.
   await page.getByLabel(/^username$/i).fill(username);
   await page.getByLabel(/^password$/i).fill(password);
   await page.getByRole("button", { name: /sign in/i }).click();
@@ -231,6 +231,16 @@ test("completes the Stage A setup and authentication journey", async ({ page }) 
   });
   await expect(page.getByText("anthropic · opaque/e2e-model")).toBeVisible();
   await expect(page.getByText("openai · opaque/openai-e2e-model")).toBeVisible();
+  await page.getByLabel("Model provider").selectOption("gemini");
+  await page.getByLabel("Model", { exact: true }).fill("opaque/gemini-e2e-model");
+  await page.getByRole("button", { name: /save configuration/i }).click();
+  await page.getByLabel("Message").fill("third question from the browser");
+  await page.getByRole("button", { name: /run agent/i }).click();
+  await expect(page.getByText(/Deterministic Gemini reply from NervOS\./)).toBeVisible({
+    timeout: ASYNC_TIMEOUT,
+  });
+  await page.reload();
+  await expect(page.getByText("gemini · opaque/gemini-e2e-model")).toBeVisible();
   // C4 proof: a positively safe provider failure is retried durably instead of terminalized.
   // The supervisor scripts this one prompt's first Anthropic call to be refused with a
   // normalized rate limit, so this Run can only reach a final answer if the Worker committed a
