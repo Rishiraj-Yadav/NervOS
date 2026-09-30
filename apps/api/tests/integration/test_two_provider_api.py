@@ -17,6 +17,7 @@ from nervos_core.application.model_providers import ModelProviderCatalog
 
 PROVIDER_ID = "anthropic"
 SECOND_PROVIDER_ID = "openai"
+THIRD_PROVIDER_ID = "gemini"
 INSTANCES = "/api/v1/agent-instances"
 ORIGIN = {"Origin": "http://localhost:5173"}
 
@@ -50,12 +51,14 @@ def bare_catalog() -> ModelProviderCatalog:
     return ModelProviderCatalog([], known=[PROVIDER_ID, SECOND_PROVIDER_ID])
 
 
-def create_instance(client: TestClient, provider: str, model: str) -> dict[str, Any]:
+def create_instance(
+    client: TestClient, provider: str, model: str, *, definition_version: str = "1"
+) -> dict[str, Any]:
     response = client.post(
         INSTANCES,
         json={
             "agent_key": "nervos.chat",
-            "agent_definition_version": "1",
+            "agent_definition_version": definition_version,
             "display_name": "Two provider",
             "model_provider": provider,
             "model_name": model,
@@ -126,6 +129,30 @@ def test_a_known_but_locally_unconfigured_provider_is_accepted(
     assert body["status"] == "created"
     assert body["model_provider"] == SECOND_PROVIDER_ID
     assert body["output_text"] is None and body["error_code"] is None
+
+
+def test_gemini_uses_the_same_credential_blind_acceptance_path(
+    owner_client: TestClient, install_provider_catalog: Callable[..., None]
+) -> None:
+    """The API accepts Gemini by canonical id without holding or invoking its credential."""
+    catalog = ModelProviderCatalog([], known=[PROVIDER_ID, SECOND_PROVIDER_ID, THIRD_PROVIDER_ID])
+    install_provider_catalog(catalog)
+
+    created = create_instance(owner_client, THIRD_PROVIDER_ID, "opaque/gemini-model")
+    response = submit(owner_client, created["id"])
+    tool_agent = create_instance(
+        owner_client,
+        THIRD_PROVIDER_ID,
+        "opaque/gemini-tool-model",
+        definition_version="2",
+    )
+    tool_response = submit(owner_client, tool_agent["id"])
+
+    assert response.status_code == 202, response.text
+    assert response.json()["model_provider"] == THIRD_PROVIDER_ID
+    assert tool_response.status_code == 202, tool_response.text
+    assert tool_response.json()["model_provider"] == THIRD_PROVIDER_ID
+    assert catalog.is_configured(THIRD_PROVIDER_ID) is False
 
 
 def test_each_run_keeps_its_own_immutable_provider_snapshot(

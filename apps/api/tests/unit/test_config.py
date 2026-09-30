@@ -19,6 +19,8 @@ VARIABLES = (
     "NERVOS_ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
     "NERVOS_OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "NERVOS_GEMINI_API_KEY",
 )
 
 
@@ -34,14 +36,17 @@ def test_the_api_settings_cannot_represent_a_provider_credential(
     """Execution is a Worker capability, so the control plane holds no key at all."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "synthetic-anthropic-credential")
     monkeypatch.setenv("OPENAI_API_KEY", "synthetic-openai-credential")
+    monkeypatch.setenv("GEMINI_API_KEY", "synthetic-gemini-credential")
     settings = Settings()
 
     assert not hasattr(settings, "anthropic_api_key")
     assert not hasattr(settings, "openai_api_key")
+    assert not hasattr(settings, "gemini_api_key")
     assert not hasattr(settings, "without_provider_credentials")
     dumped = settings.model_dump()
     assert "anthropic_api_key" not in dumped
     assert "openai_api_key" not in dumped
+    assert "gemini_api_key" not in dumped
     assert set(dumped) == {
         "environment",
         "database_path",
@@ -60,7 +65,7 @@ def test_the_api_settings_cannot_represent_a_provider_credential(
         "mcp_credential_aliases",
     }
     for field in type(settings).model_fields:
-        assert "anthropic" not in field and "openai" not in field
+        assert "anthropic" not in field and "openai" not in field and "gemini" not in field
     # The alias field names aliases and their targets; it can never hold a secret, because resolving
     # one requires an environment variable this process does not read.
     assert isinstance(settings.mcp_credential_aliases, str)

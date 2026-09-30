@@ -47,6 +47,7 @@ def test_e2e_environment_strips_the_provider_credential(
     e2e = load_module()
     monkeypatch.setenv("ANTHROPIC_API_KEY", "SYNTHETIC-E2E-CREDENTIAL-DO-NOT-USE")
     monkeypatch.setenv("OPENAI_API_KEY", "SYNTHETIC-SECOND-CREDENTIAL-DO-NOT-USE")
+    monkeypatch.setenv("GEMINI_API_KEY", "SYNTHETIC-GEMINI-CREDENTIAL-DO-NOT-USE")
 
     environment = e2e.e2e_environment(
         tmp_path / "nervos-e2e.db", tmp_path / "packages", "http://127.0.0.1:5173"
@@ -54,6 +55,7 @@ def test_e2e_environment_strips_the_provider_credential(
 
     assert "ANTHROPIC_API_KEY" not in environment
     assert "OPENAI_API_KEY" not in environment
+    assert "GEMINI_API_KEY" not in environment
     assert environment["NERVOS_ENVIRONMENT"] == "test"
     assert environment["NERVOS_DATABASE_PATH"] == str(tmp_path / "nervos-e2e.db")
     assert environment["NERVOS_PACKAGE_STORE"] == str(tmp_path / "packages")
@@ -73,6 +75,7 @@ def test_e2e_environment_is_complete_without_a_credential(
 
     assert "ANTHROPIC_API_KEY" not in environment
     assert "OPENAI_API_KEY" not in environment
+    assert "GEMINI_API_KEY" not in environment
     assert environment["NERVOS_ENVIRONMENT"] == "test"
 
 
@@ -190,7 +193,7 @@ def test_run_e2e_detects_default_database_mutation_after_owned_cleanup(
         return None
 
     def fake_worker_ready(*_args: object) -> str:
-        return "schema_revision=test\nproviders=anthropic,openai\n"
+        return "schema_revision=test\nproviders=anthropic,gemini,openai\n"
 
     monkeypatch.setattr(e2e, "DEFAULT_DATABASE", default_database)
     monkeypatch.setattr(e2e.tempfile, "TemporaryDirectory", TemporaryDirectory)

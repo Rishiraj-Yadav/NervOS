@@ -37,8 +37,22 @@ Global, per-Agent-Instance, and per-provider **execution** concurrency is not op
 | `NERVOS_MAX_ACTIVE_JOBS` | `4` | Tightening-only ceiling on live Jobs this Worker holds. Integer from 1 through 16. It may under-claim relative to the execution-concurrency policy, and it can never raise it. |
 | `ANTHROPIC_API_KEY` | unavailable | Optional process-only credential for Anthropic. Empty or whitespace-only values mean unavailable. Read only by the Worker. |
 | `OPENAI_API_KEY` | unavailable | Optional process-only credential for OpenAI Responses. Empty or whitespace-only values mean unavailable. Read only by the Worker. |
+| `GEMINI_API_KEY` | unavailable | Optional process-only credential for the Google Gemini Developer API (AI Studio), not Vertex AI. Empty or whitespace-only values mean unavailable. Read only by the Worker. |
 | `NERVOS_WORKER_READY_FILE` | unset | Test-only readiness marker path used by the deterministic E2E supervisor. Production should not set it. |
 
 A Worker claims only Jobs whose `model_provider` is in its configured provider set. A Worker with no provider credentials starts successfully, claims nothing, and fails nothing.
+
+### Use Gemini Developer API
+
+Create an API key in [Google AI Studio](https://aistudio.google.com/apikey). Set it only in the Worker process environment, then restart the Worker. For example, in PowerShell:
+
+```powershell
+$env:GEMINI_API_KEY="<your-api-key>"
+uv run python scripts/dev.py worker
+```
+
+In NervOS, create a Chat or package Agent Instance, select **Gemini**, and enter an exact Gemini Developer API model ID in **Model**. The model name is stored as entered and is checked when a Run executes. The API accepts a Gemini Run even if no Gemini-capable Worker is currently running; the Run waits in the durable queue until one is available. This integration uses the Gemini Developer API with an AI Studio API key. Vertex AI credentials and project/location routing are outside this provider.
+
+An optional, operator-invoked smoke check is `uv run python scripts/manual_gemini_proof.py --model <exact-model-id>`. It makes one bounded text request and is never part of automated tests. With no `GEMINI_API_KEY`, it reports `GEMINI LIVE PROOF — NOT EXECUTED`.
 
 Real environment files, credentials, API keys, and session secrets must remain local and untracked. A3 authentication adds no operator-configurable secrets. Cookie security is derived from the existing validated environment and origin settings.

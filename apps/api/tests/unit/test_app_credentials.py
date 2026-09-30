@@ -19,8 +19,9 @@ from nervos_api.config import Settings
 
 ANTHROPIC_CREDENTIAL = "SYNTHETIC-ANTHROPIC-APP-CREDENTIAL"
 OPENAI_CREDENTIAL = "SYNTHETIC-OPENAI-APP-CREDENTIAL"
-CREDENTIALS = (ANTHROPIC_CREDENTIAL, OPENAI_CREDENTIAL)
-PROVIDER_IDS = ("anthropic", "openai")
+GEMINI_CREDENTIAL = "SYNTHETIC-GEMINI-APP-CREDENTIAL"
+CREDENTIALS = (ANTHROPIC_CREDENTIAL, OPENAI_CREDENTIAL, GEMINI_CREDENTIAL)
+PROVIDER_IDS = ("anthropic", "openai", "gemini")
 
 
 @pytest.fixture
@@ -28,6 +29,7 @@ def compose_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Fas
     """Compose the real application with both provider credentials exported."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_CREDENTIAL)
     monkeypatch.setenv("OPENAI_API_KEY", OPENAI_CREDENTIAL)
+    monkeypatch.setenv("GEMINI_API_KEY", GEMINI_CREDENTIAL)
     app = create_app(Settings(environment="test", database_path=tmp_path / "no-credentials.db"))
     yield app
     app.state.database_engine.dispose()
@@ -59,7 +61,8 @@ def test_no_credential_bearing_client_is_reachable(compose_app: FastAPI) -> None
     for name, value in vars(compose_app.state).items():
         assert "anthropic" not in name.lower(), name
         assert "openai" not in name.lower(), name
-        assert type(value).__module__.split(".")[0] not in {"anthropic", "openai"}, name
+        assert "gemini" not in name.lower(), name
+        assert type(value).__module__.split(".")[0] not in {"anthropic", "openai", "google"}, name
 
 
 def test_no_credential_appears_in_the_public_api_surface(compose_app: FastAPI) -> None:
@@ -76,6 +79,7 @@ def test_composition_logs_nothing_about_a_credential(
 ) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_CREDENTIAL)
     monkeypatch.setenv("OPENAI_API_KEY", OPENAI_CREDENTIAL)
+    monkeypatch.setenv("GEMINI_API_KEY", GEMINI_CREDENTIAL)
 
     with caplog.at_level(logging.DEBUG):
         app = create_app(Settings(environment="test", database_path=tmp_path / "logs.db"))

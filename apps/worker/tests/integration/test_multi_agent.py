@@ -17,7 +17,7 @@ from nervos_core.infrastructure.database.jobs import SqlAlchemyJobPersistence
 from sqlalchemy import Engine, text
 
 NOW = "2026-09-14 00:00:00"
-PROVIDERS = ("anthropic", "openai")
+PROVIDERS = ("anthropic", "openai", "gemini")
 
 
 def prepare_six_instances(path: Path, monkeypatch: pytest.MonkeyPatch) -> Engine:
@@ -81,6 +81,7 @@ async def test_six_instances_progress_through_one_shared_engine_without_contamin
 
         # Instance 3's provider is forced to fail, to prove it leaves other Instances untouched.
         openai = RecordingCompletion(provider_id="openai", reply="OpenAI reply")
+        gemini = RecordingCompletion(provider_id="gemini", reply="Gemini reply")
 
         # Let the first Anthropic call fail terminally, the rest succeed. The failure is
         # deliberately nonretryable: this test proves cross-Instance isolation, so the one forced
@@ -96,7 +97,7 @@ async def test_six_instances_progress_through_one_shared_engine_without_contamin
                     raise ModelProviderError(MODEL_UNAVAILABLE)
                 return await super().complete(request)
 
-        completions = {"anthropic": FlakyAnthropic(), "openai": openai}
+        completions = {"anthropic": FlakyAnthropic(), "openai": openai, "gemini": gemini}
         worker = build_worker(
             engine,
             completions,  # type: ignore[arg-type]
@@ -120,10 +121,54 @@ async def test_six_instances_progress_through_one_shared_engine_without_contamin
         succeeded_count = sum(1 for status in statuses.values() if status == "succeeded")
         assert failed_count == 1
         assert succeeded_count == 5
+        assert completions["anthropic"].calls == 1
+        assert openai.calls == 2
+        assert gemini.calls == 2
 
         # Every Job has attempt_count == 1 and no attempt was duplicated.
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM job_attempts")) == 6
             assert connection.scalar(text("SELECT max(attempt_count) FROM jobs")) == 1
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("selected_provider", PROVIDERS)
+async def test_a_provider_failure_never_falls_back_to_another_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selected_provider: str
+) -> None:
+    """A Run's immutable provider selection is the only adapter it may invoke."""
+    from support import (
+        RecordingCompletion,
+        build_worker,
+        migrate,
+        run_row,
+        run_until_stopped,
+        submit,
+    )
+
+    engine = migrate(tmp_path / "no-fallback.db", monkeypatch, providers=(selected_provider,))
+    try:
+        completions = {
+            provider: RecordingCompletion(provider_id=provider) for provider in PROVIDERS
+        }
+        completions[selected_provider].error = ModelProviderError(MODEL_UNAVAILABLE)
+        run_id = submit(engine)
+
+        worker = build_worker(
+            engine,
+            completions,  # type: ignore[arg-type]
+            poll_interval=0.01,
+        )
+        await run_until_stopped(worker, engine)
+
+        assert run_row(engine, run_id)["status"] == "failed"
+        assert completions[selected_provider].calls == 1
+        assert all(
+            completion.calls == 0
+            for provider, completion in completions.items()
+            if provider != selected_provider
+        )
     finally:
         engine.dispose()

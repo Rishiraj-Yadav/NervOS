@@ -25,8 +25,10 @@ from nervos_core.application.model_completion import (
 
 ANTHROPIC_ID = "anthropic"
 OPENAI_ID = "openai"
+GEMINI_ID = "gemini"
 ANTHROPIC_REPLY = "Deterministic Anthropic reply from NervOS."
 OPENAI_REPLY = "Deterministic OpenAI reply from NervOS."
+GEMINI_REPLY = "Deterministic Gemini reply from NervOS."
 
 # Test-only retry delay. Production uses the reviewed 1s/2s/4s schedule; the browser journey
 # needs the durable wait to outlast a couple of two-second UI polls so the queued retry is
@@ -211,4 +213,5 @@ def build_deterministic_completions() -> dict[str, DeterministicCompletion]:
     return {
         ANTHROPIC_ID: DeterministicCompletion(ANTHROPIC_ID, ANTHROPIC_REPLY, None),
         OPENAI_ID: DeterministicCompletion(OPENAI_ID, OPENAI_REPLY, 18),
+        GEMINI_ID: DeterministicCompletion(GEMINI_ID, GEMINI_REPLY, 18),
     }
