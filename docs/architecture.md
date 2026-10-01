@@ -24,15 +24,15 @@ API / Control Plane
   +-- Configuration
   +-- Agent Registry
   +-- Package Manager
-  +-- Marketplace Client
+  +-- Marketplace Client (target; Stage I3)
   |
   v
-Execution Plane (later)
+Execution Plane (implemented)
   |
   +-- Scheduler/Event Router
   |       |
   |       v
-  |      Job
+  |      Ordinary Run acceptance → Job
   |       |
   |       v
   +-- Persistent Queue
@@ -84,7 +84,7 @@ Beyond health, setup, and authentication, the API currently serves owner-scoped 
 
 Routes depend on **application services** (`AgentService`, the durable submission service, and `ModelProviderCatalog`) resolved from `app.state`. No route module imports SQLAlchemy, `nervos_core.infrastructure`, `anthropic`, or `nervos_models`, and exactly one route calls the durable submission service. The control plane cannot claim, start, heartbeat, or terminalize Jobs.
 
-C2 activated the minimal Worker execution plane, C3 added durable Worker liveness plus expired-lease reconciliation, C4 added the durable safe execution retry engine, C5 added owner cancellation plus Attempt execution-timeout orchestration, C6 added authoritative global/per-Agent/per-provider execution concurrency, durable least-recently-served Agent fairness, and per-dimension admission backpressure, and C7 added public read-only execution observability. C8 added integrated acceptance. Stage D added the tool and MCP layer (D1–D7 complete). Stage E added scheduling, events, and triggers (E0–E5 complete). Stage F added conversations, context, and memory (F0–F5 complete). Installation (Stage G), Marketplace (Stage I), and persistent secret management (Stage H) remain target architecture. Provider-side remote cancellation is not implemented and is not claimed; see ADRs 0012, 0013, and 0014.
+C2 activated the minimal Worker execution plane, C3 added durable Worker liveness plus expired-lease reconciliation, C4 added the durable safe execution retry engine, C5 added owner cancellation plus Attempt execution-timeout orchestration, C6 added authoritative global/per-Agent/per-provider execution concurrency, durable least-recently-served Agent fairness, and per-dimension admission backpressure, and C7 added public read-only execution observability. C8 added integrated acceptance. Stage D added the tool and MCP layer (D1–D7 complete). Stage E added scheduling, events, and triggers (E0–E5 complete). Stage F added conversations, context, and memory (F0–F5 complete). Stage G delivers signed package installation, public SDK, package-host execution and lifecycle. Stage I0 architecture and I1 hosted Marketplace foundation are complete and externally accepted. I1 implements a separate hosted read-only Marketplace service; local Marketplace integration remains future work. The intentional order is G → bounded/pre-H I → H hardening. Stage H persistent secret management, sandbox and trust remain future work; see `stage-i/README.md` and ADRs 0027–0030. Provider-side remote cancellation is not implemented and is not claimed; see ADRs 0012, 0013, and 0014.
 
 ## Execution plane
 
@@ -124,15 +124,15 @@ Primary domain/application code. It must not depend on React or FastAPI route mo
 
 ### `packages/nervos-sdk`
 
-Future public API for third-party agent developers. It should remain smaller and more stable than internal runtime APIs.
+Implemented public package Agent SDK, with model/tool ports mediated by NervOS. It remains smaller and more stable than internal runtime APIs.
 
 ### `packages/nervos-mcp`
 
-Future MCP integration and tool-gateway abstractions.
+Implemented MCP integration behind Stage-D tool/permission mediation.
 
 ### `packages/nervos-models`
 
-Model-provider interface and adapters. It currently holds exactly two implemented production provider adapters: canonical ID `anthropic` through the asynchronous Messages API and canonical ID `openai` through the asynchronous Responses API. Provider-SDK imports are confined to this package; core domain/application remain provider-SDK-free. The package is a future home for further adapters, but only these two reviewed adapters are known today.
+Model-provider interface and adapters. It currently holds three implemented production provider adapters: canonical ID `anthropic` through asynchronous Messages, `openai` through asynchronous Responses, and `gemini` through the Google Gemini Developer API. Provider-SDK imports are confined to this package; core domain/application remain provider-SDK-free. The package is a future home for further adapters, with these three production adapters implemented today.
 
 ## Permanent domain distinctions
 
@@ -171,7 +171,7 @@ Default future policy should be one concurrent run per AgentInstance unless the 
 
 ## Persistence
 
-Stage A uses SQLite + SQLAlchemy + Alembic. SQLite remains a valid single-node runtime store later. PostgreSQL and external queue infrastructure are optional future scale choices, not Stage A requirements.
+The local runtime uses SQLite + SQLAlchemy + Alembic. The I1 hosted Marketplace uses separate PostgreSQL 18 metadata and private S3-compatible immutable objects with independent Alembic head `mp0001_catalog_foundation`. This does not replace local SQLite or introduce external queue infrastructure. `apps/marketplace` composes domain/application ports, hosted PostgreSQL/S3 adapters and read-only FastAPI routes; it does not execute packages or call local runtime services. See `marketplace-i1.md` for delivered behavior and deployment boundaries.
 
 ## Read-only observability boundary
 

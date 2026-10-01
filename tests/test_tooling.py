@@ -81,7 +81,7 @@ def test_check_script_lists_supported_groups() -> None:
     result = run_script("scripts/check.py", "--help")
 
     assert result.returncode == 0
-    assert "{lint,typecheck,test,security,e2e,check}" in result.stdout
+    assert "{lint,typecheck,test,security,marketplace-integration,e2e,check}" in result.stdout
 
 
 def test_bootstrap_installs_locked_dependencies_then_chromium(

@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from alembic import command
 from alembic.config import Config
+from alembic.util import CommandError
 from nervos_api.config import Settings
 from nervos_core.infrastructure.database import (
     Base,
@@ -17,7 +18,7 @@ from nervos_core.infrastructure.database import (
 from nervos_core.infrastructure.database import (
     models as database_models,
 )
-from sqlalchemy import CheckConstraint, Engine, String, inspect, text
+from sqlalchemy import CheckConstraint, Engine, String, UniqueConstraint, inspect, text
 from sqlalchemy.exc import IntegrityError
 
 # Importing the ORM models registers Base.metadata, the authoritative schema contract that the
@@ -144,6 +145,36 @@ def test_upgrade_drift_downgrade_and_reupgrade(
         assert application_tables(engine) == APPLICATION_TABLES
     finally:
         engine.dispose()
+
+
+@pytest.mark.parametrize("change", ["none", "remove_distribution", "remove_filename", "extra"])
+def test_legacy_unique_name_collision_comparison(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    """A name collision must neither invent drift nor hide real constraint drift."""
+    config = alembic_config(tmp_path / "unique-comparison.db", monkeypatch)
+    command.upgrade(config, "head")
+    table = Base.metadata.tables["installed_package_dependencies"]
+    original = set(table.constraints)
+    try:
+        if change.startswith("remove_"):
+            column = "distribution_name" if change == "remove_distribution" else "filename"
+            constraint = next(
+                item
+                for item in table.constraints
+                if isinstance(item, UniqueConstraint) and column in item.columns
+            )
+            table.constraints.remove(constraint)
+        elif change == "extra":
+            table.append_constraint(UniqueConstraint("filename", name="uq_test_extra_filename"))
+        if change == "none":
+            for _ in range(5):
+                command.check(config)
+        else:
+            with pytest.raises(CommandError, match="Unique constraint signature drift"):
+                command.check(config)
+    finally:
+        table.constraints = original
 
 
 def test_migrated_schema_matches_a2_contract(

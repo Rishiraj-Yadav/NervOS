@@ -39,3 +39,10 @@ check:
 
 clean-check:
 	uv run python scripts/clean_check.py
+
+.PHONY: dev-marketplace test-marketplace-integration
+dev-marketplace:
+	uv run python scripts/dev.py marketplace
+
+test-marketplace-integration:
+	uv run python scripts/check.py marketplace-integration

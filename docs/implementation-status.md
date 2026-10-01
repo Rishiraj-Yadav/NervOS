@@ -54,7 +54,7 @@ transactional package installation, durable registry, exact package-definition r
 content-addressed offline Python 3.12 environments, immutable Run executable/config snapshots, and
 package-host execution — is COMPLETE and externally accepted.** It preserves the existing Run → Job
 → Attempt → Worker authority and remains a pre-Stage-H runtime/dependency-isolation boundary rather
-than a hostile-code sandbox. **G4 — Package Lifecycle Product Surface — is COMPLETE, externally accepted, and merged.** It adds authenticated package inspection/install/list/detail APIs, atomic package-backed AgentInstance creation, schema-validated config updates, side-by-side rebind/rollback, obligation-aware removal with `pending_removal`, a thin API-backed CLI, and Packages/Agent lifecycle UI. No migration 0014 was added; G4 uses the existing 0013 schema. Persistent publisher trust and sandboxing remain out of scope. **G5 — Integrated acceptance and hardening — is COMPLETE, externally accepted, and merged. Stage G is COMPLETE, externally accepted, and merged.** Bootstrap prepares real local SDK/package-host wheels which package environment creation consumes fail-closed. The Worker routes package ToolPort calls from the exact Run-pinned verified manifest through the same Stage-D mediator, grant authority, timeout, executor, result normalization, and durable invocation audit used by ToolLoop. Real package-host acceptance proves granted execution and ungranted denial; the supervised browser journey builds and installs a signed package, creates a package AgentInstance, and executes a Run through the real package environment and host. No migration 0014 was added. Stage H has not started and is next.
+than a hostile-code sandbox. **G4 — Package Lifecycle Product Surface — is COMPLETE, externally accepted, and merged.** It adds authenticated package inspection/install/list/detail APIs, atomic package-backed AgentInstance creation, schema-validated config updates, side-by-side rebind/rollback, obligation-aware removal with `pending_removal`, a thin API-backed CLI, and Packages/Agent lifecycle UI. No migration 0014 was added; G4 uses the existing 0013 schema. Persistent publisher trust and sandboxing remain out of scope. **G5 — Integrated acceptance and hardening — is COMPLETE, externally accepted, and merged. Stage G is COMPLETE, externally accepted, and merged.** Bootstrap prepares real local SDK/package-host wheels which package environment creation consumes fail-closed. The Worker routes package ToolPort calls from the exact Run-pinned verified manifest through the same Stage-D mediator, grant authority, timeout, executor, result normalization, and durable invocation audit used by ToolLoop. Real package-host acceptance proves granted execution and ungranted denial; the supervised browser journey builds and installs a signed package, creates a package AgentInstance, and executes a Run through the real package environment and host. No migration 0014 was added. The authorized order is G → bounded/pre-H I → H hardening; Stage H has not started.
 
 Stage C — Persistent execution engine is COMPLETE. The C0 architecture freeze, the C1 durable execution foundation, C2 — asynchronous submission and minimal durable Worker execution — C3 — Worker registry/health, expired-lease reconciliation, and fencing hardening — C4 — the safe execution retry engine — C5 — owner cancellation and Attempt execution-timeout orchestration — C6 — authoritative global/per-Agent/per-provider execution concurrency, durable Agent fairness, and full admission backpressure — C7 — public read-only execution observability, the Run Events API, the execution timeline, and the polling model — and C8 — integrated deterministic Stage C acceptance and closeout — are implemented, externally reviewed, and accepted.
 
@@ -70,7 +70,58 @@ no runtime behaviour. **D1 — durable tool, capability, and audit schema is com
 **D5 — MCP client/gateway and connection lifecycle is complete and accepted**.
 **D6 — tool audit, failure semantics, and C3–C6 integration is complete and accepted**.
 **D7 — integrated acceptance and Stage-D closeout is complete and accepted**.
-The next planned stage is **Stage H — Security isolation**; it has not started.
+The current stage is **Stage I — Marketplace**. **I0 COMPLETE / EXTERNALLY ACCEPTED**; **I1 COMPLETE / EXTERNALLY ACCEPTED**.
+The frozen governance authority is `docs/stage-i/README.md` and ADRs 0027–0030.
+The intentional execution order is **G → bounded/pre-H I → H hardening**, without renaming stages.
+**Stage H NOT STARTED** and retains sandbox, secrets, interactive approval, persistent local trust
+and local revocation-enforcement authority. I0 adds no runtime feature, migration or dependency.
+
+## Stage I governance
+
+- I0 — Architecture/governance freeze: complete and externally accepted.
+- I1 — Hosted Marketplace Foundation and Immutable Catalog: complete and externally accepted.
+- I2 — Publisher Identity and Publication Workflow: not started.
+- I3 — Local Discovery Client and Marketplace UI: not started.
+- I4 — Exact Marketplace Download and Stage-G Install Handoff: not started.
+- I5 — Integrated Acceptance and Closeout: not started.
+
+`apps/marketplace` now supplies an independent hosted read-only service: bounded public catalog
+search, exact release metadata and fully verified archive downloads, PostgreSQL 18 persistence,
+and private S3-compatible object reads. Its independent hosted migration head is
+`mp0001_catalog_foundation`. Publisher authentication, uploads, publication workflows, local
+Marketplace client/UI and Marketplace installation remain unimplemented. Local schema head and
+Worker/Scheduler guards remain `0013_stage_g3_package_registry`; no local 0014 was introduced.
+See `marketplace-i1.md`, the development/deployment guides, and `stage-i/i1-implementation.md`.
+
+I1 verification passed 99 offline Marketplace tests and 50 real PostgreSQL/SeaweedFS integration
+tests with no skipped acceptance. SemVer evidence includes 420 valid versions, 176,400 pairwise
+comparisons against Stage G, and real SQL ordering/pagination. Real server startup proves health,
+empty and fixture catalogs, and byte-identical verified artifact delivery. The authoritative
+repository check returned exit 0: 3,017 Python tests, 152 frontend tests across 15 files, Ruff,
+formatting, Pyright (zero errors), frontend lint/typecheck, and security scanning (645 files,
+zero findings). Python reported 10,484 warnings, primarily existing deprecations; no failure was
+hidden. The supervised existing E2E returned exit 0 on the sequential retry after an initial
+120-second browser timeout; Marketplace is not a dependency of that local journey. I0 and I1
+were subsequently externally accepted for Git finalization together on `stage-i`.
+
+Fresh Git-finalization verification passed 50 real Marketplace integration tests, the complete
+repository check (3,021 Python tests; 152 frontend tests; clean static/type checks; security
+scan of 645 files with zero findings), and the existing E2E on its first final invocation.
+The increase of four Python tests covers a legacy SQLite Alembic comparison collision between
+the two G3 dependency UNIQUE constraints. The first fresh full check exposed two false drift
+failures; a comparison-only hook validates complete constraint signatures and rejects genuine
+missing/extra constraints. The corrected full check passed. No schema, historical migration,
+model, runtime behavior or local migration head changed.
+
+I0 verification passed the focused
+architecture suite (87 tests), the complete repository gate (2,918 Python tests; 152 frontend
+tests across 15 files; Ruff, formatting, Pyright and frontend lint/typecheck), the security scan
+(594 files, zero findings), and the supervised E2E gate. Both complete gates returned exit 0.
+Verification used a fresh temporary environment synced from the unchanged lockfile after
+incomplete pre-existing environments caused import/type-check failures. A prior browser run
+also timed out; the final sequential run passed. I0 architecture acceptance and explicit I1
+authorization subsequently permitted the implementation above. The frozen master plan retains
+its historical governance-candidate header; this document records current delivered state.
 
 ## Stage D milestones
 
