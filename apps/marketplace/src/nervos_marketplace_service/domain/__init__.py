@@ -1,0 +1,1 @@
+"""Hosted catalog values."""

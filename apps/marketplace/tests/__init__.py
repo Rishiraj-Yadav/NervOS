@@ -1,0 +1,1 @@
+"""Isolated hosted Marketplace acceptance."""
