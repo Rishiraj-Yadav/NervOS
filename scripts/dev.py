@@ -14,7 +14,7 @@ from nervos_worker.config import WorkerSettings
 
 ROOT = Path(__file__).resolve().parents[1]
 ALEMBIC_CONFIG = ROOT / "apps" / "api" / "alembic.ini"
-SERVICES = ("api", "web", "worker")
+SERVICES = ("api", "web", "worker", "marketplace")
 
 
 def parse_args() -> argparse.Namespace:
@@ -123,9 +123,31 @@ def run_web() -> int:
     return server.returncode
 
 
+def run_marketplace() -> int:
+    """Start hosted reads on loopback; migrations remain an explicit deployment step."""
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "nervos_marketplace_service.app:create_app",
+            "--factory",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8001",
+            "--no-access-log",
+        ],
+        cwd=ROOT,
+        check=False,
+    ).returncode
+
+
 def main() -> int:
     """Run the selected development service."""
     args = parse_args()
+    if args.service == "marketplace":
+        return run_marketplace()
     if args.service == "api":
         return run_api()
     if args.service == "worker":

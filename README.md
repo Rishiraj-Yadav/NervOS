@@ -1,6 +1,6 @@
 # NervOS
 
-NervOS is a self-hosted AI-agent runtime and management platform. **Stages A through G are complete and externally accepted, pending the Stage-G closeout merge. Stage H — Security isolation — is next and has not started.**
+NervOS is a self-hosted AI-agent runtime and management platform. **Stages A through G are complete, externally accepted and merged. Stage I0 architecture and I1 hosted Marketplace foundation are complete and externally accepted. The intentional order is G → bounded/pre-H I → H hardening; Stage H has not started.**
 
 The A1 repository/tooling foundation, A2 API/configuration/database foundation, A3 local-authentication boundary, A4 React dashboard foundation, A5 deterministic browser journey, and A6 continuous-integration/security-scanning milestone are implemented. The browser supports first-run setup, cookie-backed login/session restoration, a protected minimal dashboard, and server-confirmed logout.
 
@@ -107,29 +107,36 @@ Since Stage C the same single journey also drives the durable execution engine e
 
 ## Continuous integration and security scanning
 
-`.github/workflows/ci.yml` runs on pull requests, pushes to `main`, and manually. It has two jobs, each invoking repository-owned commands only:
+`.github/workflows/ci.yml` runs on pull requests, pushes to `main`, and manually. It has three jobs, each invoking repository-owned commands only:
 
 - **check** — frozen dependencies via `bootstrap.py --skip-browser`, then `scripts/check.py check`. No browser, no spawned services.
 - **e2e** — full bootstrap including Chromium, the CI-only Playwright system libraries, then `scripts/check.py e2e`.
+- **marketplace-integration** — frozen dependencies and disposable PostgreSQL 18/SeaweedFS services, then `scripts/check.py marketplace-integration`.
 
 `.github/workflows/security.yml` runs the repository-owned tracked-file scanner on pull requests, pushes to `main`, and a weekly schedule. It needs no project dependencies because the scanner is standard-library only.
 
-Both workflows declare `permissions: contents: read`, reference no secrets, use `pull_request` rather than `pull_request_target`, and pin every action to a verified full-length commit SHA. No external AI provider or third-party service is contacted. See [continuous integration](docs/ci.md) for the pinning policy, cache strategy, and scanner rules.
+Both workflows declare `permissions: contents: read`, reference no secrets, use `pull_request` rather than `pull_request_target`, and pin every action to a verified full-length commit SHA. No live AI provider or cloud credentials are required. Marketplace integration uses disposable local PostgreSQL and S3-compatible services. See [continuous integration](docs/ci.md) for the pinning policy, cache strategy, and scanner rules.
 
 ## Workspace boundaries
 
 Python uv workspace members:
 
 - `apps/api`
+- `apps/cli`
+- `apps/marketplace`
+- `apps/scheduler`
 - `apps/worker`
 - `packages/nervos-core`
+- `packages/nervos-mcp`
 - `packages/nervos-models`
+- `packages/nervos-sdk`
+- `packages/nervos-package-host`
 
 pnpm workspace members:
 
 - `apps/web`
 
-`apps/worker` is the active Stage C execution plane: a real process entrypoint that owns no HTTP surface, never runs Alembic, and holds provider credentials exclusively. It durably registers its process incarnation, heartbeats that registration, reconciles expired Job claims, claims queued Jobs, renews leases, executes the immutable Run snapshot, and terminalizes Attempt, Job, and Run. `packages/nervos-sdk` supplies the public package Agent contract and `packages/nervos-mcp` implements the mediated MCP integration. Marketplace integration remains future work. `packages/nervos-core` holds the domain/application logic and `packages/nervos-models` holds the concrete model-provider adapters, canonical `anthropic`, `openai`, and `gemini` (Google Gemini Developer API).
+`apps/worker` is the active Stage C execution plane: a real process entrypoint that owns no HTTP surface, never runs Alembic, and holds provider credentials exclusively. It durably registers its process incarnation, heartbeats that registration, reconciles expired Job claims, claims queued Jobs, renews leases, executes the immutable Run snapshot, and terminalizes Attempt, Job, and Run. `packages/nervos-sdk` supplies the public package Agent contract and `packages/nervos-mcp` implements the mediated MCP integration. The separate hosted read-only Marketplace service is implemented and externally accepted in I1; see its [development guide](docs/marketplace-development.md). Local Marketplace integration remains future work under [Stage I](docs/stage-i/README.md) and ADRs 0027–0030. `packages/nervos-core` holds the domain/application logic and `packages/nervos-models` holds the concrete model-provider adapters, canonical `anthropic`, `openai`, and `gemini` (Google Gemini Developer API).
 
 ## Configuration and security
 

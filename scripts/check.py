@@ -25,6 +25,7 @@ CHECKS: dict[str, tuple[tuple[str, ...], ...]] = {
         ("pnpm", "test"),
     ),
     "security": (("uv", "run", "python", "scripts/security_scan.py"),),
+    "marketplace-integration": (("uv", "run", "python", "scripts/marketplace_integration.py"),),
     "e2e": (("uv", "run", "python", "scripts/e2e.py"),),
 }
 # `check` is everything fast, offline and deterministic: no browser and no

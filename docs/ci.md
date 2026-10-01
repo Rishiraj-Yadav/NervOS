@@ -20,6 +20,14 @@ group that cancels superseded runs on the same ref.
 
 ## Jobs
 
+### marketplace-integration — hosted I1 acceptance
+
+Installs the frozen Python workspace and runs `uv run python scripts/check.py marketplace-integration`.
+Docker Compose owns disposable digest-pinned PostgreSQL 18.6 and authenticated SeaweedFS 4.48,
+synthetic fixture credentials and ephemeral loopback ports. The wrapper removes its own project
+and volumes. This job is separate from ordinary checks/local E2E and uses no cloud credentials.
+See [I1 operations](marketplace-i1.md).
+
 ### `check` — repository checks
 
 Fast, offline and deterministic. It installs no browser and spawns no services.

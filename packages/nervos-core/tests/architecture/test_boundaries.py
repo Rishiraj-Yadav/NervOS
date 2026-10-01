@@ -479,6 +479,15 @@ def test_stage_g_governance_freeze_files_exist() -> None:
         assert list((ROOT / "docs" / "adr").glob(f"{adr}-*.md")), f"ADR {adr} missing"
 
 
+def test_stage_i_governance_freeze_files_exist() -> None:
+    """I1-I5 have a canonical contract and an explicit architecture-change protocol."""
+    stage_i_plan = ROOT / "docs" / "stage-i" / "README.md"
+    assert stage_i_plan.is_file()
+    assert "STAGE I ARCHITECTURE CHANGE REQUEST" in stage_i_plan.read_text(encoding="utf-8")
+    for adr in ("0027", "0028", "0029", "0030"):
+        assert list((ROOT / "docs" / "adr").glob(f"{adr}-*.md")), f"ADR {adr} missing"
+
+
 def test_only_one_durable_submission_call_exists() -> None:
     """Exactly one canonical acceptance path: no route may drive execution or the coordinator."""
     calls = sum(

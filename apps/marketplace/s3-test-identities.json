@@ -1,0 +1,14 @@
+{
+  "identities": [
+    {
+      "name": "synthetic-fixture-admin",
+      "credentials": [{"accessKey": "fixture-admin", "secretKey": "synthetic-admin-password"}],
+      "actions": ["Admin", "Read", "List", "Write", "Tagging"]
+    },
+    {
+      "name": "synthetic-serving-reader",
+      "credentials": [{"accessKey": "fixture-reader", "secretKey": "synthetic-reader-password"}],
+      "actions": ["Read:marketplace-test", "List:marketplace-test"]
+    }
+  ]
+}

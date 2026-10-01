@@ -11,6 +11,7 @@ package = false
 members = [
     "apps/api",
     "apps/cli",
+    "apps/marketplace",
     "apps/scheduler",
     "apps/worker",
     "packages/nervos-core",
@@ -27,13 +28,16 @@ dev = [
     "pytest>=8.3,<10",
     "pytest-cov>=6,<8",
     "ruff>=0.12,<1",
+    "boto3-stubs[s3]>=1.43,<1.44",
 ]
 
 [tool.pytest.ini_options]
-addopts = "--strict-config --strict-markers"
+addopts = "--strict-config --strict-markers -m 'not marketplace_integration'"
+markers = ["marketplace_integration: requires disposable PostgreSQL and S3 services"]
 pythonpath = [
     "apps/api/src",
     "apps/cli/src",
+    "apps/marketplace/src",
     "apps/scheduler/src",
     "apps/worker/src",
     "packages/nervos-core/src",
@@ -46,6 +50,7 @@ testpaths = [
     "tests",
     "apps/api/tests",
     "apps/cli/tests",
+    "apps/marketplace/tests",
     "apps/scheduler/tests",
     "apps/worker/tests",
     "packages/nervos-core/tests",
@@ -88,9 +93,12 @@ indent-style = "space"
 include = [
     "apps/api/src",
     "apps/api/alembic",
+    "apps/marketplace/alembic",
     "apps/api/tests",
     "apps/cli/src",
+    "apps/marketplace/src",
     "apps/cli/tests",
+    "apps/marketplace/tests",
     "apps/scheduler/src",
     "apps/scheduler/tests",
     "apps/worker/src",
@@ -115,6 +123,7 @@ exclude = [
 extraPaths = [
     "apps/api/src",
     "apps/cli/src",
+    "apps/marketplace/src",
     "apps/scheduler/src",
     "apps/worker/src",
     "packages/nervos-core/src",

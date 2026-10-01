@@ -60,20 +60,20 @@ Conversations, messages, deterministic context assembly, agent-private memory, u
 
 **F0 (architecture freeze), F1 (durable Conversations, Turns, Messages, and Run linkage), F2 (ContextBuilder, mandatory RunContextSnapshot, deterministic compaction), F3 (AGENT/USER scoped memory, provenance, and deterministic retrieval), F4 (Conversation and memory lifecycle, delete, and minimal UI), and F5 (Integrated acceptance and Stage-F closeout) are complete and externally accepted.**
 
-Outcome: persistent useful agent context. Stage F is complete. Stage G is complete and externally accepted, pending merge; Stage H is next.
+Outcome: persistent useful agent context. Stages F and G are complete, externally accepted and merged. Bounded Stage I intentionally precedes Stage H hardening.
 
 ## Stage G — Agent package system
 
 `.nervos` package contract, manifest validation, config schema, dependency install, package verification/signatures, install/update/uninstall/rollback.
 
-Outcome: agents become installable software. G0–G5 are complete and externally accepted, pending merge. Stage H has not started and is next.
+Outcome: agents become installable software. G0–G5 are complete, externally accepted and merged. The Gemini extension is merged/current. Stage I governance now proceeds before Stage H under the bounded pre-H contract below.
 
 - **G0 — Package architecture, protocol, versioning, trust, and lifecycle freeze:** canonical Stage-G master plan `docs/stage-g/README.md` and ADRs 0024–0026. Governance/documentation only; **complete, externally accepted, and merged**.
 - **G1 — Versioned manifest + public Agent SDK + definition-resolution contracts:** manifest/domain types, strict manifest parser, SemVer/identity/compatibility/config-schema validation, `nervos-sdk`, resolver/source interfaces, in-memory/static package definition source, built-in compatibility. **Complete, externally accepted, and merged.** No durable package tables.
 - **G2 — deterministic `.nervos` builder + verifier:** canonical package construction, archive validation, content digest, Ed25519 verification, tamper detection, pure-Python wheelhouse validation, cross-platform safe format. **Complete; externally accepted.** No installation, durable registry, package execution, persistent publisher trust, or sandbox.
 - **G3 — Transactional installation + durable registry + package-backed execution:** package-registry migration, SQL-backed definition source, installation state machine, storage, isolated dependency environment, config snapshot + immutable Run semantics, exact executable pinning, package-host subprocess, activation health check. **Complete; externally accepted.**
 - **G4 — Lifecycle:** side-by-side versions, explicit upgrade/rebind with capability delta, rollback, uninstall, unified CLI/API/UI lifecycle surfaces. **Complete, externally accepted, and merged.**
-- **G5 — Integrated acceptance and hardening.** Complete and externally accepted, pending merge. Bootstrap prepares real local runtime wheels; package ToolPort requests from the Run-pinned signed manifest use the shared Stage-D mediator and durable audit; real-host tests prove granted execution and ungranted denial; the supervised browser E2E installs and runs a signed package offline. Stage H has not started and is next.
+- **G5 — Integrated acceptance and hardening.** Complete, externally accepted and merged. Bootstrap prepares real local runtime wheels; package ToolPort requests from the Run-pinned signed manifest use the shared Stage-D mediator and durable audit; real-host tests prove granted execution and ungranted denial; the supervised browser E2E installs and runs a signed package offline. Stage H has not started; bounded Stage I intentionally precedes H hardening.
 
 ## Stage H — Security isolation
 
@@ -89,7 +89,29 @@ Outcome: safer third-party execution.
 
 ## Stage I — Marketplace
 
-Publisher workflow, metadata, package storage, discovery/search, versioning, one-click local install.
+**I0 COMPLETE / EXTERNALLY ACCEPTED.
+I1 COMPLETE / EXTERNALLY ACCEPTED.** Canonical authority:
+[Stage-I master plan](stage-i/README.md) and ADRs 0027–0030.
+
+The intentional order is **G → bounded/pre-H I → H hardening**. Stage letters retain their
+historical identity. H is not started and remains responsible for sandbox/containment,
+encrypted secrets, interactive approvals, persistent local publisher trust and local
+revocation enforcement. Stage I cannot claim these protections.
+
+- **I0 — Governance freeze:** frozen master plan and ADRs; complete and externally accepted.
+- **I1 — Hosted Marketplace Foundation and Immutable Catalog:** separate hosted persistence,
+  immutable artifact abstraction and bounded read API are implemented and externally accepted; no publisher upload or local install.
+- **I2 — Publisher Identity and Publication Workflow:** hosted auth/ownership/keys, static
+  signed upload, immutable publication, audit/recovery and publisher CLI/API; no hosted execution.
+- **I3 — Local Discovery Client and Marketplace UI:** configured origin, typed transport,
+  safe browse/search and freshness/privacy/outage behavior; no package mutations.
+- **I4 — Exact Marketplace Download and Stage-G Install Handoff:** retained exact artifact,
+  independent verification, explicit authorization, existing G installation and explicit rebind.
+- **I5 — Integrated Acceptance and Closeout:** deterministic v1/v2 publication-to-local-execution,
+  historical pinning, warnings, offline runtime, recovery and full regression/documentation gates.
+
+I2–I5 are also not started. Installation remains separate from instance creation, grants,
+triggers and memory. No automatic upgrade/rebind or metadata-derived local trust in pre-H V1.
 
 ## Stage J — Multi-agent collaboration
 
