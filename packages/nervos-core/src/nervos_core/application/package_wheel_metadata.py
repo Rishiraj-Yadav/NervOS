@@ -11,6 +11,12 @@ _NEWLINE = re.compile(rb"\r\n|\r|\n")
 _NAME = re.compile(rb"[\041-\071\073-\176]*\Z")
 _FOLDED = re.compile(rb"(?:[ \t][^\r\n]*(?:\r\n|\n|\r(?!\n)))+\Z")
 _CONTINUATION_END = re.compile(rb"\n[^ \t]")
+# Python maintenance releases changed compat32's leading-fold whitespace rule.
+# Probe a tiny constant header to follow the installed reference policy without
+# passing large metadata values through its allocation-heavy source parser.
+_SOURCE_LEADING_WHITESPACE = (
+    " \t\r\n" if compat32.header_source_parse(["X:\n", " value\n"])[1] == "value" else " \t"
+)
 
 
 class MetadataValueLimitExceeded(ValueError):
@@ -61,7 +67,11 @@ def selected_headers(
             return None
         # This is compat32.header_source_parse's exact value construction; unlike
         # a full Message, it needs neither a list of all lines nor ignored fields.
-        text = value.decode("ascii", "surrogateescape").lstrip(" \t").rstrip("\r\n")
+        text = (
+            value.decode("ascii", "surrogateescape")
+            .lstrip(_SOURCE_LEADING_WHITESPACE)
+            .rstrip("\r\n")
+        )
         if (
             value_limits
             and key in value_limits

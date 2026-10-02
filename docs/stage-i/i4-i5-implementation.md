@@ -125,6 +125,11 @@ function. An explicit Windows platform guard resolves that portability issue;
 targeted Linux and Windows type checks and Ruff checks pass. Resource-limit
 values and the platform enforcement paths are unchanged. Hosted CI is rerun for
 the resulting commit before merge.
+The next Linux run passed type checks but found three differential cases caused
+by Python 3.12.15 changing compat32's leading-fold whitespace normalization from
+the local Python 3.12.5 behavior. A constant-size policy probe now selects the
+installed reference rule without feeding large metadata into the full parser.
+The existing differential corpus remains intact; the full hosted check is rerun.
 
 ## Demo workflow
 
