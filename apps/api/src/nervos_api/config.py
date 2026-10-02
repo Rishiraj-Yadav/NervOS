@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     database_path: Path = Path("~/.nervos/nervos.db")
     package_store: Path = Path("~/.nervos/packages")
     app_origin: str = "http://localhost:5173"
+    marketplace_origin: str | None = None
+    marketplace_timeout_seconds: float = Field(default=10.0, ge=1, le=30)
+    marketplace_allow_private: bool = False
     log_level: LogLevel = "INFO"
     # Global hard bound on accepted-but-unfinished Jobs. It is enforced inside the submission
     # transaction, so two concurrent submissions cannot both observe a free slot.

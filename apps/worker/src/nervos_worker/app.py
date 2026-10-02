@@ -65,7 +65,7 @@ from nervos_worker.registry import ReclaimLoop, WorkerRegistry
 from nervos_worker.service import Worker
 
 # Bumped only by the milestone that adds a migration. F4 ships migration 0012.
-EXPECTED_SCHEMA_REVISION = "0013_stage_g3_package_registry"
+EXPECTED_SCHEMA_REVISION = "0014_stage_i4_marketplace_install_requests"
 
 
 def utc_now() -> datetime:

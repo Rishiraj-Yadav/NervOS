@@ -63,9 +63,38 @@ def admin_engine() -> Iterator[Engine]:
 @pytest.fixture
 def database(admin_engine: Engine) -> Engine:
     with admin_engine.begin() as connection:
-        connection.execute(
-            text("TRUNCATE package_releases,package_listings,artifacts,package_projects")
-        )
+        # Test-owned disposable cleanup must include every current I2 table. The
+        # draft publication tables reference package_releases, so the old I1
+        # four-table truncate fails before each test. The table names come from
+        # PostgreSQL's catalog, never from HTTP input; alembic_version is kept.
+        tables = connection.execute(
+            text(
+                "SELECT string_agg(format('%I', tablename), ',') "
+                "FROM pg_tables WHERE schemaname='public' AND tablename NOT IN "
+                "('alembic_version','marketplace_alembic_version')"
+            )
+        ).scalar_one()
+        if tables:
+            # The production schema deliberately protects append-only audit and
+            # advisory history from all destructive statements.  This fixture
+            # owns a disposable database, so temporarily disable only those
+            # guards while resetting test state, then restore them immediately.
+            connection.execute(
+                text("ALTER TABLE publication_audit_events DISABLE TRIGGER mp_audit_guard")
+            )
+            connection.execute(
+                text("ALTER TABLE release_status_advisories DISABLE TRIGGER mp_advisory_guard")
+            )
+            try:
+                connection.execute(text(f"TRUNCATE TABLE {tables} RESTART IDENTITY CASCADE"))
+                connection.execute(text("INSERT INTO verification_admission(id) VALUES(1)"))
+            finally:
+                connection.execute(
+                    text("ALTER TABLE publication_audit_events ENABLE TRIGGER mp_audit_guard")
+                )
+                connection.execute(
+                    text("ALTER TABLE release_status_advisories ENABLE TRIGGER mp_advisory_guard")
+                )
     return admin_engine
 
 
@@ -75,6 +104,7 @@ def insert_fixture(
     version: str = "1.2.3",
     state: str = "available",
     publication: str = "published",
+    storage_version_id: str = "fixture-version",
 ) -> str:
     from nervos_core.domain.packages import PackageVersion
     from nervos_marketplace_service.domain.semver_order import precedence_key
@@ -90,14 +120,52 @@ def insert_fixture(
     fixture = signed_package(package_id, version)
     verified = fixture.verified
     with engine.begin() as connection:
+        handle = (
+            "fixture-"
+            + "".join(character if character.isalnum() else "-" for character in package_id)[:48]
+        )
+        publisher_id = connection.execute(
+            text("SELECT id FROM publishers WHERE handle=:handle"), {"handle": handle}
+        ).scalar_one_or_none()
+        if publisher_id is None:
+            publisher_id = uuid4()
+            connection.execute(
+                text(
+                    "INSERT INTO publishers "
+                    "(id,handle,display_name,kind,state,revision,created_at,updated_at) "
+                    "VALUES (:id,:handle,:display_name,'organization','active',1,:now,:now)"
+                ),
+                {
+                    "id": publisher_id,
+                    "handle": handle,
+                    "display_name": "Fixture Publisher",
+                    "now": NOW,
+                },
+            )
         project = connection.execute(
             text("SELECT id FROM package_projects WHERE package_id=:id"), {"id": package_id}
         ).scalar_one_or_none()
         if project is None:
             project = uuid4()
             connection.execute(
-                insert(PackageProjectRow).values(id=project, package_id=package_id, created_at=NOW)
+                insert(PackageProjectRow).values(
+                    id=project,
+                    package_id=package_id,
+                    created_at=NOW,
+                    publisher_id=publisher_id,
+                )
             )
+        else:
+            publisher_id = connection.execute(
+                text("SELECT publisher_id FROM package_projects WHERE id=:id"),
+                {"id": project},
+            ).scalar_one()
+        if (
+            connection.execute(
+                text("SELECT 1 FROM package_listings WHERE project_id=:id"), {"id": project}
+            ).scalar_one_or_none()
+            is None
+        ):
             connection.execute(
                 insert(PackageListingRow).values(
                     project_id=project,
@@ -110,7 +178,10 @@ def insert_fixture(
             )
         connection.execute(
             insert(ArtifactRow).values(
-                archive_sha256=verified.archive_digest, size_bytes=len(fixture.raw), created_at=NOW
+                archive_sha256=verified.archive_digest,
+                size_bytes=len(fixture.raw),
+                created_at=NOW,
+                storage_version_id=storage_version_id,
             )
         )
         parsed = PackageVersion(version)
@@ -118,6 +189,7 @@ def insert_fixture(
             insert(PackageReleaseRow).values(
                 id=uuid4(),
                 project_id=project,
+                original_publisher_id=publisher_id,
                 exact_version=version,
                 archive_sha256=verified.archive_digest,
                 content_digest=verified.content_digest,

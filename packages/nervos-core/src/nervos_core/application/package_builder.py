@@ -46,6 +46,7 @@ from nervos_core.application.package_signing import (
 )
 from nervos_core.application.package_verification import VerifiedPackage, verify_package
 from nervos_core.application.package_wheel import (
+    RequirementBudget,
     WheelSource,
     agent_requires_dist,
     build_dependency_lock,
@@ -292,14 +293,22 @@ def _prepare_archive(
     if manifest.configuration.schema != CONFIG_SCHEMA_PATH:
         raise InvalidPackageLayout(f"manifest must reference {CONFIG_SCHEMA_PATH}")
 
-    inspect_wheel(members[AGENT_WHEEL_PATH].snapshot, filename=AGENT_WHEEL_PATH)
+    requirement_budget = RequirementBudget()
+    inspect_wheel(
+        members[AGENT_WHEEL_PATH].snapshot,
+        filename=AGENT_WHEEL_PATH,
+        requirement_budget=requirement_budget,
+    )
     wheels: dict[str, WheelSource] = {
         path[len(WHEELS_PREFIX) :]: member.snapshot
         for path, member in members.items()
         if path.startswith(WHEELS_PREFIX)
     }
     lock = build_dependency_lock(wheels)
-    inspected = {name: inspect_wheel(path, filename=name) for name, path in wheels.items()}
+    inspected = {
+        name: inspect_wheel(path, filename=name, requirement_budget=requirement_budget)
+        for name, path in wheels.items()
+    }
     verify_lock_against_wheelhouse(lock, inspected)
     validate_dependency_closure(
         wheels,

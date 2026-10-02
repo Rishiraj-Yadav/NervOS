@@ -11,6 +11,8 @@ dependencies = [
   "alembic>=1.20,<2", "fastapi>=0.115,<1", "sqlalchemy>=2.0,<2.1",
   "psycopg[binary]>=3.3,<4", "boto3>=1.43,<1.44", "pydantic>=2,<3",
   "pydantic-settings>=2,<3", "uvicorn[standard]>=0.30,<1", "nervos-core",
+  "authlib>=1.8,<1.9", "joserfc>=1.7.5,<1.8", "httpx>=0.28,<1",
+  "cryptography>=50,<51",
 ]
 
 [tool.uv.sources]

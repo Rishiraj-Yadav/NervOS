@@ -41,6 +41,7 @@ def test_metadata_contains_exact_application_tables() -> None:
         "installed_package_files",
         "installed_package_dependencies",
         "agent_instance_package_bindings",
+        "marketplace_install_requests",
     }
 
 

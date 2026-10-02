@@ -72,6 +72,8 @@ from nervos_api.api.errors import (
 )
 from nervos_api.api.middleware import ApiSecurityHeadersMiddleware, AuthenticationBoundaryMiddleware
 from nervos_api.api.router import api_router
+from nervos_api.application.marketplace_discovery import MarketplaceDiscoveryService
+from nervos_api.application.marketplace_installation import MarketplaceInstallService
 from nervos_api.config import Settings, get_settings
 from nervos_api.hooks.router import router as hooks_router
 
@@ -215,6 +217,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.trigger_management_service = trigger_management_service
     app.state.conversation_service = conversation_service
     app.state.memory_service = memory_service
+    app.state.marketplace_discovery = MarketplaceDiscoveryService(
+        resolved_settings.marketplace_origin,
+        resolved_settings.marketplace_timeout_seconds,
+        development=resolved_settings.environment in {"development", "test"},
+        allow_private=resolved_settings.marketplace_allow_private,
+    )
+    app.state.marketplace_installation = MarketplaceInstallService(
+        engine,
+        app.state.marketplace_discovery,
+        package_application_service,
+        resolved_settings.package_store / "marketplace-downloads",
+        utc_now,
+        package_query_service,
+    )
     app.state.package_application_service = package_application_service
     app.state.package_query_service = package_query_service
     app.add_exception_handler(Exception, unexpected_error_handler)

@@ -1,5 +1,7 @@
 """Bounded catalog queries. Cursor encoding stays at the transport boundary."""
 
+from nervos_core.domain.package_installation import validate_sha256
+
 from nervos_marketplace_service.application.ports import CatalogPosition, CatalogRepository
 from nervos_marketplace_service.domain.catalog import (
     PackageDetail,
@@ -46,3 +48,7 @@ class MarketplaceCatalogQueryService:
     def release(self, package_id: str, version: str) -> PackageReleaseDetail:
         identity(package_id, version)
         return self.repository.release(package_id, version)
+
+    def storage_version(self, archive_sha256: str) -> str | None:
+        validate_sha256(archive_sha256)
+        return self.repository.storage_version(archive_sha256)

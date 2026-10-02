@@ -32,6 +32,22 @@ artifact; it does **not** establish that the publisher is trusted. NervOS shows 
 fingerprint and content digest, and an operator explicitly authorizes installation. There is no
 persistent trust store.
 
+### Admission hardening in the current unaccepted worktree
+
+The user-authorized amendment in ADR 0031 adds Requires-Dist admission budgets:
+64 KiB per decoded logical value, 4 MiB of values across agent/dependency wheels,
+and 100,000 occurrences across the package. Duplicates and inactive markers count.
+The shared builder/verifier enforces these maxima before dependency parsing;
+production configuration cannot raise them. This intentionally rejects some
+previously accepted packages on fresh inspection. Stored signed bytes and registry
+records are unchanged; reinspection has no grandfathering bypass.
+
+Unused wheel metadata and descriptions are streamed and discarded. Large PEP 440
+Version values use packaging's public grammar and chunked text normalization,
+preserving acceptance without a new Version limit. Ordinary version values keep
+the existing normalization path. The resource qualification and I2/I3 acceptance
+gates remain in progress; this subsection does not declare a delivered milestone.
+
 ## Install and run
 
 Inspection verifies an artifact and returns bounded safe metadata. It does not execute package code,

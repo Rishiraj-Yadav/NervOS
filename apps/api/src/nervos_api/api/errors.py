@@ -82,6 +82,10 @@ from nervos_core.infrastructure.database.packages import (
 )
 
 from nervos_api.api.schemas import ErrorDetail, ErrorResponse
+from nervos_api.application.marketplace_installation import (
+    MarketplaceRequestConflict,
+    MarketplaceRequestNotFound,
+)
 
 
 class InvalidOrigin(Exception):
@@ -133,6 +137,16 @@ _ERROR_MAP: dict[type[Exception], tuple[int, str, str]] = {
 # registered for every key here. Static NervOS-owned messages only: no provider text, body,
 # header, credential, or stack trace is ever propagated.
 AGENT_ERROR_MAP: dict[type[Exception], tuple[int, str, str]] = {
+    MarketplaceRequestNotFound: (
+        404,
+        "marketplace_request_not_found",
+        "Install request not found.",
+    ),
+    MarketplaceRequestConflict: (
+        409,
+        "marketplace_request_conflict",
+        "The exact release cannot be installed from this request.",
+    ),
     InvalidAgentDefinitionId: (
         422,
         "invalid_agent_definition",

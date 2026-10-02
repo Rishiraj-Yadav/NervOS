@@ -32,10 +32,15 @@ class ArtifactReadService:
             raise MarketplaceError("range_not_supported", 416)
         release = self.catalog.release(package_id, version)
         distribution_allowed(release, acknowledgement)
-        stream = self.store.open_verified(release.archive_sha256, release.size_bytes)
+        storage_version = self.catalog.storage_version(release.archive_sha256)
+        stream = self.store.open_verified(
+            release.archive_sha256, release.size_bytes, version_id=storage_version
+        )
         try:
             current = self.catalog.release(package_id, version)
             distribution_allowed(current, acknowledgement)
+            if self.catalog.storage_version(current.archive_sha256) != storage_version:
+                raise MarketplaceError("artifact_unavailable", 503)
             if (current.archive_sha256, current.size_bytes) != (
                 release.archive_sha256,
                 release.size_bytes,

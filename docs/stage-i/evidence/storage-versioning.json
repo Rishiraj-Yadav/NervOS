@@ -1,0 +1,183 @@
+{
+  "image": "chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d",
+  "passed": true,
+  "versioning_status": "Enabled",
+  "v1": "672588b71ff6292ae384d45718bec21c",
+  "conditional_duplicate_status": 412,
+  "v2": "672588b7125411ad3328af344795622c",
+  "v1_after_v2_sha256": "d06651f83bfaf4343d9f9d5a92d33bb835e6a9d539fb0c4e33d7b37ce1a97956",
+  "v2_sha256": "16cdb544f1205fae92abd955e26ae5a6fa25bd7991eac14276ee4227e331d894",
+  "v1_size": 25,
+  "v2_size": 28,
+  "internal_namespace_put": {
+    "status": 200,
+    "version": "672588b7116fd395c1b69d1dde2c5785"
+  },
+  "internal_namespace_copy": {
+    "status": 200,
+    "version": "672588b710bd7759532c3a68ae57d6b0"
+  },
+  "wrong_current_adoption": "rejected by complete SHA-256 comparison",
+  "finalizer_delete_version": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "finalizer_delete_current": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "finalizer_batch_delete": {
+    "status": 200,
+    "errors": [
+      {
+        "Key": "artifacts/sha256/d0/d06651f83bfaf4343d9f9d5a92d33bb835e6a9d539fb0c4e33d7b37ce1a97956.nervos",
+        "VersionId": "672588b7125411ad3328af344795622c",
+        "Code": "AccessDenied",
+        "Message": "Access Denied."
+      }
+    ],
+    "deleted": []
+  },
+  "finalizer_suspend_versioning": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "finalizer_delete_bucket": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "finalizer_put_policy": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "finalizer_delete_policy": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "finalizer_put_lifecycle": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "finalizer_put_object_lock": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "reader_delete_version": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "reader_delete_current": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "reader_batch_delete": {
+    "status": 200,
+    "errors": [
+      {
+        "Key": "artifacts/sha256/d0/d06651f83bfaf4343d9f9d5a92d33bb835e6a9d539fb0c4e33d7b37ce1a97956.nervos",
+        "VersionId": "672588b7125411ad3328af344795622c",
+        "Code": "AccessDenied",
+        "Message": "Access Denied."
+      }
+    ],
+    "deleted": []
+  },
+  "reader_suspend_versioning": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "reader_delete_bucket": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "reader_put_policy": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "reader_delete_policy": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "reader_put_lifecycle": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "reader_put_object_lock": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "quarantine_delete_version": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "quarantine_delete_current": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "quarantine_batch_delete": {
+    "status": 200,
+    "errors": [
+      {
+        "Key": "artifacts/sha256/d0/d06651f83bfaf4343d9f9d5a92d33bb835e6a9d539fb0c4e33d7b37ce1a97956.nervos",
+        "VersionId": "672588b7125411ad3328af344795622c",
+        "Code": "AccessDenied",
+        "Message": "Access Denied."
+      }
+    ],
+    "deleted": []
+  },
+  "quarantine_suspend_versioning": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "quarantine_delete_bucket": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "quarantine_put_policy": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "quarantine_delete_policy": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "quarantine_put_lifecycle": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "quarantine_put_object_lock": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "reader_write": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "quarantine_final_write": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "reader_quarantine_read": {
+    "status": 403,
+    "code": "AccessDenied"
+  },
+  "concurrent_statuses": [
+    200,
+    412
+  ],
+  "delete_marker": true,
+  "failures": [],
+  "production_finalization_adoption": "same fully verified VersionId",
+  "production_concurrent_versions": [
+    "672588b689cc72e47888e61e9a3ebd6b",
+    "672588b689cc72e47888e61e9a3ebd6b"
+  ],
+  "database_invalid_version_rejections": 6,
+  "database_accepts_1024_character_version": true,
+  "database_rejects_version_change": true,
+  "production_wrong_current_adoption": "rejected",
+  "http_pinned_v1_after_corrupt_v2": "dc5ffb7083fff4147a3b9928d0919af81617b1f5f46a395e52122ae7b8c247ef",
+  "http_pinned_v1_after_delete_marker": "exact original package",
+  "hosted_migration_head": "mp0003_publication_workflow"
+}

@@ -25,7 +25,9 @@ class PackageFixture:
     verified: VerifiedPackage
 
 
-def signed_package(package_id: str = "com.acme.invoice", version: str = "1.2.3") -> PackageFixture:
+def signed_package(
+    package_id: str = "com.acme.invoice", version: str = "1.2.3", *, source: bytes = SENTINEL
+) -> PackageFixture:
     manifest = f"""manifest_version: "1"
 package_id: {package_id}
 package_name: acme-invoice
@@ -45,7 +47,7 @@ configuration:
     buffer = io.BytesIO()
     files = {
         "acme_invoice/__init__.py": b"",
-        "acme_invoice/agent.py": SENTINEL,
+        "acme_invoice/agent.py": source,
         "acme_invoice-1.2.3.dist-info/METADATA": (
             b"Metadata-Version: 2.3\nName: acme-invoice\nVersion: 1.2.3\nRequires-Python: >=3.12\n"
         ),

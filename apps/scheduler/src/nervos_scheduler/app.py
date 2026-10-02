@@ -28,7 +28,7 @@ from sqlalchemy import Engine
 from nervos_scheduler.config import SchedulerSettings
 
 #: The one migration revision this process understands. F4 ships migration 0012.
-EXPECTED_SCHEMA_REVISION = "0013_stage_g3_package_registry"
+EXPECTED_SCHEMA_REVISION = "0014_stage_i4_marketplace_install_requests"
 
 
 def utc_now() -> datetime:

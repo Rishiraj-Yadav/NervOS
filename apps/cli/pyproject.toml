@@ -9,10 +9,16 @@ description = "NervOS package lifecycle and management CLI"
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28,<1",
+    "keyring>=25.7,<26",
+    "nervos-core",
 ]
 
 [project.scripts]
 nervos = "nervos_cli.main:main"
+nervos-publisher = "nervos_cli.publisher:main"
+
+[tool.uv.sources]
+nervos-core = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nervos_cli"]

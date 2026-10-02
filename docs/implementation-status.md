@@ -70,7 +70,11 @@ no runtime behaviour. **D1 — durable tool, capability, and audit schema is com
 **D5 — MCP client/gateway and connection lifecycle is complete and accepted**.
 **D6 — tool audit, failure semantics, and C3–C6 integration is complete and accepted**.
 **D7 — integrated acceptance and Stage-D closeout is complete and accepted**.
-The current stage is **Stage I — Marketplace**. **I0 COMPLETE / EXTERNALLY ACCEPTED**; **I1 COMPLETE / EXTERNALLY ACCEPTED**.
+The current stage is **Stage I — Marketplace**. **I0 COMPLETE / EXTERNALLY ACCEPTED**;
+**I1 COMPLETE / EXTERNALLY ACCEPTED**. The I2–I4 Marketplace MVP and integrated I5
+journeys are implemented and verified in this worktree. Full repository, hosted
+integration, browser, build, type, lint and security gates passed. External and
+remaining production acceptance remain pending; Stage I is not yet declared fully accepted.
 The frozen governance authority is `docs/stage-i/README.md` and ADRs 0027–0030.
 The intentional execution order is **G → bounded/pre-H I → H hardening**, without renaming stages.
 **Stage H NOT STARTED** and retains sandbox, secrets, interactive approval, persistent local trust
@@ -80,17 +84,29 @@ and local revocation-enforcement authority. I0 adds no runtime feature, migratio
 
 - I0 — Architecture/governance freeze: complete and externally accepted.
 - I1 — Hosted Marketplace Foundation and Immutable Catalog: complete and externally accepted.
-- I2 — Publisher Identity and Publication Workflow: not started.
-- I3 — Local Discovery Client and Marketplace UI: not started.
-- I4 — Exact Marketplace Download and Stage-G Install Handoff: not started.
-- I5 — Integrated Acceptance and Closeout: not started.
+- I2 — Publisher Identity and Publication Workflow: reachable MVP implemented; external/production acceptance pending.
+- I3 — Local Discovery Client and Marketplace UI: MVP implemented and focused checks passed; external acceptance pending.
+- I4 — Exact Marketplace Download and Stage-G Install Handoff: implemented with local regression evidence; external acceptance pending.
+- I5 — Integrated Acceptance and Closeout: integrated MVP/demo and full automated gates passed; formal production/external closeout pending.
 
-`apps/marketplace` now supplies an independent hosted read-only service: bounded public catalog
+`apps/marketplace` supplies an independent hosted service with read-only public serving: bounded public catalog
 search, exact release metadata and fully verified archive downloads, PostgreSQL 18 persistence,
 and private S3-compatible object reads. Its independent hosted migration head is
-`mp0001_catalog_foundation`. Publisher authentication, uploads, publication workflows, local
-Marketplace client/UI and Marketplace installation remain unimplemented. Local schema head and
-Worker/Scheduler guards remain `0013_stage_g3_package_registry`; no local 0014 was introduced.
+`mp0003_publication_workflow` in the current unaccepted I2 worktree. OIDC authentication,
+publisher creation, project claims and CSRF-protected MVP publisher routes are implemented but
+remain unaccepted for production. Separately composed publisher writes now expose key proof,
+upload/quarantine, isolated static verification and explicit immutable publication. The local
+Marketplace UI/proxy and exact retained-ticket download/approval handoff to the existing Stage-G
+installer are implemented. Local schema head and Worker/Scheduler guards are
+`0014_stage_i4_marketplace_install_requests`. The ticket table does not replace package registry
+or Run executable evidence. See `stage-i/i4-i5-implementation.md` for current evidence and limits.
+Final MVP verification: 3,271 Python tests, 154 frontend tests, 52 real hosted integration
+tests, four supervised browser journeys, production web build, lint/format, type checks,
+and security scan (700 files, no findings) passed. The real journey preserves v1 history,
+uses explicit v2 rebind, observes yank/revoke without local software mutation, and executes
+after the actual Marketplace server stops. External/live OIDC and supported Unix ticket/runtime
+qualification, publisher administration/moderation/transfer and the complete production fault
+matrix remain pending; no production or external acceptance is inferred from MVP test success.
 See `marketplace-i1.md`, the development/deployment guides, and `stage-i/i1-implementation.md`.
 
 I1 verification passed 99 offline Marketplace tests and 50 real PostgreSQL/SeaweedFS integration

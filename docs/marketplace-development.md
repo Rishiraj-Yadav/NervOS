@@ -1,4 +1,8 @@
-# Hosted Marketplace development — I1
+# Hosted Marketplace development
+
+Current MVP publication, local installation and real runtime acceptance are documented
+in [the I4/I5 implementation report](stage-i/i4-i5-implementation.md). I0/I1 retain
+external acceptance; later milestones still require their independent closeout.
 
 Requirements: Python 3.12+, uv, Docker with its Linux engine and Docker Compose.
 The separate service uses PostgreSQL 18; local NervOS retains SQLite.
@@ -24,7 +28,7 @@ a project dotenv file. Development/test may explicitly use a loopback HTTP S3 en
 With a migration identity injected, run `uv run alembic -c apps/marketplace/alembic.ini upgrade head`.
 Switch to read-only serving credentials, then run `uv run python scripts/dev.py marketplace`
 or `make dev-marketplace` (loopback port 8001). It does not auto-migrate or seed. An empty catalog is
-correct until I2 publication exists. No fixture insertion HTTP endpoint or production seed command
+correct until a publisher explicitly publishes a verified release. No fixture insertion HTTP endpoint or production seed command
 is provided. Stop the development server with Ctrl+C; operator-managed dependencies have their own
 shutdown lifecycle. The acceptance wrapper always removes its own disposable dependency project.
 
