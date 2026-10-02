@@ -119,7 +119,12 @@ hosted publication/storage/install/runtime journey is a separate integration tes
 Frozen plan blobs remain F `62cfc0a8039e233c82e2a30ff3fd59495e99395d`,
 G `4554ab5e93b35f4bbc4daed164ee5712077c1006`,
 I `7bf5cff40eb7ed5defe2d7598b72e0606d29ce7b`.
-No developer runtime database was migrated. Git finalization remains a separate task.
+No developer runtime database was migrated. Git finalization is tracked in PR #44.
+Its first hosted check exposed Linux Pyright evaluating the Windows-only WinDLL
+function. An explicit Windows platform guard resolves that portability issue;
+targeted Linux and Windows type checks and Ruff checks pass. Resource-limit
+values and the platform enforcement paths are unchanged. Hosted CI is rerun for
+the resulting commit before merge.
 
 ## Demo workflow
 

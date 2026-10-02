@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import sys
 from ctypes import wintypes
 
 _job: object | None = None
@@ -14,7 +15,6 @@ def apply_limits(memory_bytes: int, cpu_seconds: int) -> None:
         raise ValueError("Invalid verifier limits")
     if os.name != "nt":
         import resource
-        import sys
 
         # Linux ignores RLIMIT_NPROC for root and privileged identities. A verifier
         # that cannot enforce the no-descendant contract must fail closed.
@@ -30,6 +30,9 @@ def apply_limits(memory_bytes: int, cpu_seconds: int) -> None:
 
 
 def _windows_limits(memory_bytes: int, cpu_seconds: int) -> None:
+    if sys.platform != "win32":
+        raise RuntimeError("Windows verifier containment requires Windows")
+
     # Structures mirror the public Win32 JOBOBJECT_EXTENDED_LIMIT_INFORMATION ABI.
     class Basic(ctypes.Structure):
         _fields_ = [
@@ -96,7 +99,6 @@ def _windows_limits(memory_bytes: int, cpu_seconds: int) -> None:
 def usage_snapshot() -> dict[str, int | float]:
     if os.name != "nt":
         import resource
-        import sys
 
         value = resource.getrusage(resource.RUSAGE_SELF)
         result: dict[str, int | float] = {
