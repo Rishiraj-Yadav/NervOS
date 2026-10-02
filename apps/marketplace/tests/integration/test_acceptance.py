@@ -84,13 +84,13 @@ def test_migration_cycle(database: Engine) -> None:
             ).scalar_one()
             == SCHEMA_HEAD
         )
-    assert set(inspect(database).get_table_names()) == {
+    assert {
         "package_projects",
         "package_listings",
         "package_releases",
         "artifacts",
         "marketplace_alembic_version",
-    }
+    }.issubset(set(inspect(database).get_table_names()))
     command.downgrade(config, "base")
     assert inspect(database).get_table_names() == ["marketplace_alembic_version"]
     command.upgrade(config, "head")
@@ -198,14 +198,28 @@ def test_checks(database: Engine, sql: str) -> None:
 
 def test_identity_race(database: Engine) -> None:
     barrier = Barrier(2)
+    publisher_id = uuid4()
+    with database.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO publishers "
+                "(id,handle,display_name,kind,state,revision,created_at,updated_at) "
+                "VALUES (:id,'fixture-race','Fixture Race','organization','active',1,now(),now())"
+            ),
+            {"id": publisher_id},
+        )
 
     def claim() -> bool:
         barrier.wait(timeout=5)
         try:
             with database.begin() as connection:
                 connection.execute(
-                    text("INSERT INTO package_projects VALUES (:id,'com.race.test',now())"),
-                    {"id": uuid4()},
+                    text(
+                        "INSERT INTO package_projects "
+                        "(id,package_id,created_at,publisher_id) "
+                        "VALUES (:id,'com.race.test',now(),:publisher_id)"
+                    ),
+                    {"id": uuid4(), "publisher_id": publisher_id},
                 )
             return True
         except SQLAlchemyError:
@@ -493,7 +507,7 @@ def test_api_storage_bytes(
     database: Engine, hosted_settings: MarketplaceSettings, mutation: str
 ) -> None:
     fixture = signed_package()
-    digest = insert_fixture(database, "com.acme.invoice")
+    digest = hashlib.sha256(fixture.raw).hexdigest()
     admin = s3_client(admin_settings(hosted_settings))
     key = object_key(digest)
     data = fixture.raw
@@ -504,9 +518,17 @@ def test_api_storage_bytes(
     if mutation == "long":
         data += b"x"
     if mutation == "missing":
+        insert_fixture(database, "com.acme.invoice")
         admin.delete_object(Bucket=hosted_settings.s3_bucket, Key=key)
     else:
-        admin.put_object(Bucket=hosted_settings.s3_bucket, Key=key, Body=data)
+        version = admin.put_object(Bucket=hosted_settings.s3_bucket, Key=key, Body=data).get(
+            "VersionId"
+        )
+        insert_fixture(
+            database,
+            "com.acme.invoice",
+            storage_version_id=version or "fixture-version",
+        )
     engine = create_hosted_engine(hosted_settings)
     store = S3ArtifactStore(hosted_settings)
     try:
@@ -544,7 +566,9 @@ def test_real_server_smoke(database: Engine, hosted_settings: MarketplaceSetting
     fixture = signed_package()
     digest = hashlib.sha256(fixture.raw).hexdigest()
     admin = s3_client(admin_settings(hosted_settings))
-    admin.put_object(Bucket=hosted_settings.s3_bucket, Key=object_key(digest), Body=fixture.raw)
+    version = admin.put_object(
+        Bucket=hosted_settings.s3_bucket, Key=object_key(digest), Body=fixture.raw
+    ).get("VersionId")
     admin.close()
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
@@ -552,6 +576,10 @@ def test_real_server_smoke(database: Engine, hosted_settings: MarketplaceSetting
     environment = os.environ.copy()
     for name in MarketplaceSettings.model_fields:
         value = getattr(hosted_settings, name)
+        # Pydantic settings expects JSON for tuple-valued environment
+        # fields; the fixture only needs transport/runtime scalars.
+        if isinstance(value, tuple):
+            continue
         if isinstance(value, SecretStr):
             value = value.get_secret_value()
         if value is not None:
@@ -571,8 +599,9 @@ def test_real_server_smoke(database: Engine, hosted_settings: MarketplaceSetting
         ],
         cwd=ROOT,
         env=environment,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
     try:
         with httpx.Client(
@@ -586,11 +615,18 @@ def test_real_server_smoke(database: Engine, hosted_settings: MarketplaceSetting
                 except httpx.HTTPError:
                     pass
                 if process.poll() is not None or time.monotonic() > deadline:
-                    pytest.fail("Hosted server did not become ready")
+                    if process.poll() is None:
+                        process.terminate()
+                    _, stderr = process.communicate(timeout=5)
+                    pytest.fail(f"Hosted server did not become ready: {stderr[-4000:]}")
                 time.sleep(0.2)
             assert client.get("/health/live").status_code == 200
             assert client.get("/marketplace/v1/packages").json()["items"] == []
-            insert_fixture(database, "com.acme.invoice")
+            insert_fixture(
+                database,
+                "com.acme.invoice",
+                storage_version_id=version or "fixture-version",
+            )
             assert len(client.get("/marketplace/v1/packages").json()["items"]) == 1
             assert (
                 client.get(

@@ -22,6 +22,9 @@ from ..fixtures import NOW, descriptor, signed_package
 
 
 class FakeRepository:
+    def storage_version(self, archive_sha256: str) -> str | None:
+        return None
+
     def __init__(self) -> None:
         self.fixture = signed_package()
         self.detail = descriptor(self.fixture)
@@ -102,10 +105,12 @@ class MemoryStore:
         self.opened: MemoryStream | None = None
         self.fail = False
 
-    def stat(self, archive_sha256: str) -> ArtifactStat:
+    def stat(self, archive_sha256: str, *, version_id: str | None = None) -> ArtifactStat:
         return ArtifactStat(len(self.data))
 
-    def open_verified(self, archive_sha256: str, expected_size: int) -> MemoryStream:
+    def open_verified(
+        self, archive_sha256: str, expected_size: int, *, version_id: str | None = None
+    ) -> MemoryStream:
         if self.fail:
             raise MarketplaceError("artifact_unavailable", 503)
         self.opened = MemoryStream(self.data)

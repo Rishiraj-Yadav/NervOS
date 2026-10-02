@@ -11,6 +11,7 @@ import { ConversationsPage } from "./pages/ConversationsPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { LoginPage } from "./pages/LoginPage";
 import { MemoriesPage } from "./pages/MemoriesPage";
+import { MarketplacePage } from "./pages/MarketplacePage";
 import { NotFoundPage } from "./pages/NotFoundPage";
 import { PackagesPage } from "./pages/PackagesPage";
 import { PackageInstallPage } from "./pages/PackageInstallPage";
@@ -33,6 +34,7 @@ export function NewAutomationRoute() { return <SessionView page="new-automation"
 export function ConversationsRoute() { return <SessionView page="conversations" />; }
 export function ConversationRoute() { return <SessionView page="conversation" />; }
 export function MemoriesRoute() { return <SessionView page="memories" />; }
+export function MarketplaceRoute() { return <SessionView page="marketplace" />; }
 
 type Session =
   | { kind: "unconfigured" }
@@ -89,7 +91,7 @@ export function NotFoundRoute() {
   return <NotFoundPage />;
 }
 
-function SessionView({ page }: { page: "home" | "setup" | "login" | "agents" | "agent" | "packages" | "package-install" | "package-detail" | "automations" | "automation" | "new-automation" | "conversations" | "conversation" | "memories" }) {
+function SessionView({ page }: { page: "home" | "setup" | "login" | "agents" | "agent" | "packages" | "package-install" | "package-detail" | "automations" | "automation" | "new-automation" | "conversations" | "conversation" | "memories" | "marketplace" }) {
   const session = useOutletContext<Session>();
   const location = useLocation();
 
@@ -117,6 +119,7 @@ function SessionView({ page }: { page: "home" | "setup" | "login" | "agents" | "
   if (page === "conversations") return <ConversationsPage />;
   if (page === "conversation") return <ConversationPage />;
   if (page === "memories") return <MemoriesPage />;
+  if (page === "marketplace") return <MarketplacePage />;
   return <Navigate to="/" replace />;
 }
 

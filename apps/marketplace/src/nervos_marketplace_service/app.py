@@ -1,5 +1,6 @@
 """Hosted composition root. Startup never migrates, seeds or executes packages."""
 
+import base64
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -11,19 +12,33 @@ from sqlalchemy.engine import Engine
 
 from nervos_marketplace_service.api.errors import expected_error, unexpected_error
 from nervos_marketplace_service.api.middleware import PublicReadMiddleware
+from nervos_marketplace_service.api.publisher_router import router as publisher_router
 from nervos_marketplace_service.api.router import router
 from nervos_marketplace_service.application.artifact_reads import ArtifactReadService
+from nervos_marketplace_service.application.authentication import Authentication
+from nervos_marketplace_service.application.authorization import Authorization
 from nervos_marketplace_service.application.catalog_queries import MarketplaceCatalogQueryService
 from nervos_marketplace_service.application.ports import (
     ArtifactStore,
     CatalogRepository,
     DependencyReadiness,
 )
+from nervos_marketplace_service.application.publication import Publication
+from nervos_marketplace_service.application.publisher_management import PublisherManagement
 from nervos_marketplace_service.config import MarketplaceSettings
 from nervos_marketplace_service.domain.errors import MarketplaceError
+from nervos_marketplace_service.domain.identity import Assurance
 from nervos_marketplace_service.infrastructure.catalog_repository import PostgresCatalogRepository
-from nervos_marketplace_service.infrastructure.database import SCHEMA_HEAD, create_hosted_engine
+from nervos_marketplace_service.infrastructure.database import (
+    SCHEMA_HEAD,
+    create_hosted_engine,
+    create_writer_engine,
+)
+from nervos_marketplace_service.infrastructure.oidc import OIDCClient
+from nervos_marketplace_service.infrastructure.publication_storage import S3PublicationStorage
 from nervos_marketplace_service.infrastructure.s3_artifact_store import S3ArtifactStore
+from nervos_marketplace_service.infrastructure.static_verifier import StaticVerifier
+from nervos_marketplace_service.infrastructure.unit_of_work import PostgresUnitOfWork
 
 
 class HostedReadiness:
@@ -77,12 +92,72 @@ def create_app() -> FastAPI:
         logging.getLogger(name).setLevel(logging.WARNING)
     app = create_test_app(PostgresCatalogRepository(engine), store, HostedReadiness(engine, store))
 
+    oidc: OIDCClient | None = None
+    writer: Engine | None = None
+    publication_store: S3PublicationStorage | None = None
+    if settings.publisher_enabled:
+        oidc = OIDCClient(settings)
+        writer = create_writer_engine(settings)
+        uow = PostgresUnitOfWork(writer)
+        key = (
+            base64.b64decode(
+                settings.auth_transaction_encryption_key.get_secret_value(), validate=True
+            )
+            if settings.auth_transaction_encryption_key
+            else b""
+        )
+        authentication = Authentication(
+            uow,
+            oidc,
+            key,
+            settings.session_absolute_seconds,
+            settings.session_idle_seconds,
+            settings.cli_token_seconds,
+        )
+        assurance = Assurance(
+            settings.accepted_acr_values,
+            settings.required_amr_values,
+            settings.recent_auth_max_age_seconds,
+        )
+        app.state.publisher_authentication = authentication
+        app.state.publisher_management = PublisherManagement(
+            uow,
+            Authorization(assurance),
+            settings.oidc_client_id or "nervos-marketplace",
+            settings.challenges_per_minute,
+            settings.projects_per_publisher,
+        )
+        publication_store = S3PublicationStorage(settings)
+        app.state.publication = Publication(
+            uow,
+            Authorization(assurance),
+            publication_store,
+            settings.artifact_temp_directory,
+            timeout=settings.upload_timeout_seconds,
+            idle=settings.upload_idle_seconds,
+            account_uploads=settings.active_uploads_per_account,
+            publisher_uploads=settings.active_uploads_per_publisher,
+            daily_bytes=settings.daily_upload_bytes,
+        )
+        app.state.static_verifier = StaticVerifier(
+            settings.verifier_memory_bytes,
+            settings.verifier_cpu_seconds,
+            settings.verifier_wall_seconds,
+        )
+        app.include_router(publisher_router)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
         try:
             yield
         finally:
             store.close()
+            if oidc is not None:
+                await oidc.close()
+            if writer is not None:
+                writer.dispose()
+            if publication_store is not None:
+                publication_store.close()
             engine.dispose()
 
     app.router.lifespan_context = lifespan

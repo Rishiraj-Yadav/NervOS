@@ -50,6 +50,7 @@ from nervos_core.application.package_signing import (
 )
 from nervos_core.application.package_wheel import (
     DependencyLock,
+    RequirementBudget,
     WheelMetadata,
     agent_requires_dist,
     inspect_wheel,
@@ -152,7 +153,10 @@ def verify_package(
     manifest = parse_package_manifest(manifest_bytes)
     config_schema = parse_config_schema_json(config_bytes)
 
-    agent_wheel = inspect_wheel(agent_wheel_bytes, filename=AGENT_WHEEL_PATH)
+    requirement_budget = RequirementBudget()
+    agent_wheel = inspect_wheel(
+        agent_wheel_bytes, filename=AGENT_WHEEL_PATH, requirement_budget=requirement_budget
+    )
     lock = parse_dependency_lock(lock_bytes)
 
     wheel_payloads = {
@@ -161,7 +165,7 @@ def verify_package(
         if path.startswith(WHEELS_PREFIX)
     }
     dependencies = tuple(
-        inspect_wheel(payload, filename=filename)
+        inspect_wheel(payload, filename=filename, requirement_budget=requirement_budget)
         for filename, payload in sorted(
             wheel_payloads.items(), key=lambda kv: kv[0].encode("utf-8")
         )

@@ -40,6 +40,9 @@ class PackageProjectRow(HostedBase):
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
     package_id: Mapped[str] = mapped_column(String(128, collation="C"), unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    publisher_id: Mapped[UUID] = mapped_column(Uuid)
+    ownership_revision: Mapped[int] = mapped_column(Integer, server_default="1")
+    visibility: Mapped[str] = mapped_column(String(16), server_default="visible")
     __table_args__ = (
         CheckConstraint(
             "length(package_id) BETWEEN 1 AND 128 AND package_id NOT LIKE 'nervos.%'",
@@ -84,9 +87,16 @@ class ArtifactRow(HostedBase):
     archive_sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
     size_bytes: Mapped[int] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    storage_version_id: Mapped[str | None] = mapped_column(String(1024))
     __table_args__ = (
         CheckConstraint("archive_sha256 ~ '^[0-9a-f]{64}$'", name="digest"),
         CheckConstraint("size_bytes BETWEEN 1 AND 268435456", name="size_bound"),
+        CheckConstraint(
+            "storage_version_id IS NULL OR (storage_version_id <> 'null' AND "
+            "length(storage_version_id) BETWEEN 1 AND 1024 AND "
+            "storage_version_id ~ '^[A-Za-z0-9._~+/=-]+$')",
+            name="storage_version",
+        ),
     )
 
 
@@ -94,6 +104,7 @@ class PackageReleaseRow(HostedBase):
     __tablename__ = "package_releases"
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
     project_id: Mapped[UUID] = mapped_column(ForeignKey("package_projects.id", ondelete="RESTRICT"))
+    original_publisher_id: Mapped[UUID] = mapped_column(Uuid)
     exact_version: Mapped[str] = mapped_column(String(64, collation="C"))
     archive_sha256: Mapped[str] = mapped_column(
         ForeignKey("artifacts.archive_sha256", ondelete="RESTRICT"), unique=True

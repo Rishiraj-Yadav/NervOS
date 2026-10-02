@@ -6,6 +6,21 @@
       "actions": ["Admin", "Read", "List", "Write", "Tagging"]
     },
     {
+      "name": "synthetic-probe-finalizer",
+      "credentials": [{"accessKey": "fixture-finalizer-probe", "secretKey": "synthetic-finalizer-probe-password"}],
+      "actions": ["Read:marketplace-test", "Write:marketplace-test/immutability-probe/*", "Write:marketplace-test/artifacts/*", "List:marketplace-test"]
+    },
+    {
+      "name": "synthetic-versioning-reader",
+      "credentials": [{"accessKey": "fixture-version-reader", "secretKey": "synthetic-version-reader-password"}],
+      "actions": ["Read:marketplace-test/artifacts/*"]
+    },
+    {
+      "name": "synthetic-quarantine-writer",
+      "credentials": [{"accessKey": "fixture-quarantine-writer", "secretKey": "synthetic-quarantine-writer-password"}],
+      "actions": ["Read:marketplace-test/quarantine/*", "Write:marketplace-test/quarantine/*"]
+    },
+    {
       "name": "synthetic-serving-reader",
       "credentials": [{"accessKey": "fixture-reader", "secretKey": "synthetic-reader-password"}],
       "actions": ["Read:marketplace-test", "List:marketplace-test"]

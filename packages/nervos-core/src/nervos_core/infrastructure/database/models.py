@@ -52,6 +52,40 @@ MODEL_NAME_SQL = (
 )
 
 
+class MarketplaceInstallRequestRecord(Base):
+    """Owner-scoped exact download evidence; Stage G owns installed packages."""
+
+    __tablename__ = "marketplace_install_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('created','downloaded','approved','installed','failed')", name="state_value"
+        ),
+        CheckConstraint("length(package_id) BETWEEN 1 AND 128", name="package_id_bound"),
+        CheckConstraint("length(package_version) BETWEEN 1 AND 64", name="version_bound"),
+        CheckConstraint("observed_status_revision > 0", name="revision_positive"),
+        CheckConstraint("expected_size_bytes >= 0", name="size_nonnegative"),
+        Index("ix_marketplace_install_requests_owner", "owner_user_id", "created_at"),
+        ForeignKeyConstraint(["owner_user_id"], ["users.id"], name="owner_user"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    marketplace_origin: Mapped[str] = mapped_column(String(512), nullable=False)
+    package_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    package_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    expected_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    expected_archive_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    expected_content_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    expected_signer_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    observed_status_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    observed_distribution_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, server_default="created")
+    artifact_path: Mapped[str | None] = mapped_column(Text)
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
 class UserRecord(Base):
     """Persistence record for a NervOS user."""
 

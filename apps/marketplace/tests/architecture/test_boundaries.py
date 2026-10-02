@@ -29,7 +29,15 @@ def test_hosted_imports() -> None:
             for name in names:
                 assert not name.startswith(forbidden), (path, name)
                 if name.startswith("nervos_core"):
-                    assert name in allowed, (path, name)
+                    static_seams = {
+                        "verifier_child.py": {
+                            "nervos_core.application.package_archive",
+                            "nervos_core.application.package_verification",
+                        },
+                        "publisher_management.py": {"nervos_core.application.package_integrity"},
+                        "publication.py": {"nervos_core.application.package_integrity"},
+                    }
+                    assert name in allowed | static_seams.get(path.name, set()), (path, name)
                 if "domain" in path.parts or "application" in path.parts:
                     assert not name.startswith(("fastapi", "sqlalchemy", "boto3", "botocore"))
 
@@ -63,10 +71,11 @@ def test_schema_isolation() -> None:
     }
     assert not set(HostedBase.metadata.tables).intersection(Base.metadata.tables)
     versions = ROOT / "apps/api/alembic/versions"
-    assert not list(versions.glob("0014*"))
+    # I4's retained local ticket is separate from all hosted catalog tables.
+    assert len(list(versions.glob("0014_stage_i4_marketplace_install_requests.py"))) == 1
     for area in ("worker", "scheduler"):
         source = (ROOT / f"apps/{area}/src/nervos_{area}/app.py").read_text()
-        assert 'EXPECTED_SCHEMA_REVISION = "0013_stage_g3_package_registry"' in source
+        assert 'EXPECTED_SCHEMA_REVISION = "0014_stage_i4_marketplace_install_requests"' in source
 
 
 def test_no_serving_mutations() -> None:
@@ -75,7 +84,13 @@ def test_no_serving_mutations() -> None:
             continue
         for node in ast.walk(ast.parse(path.read_text())):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-                assert node.func.attr not in {"put_object", "delete_object", "create_all"}
+                if path.name == "s3_final_artifacts.py":
+                    assert node.func.attr not in {"delete_object", "create_all"}
+                elif path.name == "publication_storage.py":
+                    # I2 quarantine writer owns writes/deletes; serving remains read-only.
+                    assert node.func.attr != "create_all"
+                else:
+                    assert node.func.attr not in {"put_object", "delete_object", "create_all"}
 
 
 def test_no_orm_session_mutation() -> None:

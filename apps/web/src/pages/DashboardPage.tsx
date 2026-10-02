@@ -59,6 +59,15 @@ export function DashboardPage({ user }: { user: User }) {
         </div>
         <div className="panel ready-card" style={{ marginTop: "1rem" }}>
           <div>
+            <h2>Marketplace</h2>
+            <p>Discover public agent packages from your configured hosted Marketplace.</p>
+            <Link className="button-link" to="/marketplace">
+              Browse Marketplace
+            </Link>
+          </div>
+        </div>
+        <div className="panel ready-card" style={{ marginTop: "1rem" }}>
+          <div>
             <h2>Conversations</h2>
             <p>
               Start interactive multi-turn conversation sessions with your configured agents.

@@ -1,9 +1,32 @@
-# Hosted Marketplace deployment — I1
+# Hosted Marketplace deployment
 
 See [configuration, privileges, schema and read API](marketplace-i1.md).
 Run the hosted service separately from local NervOS. PostgreSQL 18, a private S3-compatible
 bucket and a dedicated private staging directory are required. No local SQLite fallback,
-publisher system, package execution, Marketplace dashboard or Stage-H trust is supplied.
+local execution or Stage-H trust is supplied by the hosted service. The current worktree
+adds optional publisher/publication services; its MVP and remaining production acceptance
+are described in [the implementation report](stage-i/i4-i5-implementation.md).
+
+## Optional publisher MVP configuration
+
+Use process settings with the `NERVOS_MARKETPLACE_` prefix. Set `PUBLISHER_ENABLED=true`
+only after provisioning the separately privileged `WRITER_DATABASE_DSN`,
+`QUARANTINE_ACCESS_KEY_ID`/`QUARANTINE_SECRET_ACCESS_KEY` and
+`FINALIZER_ACCESS_KEY_ID`/`FINALIZER_SECRET_ACCESS_KEY`. Serving credentials remain
+SELECT/HEAD/GET only. Do not give serving credentials write access.
+
+Configure `PUBLIC_ORIGIN`, `OIDC_ISSUER`, `OIDC_CLIENT_ID`, optional `OIDC_CLIENT_SECRET`,
+and `AUTH_TRANSACTION_ENCRYPTION_KEY` (base64-encoded 32 random bytes, injected by the
+operator). Register the exact hosted `/marketplace/v1/auth/callback` HTTPS callback
+with the identity provider. Configure accepted ACR, required AMR and recent-auth
+policy for signing/key/ownership-sensitive operations. No permissive identity stub
+or hard-coded account exists in production composition.
+
+The verifier child must run as an unprivileged identity on Unix; running it as root
+fails closed. Default ceilings are 2 GiB memory, 60 seconds CPU and 120 seconds wall.
+Use a private dedicated artifact directory, retain immutable object versions, and
+do not log callback query strings, authorization headers or cookie values at the proxy.
+The MVP does not establish Stage-H sandboxing or a production moderation closeout.
 
 ## Start safely
 
@@ -30,7 +53,8 @@ objects are not exposed. Verify restored byte count and SHA-256 against catalog 
 reopening traffic. Readiness proves dependencies/schema, not completeness of every artifact.
 
 Never delete published history or roll back revocation to make a restore appear current. Future
-I2 writes require their own reconciliation/audit design. Migration downgrade drops the four tables
+Publisher writes have separate audit, leases and version-pinned finalization. The full
+production recovery matrix remains an acceptance requirement. Migration downgrade drops the hosted tables
 and is intended for disposable acceptance databases, not routine production recovery.
 
 Graceful shutdown closes active readers and disposes clients/engine. After a crash, with all service

@@ -6,6 +6,7 @@ from nervos_api.api.routes.agent_instances import router as agent_instances_rout
 from nervos_api.api.routes.auth import router as auth_router
 from nervos_api.api.routes.conversations import router as conversations_router
 from nervos_api.api.routes.health import router as health_router
+from nervos_api.api.routes.marketplace import router as marketplace_router
 from nervos_api.api.routes.mcp_connections import router as mcp_connections_router
 from nervos_api.api.routes.memories import router as memories_router
 from nervos_api.api.routes.packages import router as packages_router
@@ -24,3 +25,4 @@ api_router.include_router(triggers_router)
 api_router.include_router(runs_router)
 api_router.include_router(conversations_router)
 api_router.include_router(memories_router, prefix="/memories")
+api_router.include_router(marketplace_router)

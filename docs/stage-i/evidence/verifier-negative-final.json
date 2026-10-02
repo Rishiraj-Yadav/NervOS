@@ -1,0 +1,68 @@
+{
+  "passed": true,
+  "measurements": [
+    {
+      "platform": "win32",
+      "passed": true,
+      "results": [
+        {
+          "mode": "memory",
+          "exit": 2,
+          "wall_seconds": 0.14100000000053114,
+          "terminated": true
+        },
+        {
+          "mode": "cpu",
+          "exit": 3221225540,
+          "wall_seconds": 2.3909999999996217,
+          "terminated": true
+        },
+        {
+          "mode": "descendants",
+          "exit": 2,
+          "wall_seconds": 0.125,
+          "terminated": true
+        },
+        {
+          "mode": "wall",
+          "terminated": true,
+          "wall_seconds": 1.0150000000003274
+        }
+      ],
+      "exit": 0,
+      "process_limits_sha256": "7444d92da49b8dcc8ed1dbdee213df9e57129d28639b5211e7c9877f966ef978"
+    },
+    {
+      "platform": "linux",
+      "image": "python:3.12.12-slim-bookworm@sha256:2986c55feb36e6cae00fa1fefb454283e4b33f35e75ff8bdd123b134130be301",
+      "passed": true,
+      "results": [
+        {
+          "mode": "memory",
+          "exit": 2,
+          "wall_seconds": 1.0619999999998981,
+          "terminated": true
+        },
+        {
+          "mode": "cpu",
+          "exit": 137,
+          "wall_seconds": 1.5470000000004802,
+          "terminated": true
+        },
+        {
+          "mode": "descendants",
+          "exit": 2,
+          "wall_seconds": 0.8440000000000509,
+          "terminated": true
+        },
+        {
+          "mode": "wall",
+          "terminated": true,
+          "wall_seconds": 1.014999999999418
+        }
+      ],
+      "exit": 0,
+      "process_limits_sha256": "7444d92da49b8dcc8ed1dbdee213df9e57129d28639b5211e7c9877f966ef978"
+    }
+  ]
+}

@@ -15,6 +15,7 @@ from nervos_core.domain.package_installation import validate_sha256
 
 from nervos_marketplace_service.application.ports import ArtifactStat
 from nervos_marketplace_service.config import MarketplaceSettings
+from nervos_marketplace_service.domain.artifact_reference import validate_version_id
 from nervos_marketplace_service.domain.catalog import MAX_ARCHIVE_BYTES
 from nervos_marketplace_service.domain.errors import MarketplaceError
 from nervos_marketplace_service.infrastructure.verified_stream import StagedArtifact
@@ -61,10 +62,18 @@ class S3ArtifactStore:
         self.streams: set[StagedArtifact] = set()
         self.closed = False
 
-    def stat(self, archive_sha256: str) -> ArtifactStat:
+    def stat(self, archive_sha256: str, *, version_id: str | None = None) -> ArtifactStat:
         key = object_key(archive_sha256)
         try:
-            result = self.client.head_object(Bucket=self.settings.s3_bucket, Key=key)
+            if version_id is None:
+                result = self.client.head_object(Bucket=self.settings.s3_bucket, Key=key)
+            else:
+                validate_version_id(version_id)
+                result = self.client.head_object(
+                    Bucket=self.settings.s3_bucket, Key=key, VersionId=version_id
+                )
+                if result.get("VersionId") != version_id:
+                    raise ValueError("Storage returned another version")
             return ArtifactStat(result["ContentLength"])
         except Exception:
             raise MarketplaceError("artifact_unavailable", 503) from None
@@ -79,7 +88,9 @@ class S3ArtifactStore:
         except Exception:
             return False
 
-    def open_verified(self, archive_sha256: str, expected_size: int) -> StagedArtifact:
+    def open_verified(
+        self, archive_sha256: str, expected_size: int, *, version_id: str | None = None
+    ) -> StagedArtifact:
         key = object_key(archive_sha256)
         if not 0 < expected_size <= MAX_ARCHIVE_BYTES:
             raise MarketplaceError("artifact_unavailable", 503)
@@ -93,11 +104,18 @@ class S3ArtifactStore:
                 MAX_ARCHIVE_BYTES * self.settings.max_concurrent_artifact_reads
             ):
                 raise MarketplaceError("artifact_unavailable", 503)
-            if self.stat(archive_sha256).size_bytes != expected_size:
+            if self.stat(archive_sha256, version_id=version_id).size_bytes != expected_size:
                 raise MarketplaceError("artifact_unavailable", 503)
-            response = self.client.get_object(Bucket=self.settings.s3_bucket, Key=key)
+            if version_id is None:
+                response = self.client.get_object(Bucket=self.settings.s3_bucket, Key=key)
+            else:
+                response = self.client.get_object(
+                    Bucket=self.settings.s3_bucket, Key=key, VersionId=version_id
+                )
             body = response["Body"]
             try:
+                if version_id is not None and response.get("VersionId") != version_id:
+                    raise MarketplaceError("artifact_unavailable", 503)
                 if response["ContentLength"] != expected_size:
                     raise MarketplaceError("artifact_unavailable", 503)
                 file = tempfile.NamedTemporaryFile(  # noqa: SIM115 -- ownership transfers to StagedArtifact

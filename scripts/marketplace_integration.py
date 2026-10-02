@@ -79,6 +79,9 @@ def main() -> int:
                         "Disposable Marketplace services failed bounded readiness"
                     ) from None
                 time.sleep(1)
+        client.put_bucket_versioning(
+            Bucket="marketplace-test", VersioningConfiguration={"Status": "Enabled"}
+        )
         client.close()
         print("Disposable PostgreSQL 18 and authenticated S3 ready", flush=True)
         return subprocess.run(

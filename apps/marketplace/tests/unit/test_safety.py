@@ -37,7 +37,9 @@ def test_final_status_recheck_closes_stream(state: DistributionState) -> None:
     repository = FakeRepository()
 
     class ChangingStore(MemoryStore):
-        def open_verified(self, archive_sha256: str, expected_size: int) -> MemoryStream:
+        def open_verified(
+            self, archive_sha256: str, expected_size: int, *, version_id: str | None = None
+        ) -> MemoryStream:
             stream = super().open_verified(archive_sha256, expected_size)
             repository.detail = repository.detail.model_copy(update={"distribution_state": state})
             return stream

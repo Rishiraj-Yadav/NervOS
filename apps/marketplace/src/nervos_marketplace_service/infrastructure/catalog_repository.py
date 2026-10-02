@@ -31,6 +31,20 @@ class PostgresCatalogRepository:
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
 
+    def storage_version(self, archive_sha256: str) -> str | None:
+        # to_jsonb supports the accepted mp0001 schema during explicit legacy
+        # migration/reconciliation. Missing legacy fields are NULL; new finalized
+        # artifacts receive non-null evidence under mp0003 constraints.
+        rows = self._fetch(
+            "SELECT to_jsonb(a)->>'storage_version_id' AS storage_version_id "
+            "FROM artifacts a WHERE archive_sha256=:digest",
+            {"digest": archive_sha256},
+        )
+        if not rows:
+            raise MarketplaceError("artifact_unavailable", 503)
+        value = rows[0]["storage_version_id"]
+        return str(value) if value is not None else None
+
     def _fetch(self, sql: str, params: dict[str, object]) -> list[RowMapping]:
         try:
             with self.engine.connect() as connection, connection.begin():

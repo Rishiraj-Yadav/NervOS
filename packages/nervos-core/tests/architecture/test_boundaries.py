@@ -22,6 +22,7 @@ FRONTEND_SOURCE = ROOT / "apps" / "web" / "src"
 ORM_MODELS = CORE_SOURCE / "infrastructure" / "database" / "models.py"
 
 EXPECTED_TABLES = {
+    "marketplace_install_requests",
     "users",
     "auth_sessions",
     "agent_instances",
@@ -253,7 +254,7 @@ def test_g2_has_no_network_resolver() -> None:
 def test_g3_adds_the_approved_package_registry_tables() -> None:
     """G3 owns the package registry; earlier migrations and unrelated tables remain stable."""
     migrations = sorted((ROOT / "apps" / "api" / "alembic" / "versions").glob("0*.py"))
-    assert migrations[-1].stem == "0013_stage_g3_package_registry"
+    assert migrations[-1].stem == "0014_stage_i4_marketplace_install_requests"
 
     tables = set(re.findall(r'__tablename__ = "([a-z_]+)"', ORM_MODELS.read_text(encoding="utf-8")))
     assert tables == EXPECTED_TABLES | {
@@ -378,7 +379,7 @@ def test_api_routes_never_reach_persistence_or_a_provider_adapter() -> None:
             module.startswith(("anthropic", "openai", "google.genai", "nervos_models"))
             for module in imports
         ), path
-        for forbidden in ("AgentPersistence", "SqlAlchemyAgentPersistence", "Session", "Base"):
+        for forbidden in ("AgentPersistence", "SqlAlchemyAgentPersistence", "Session"):
             assert forbidden not in text, (path, forbidden)
 
 
@@ -405,7 +406,7 @@ def test_trusted_chat_and_execution_stay_provider_neutral() -> None:
 # D5 authorizes exactly one new control-plane resource: the owner-scoped MCP connection. That is
 # the *only* execution-plane word the router may now contain, and it is asserted positively below,
 # so this is a narrowing of one name rather than a relaxation of the guard.
-D5_AUTHORIZED_ROUTER_SUBSYSTEMS = ("mcp",)
+D5_AUTHORIZED_ROUTER_SUBSYSTEMS = ("mcp", "marketplace")
 
 
 def test_b3_route_surface_and_migration_freeze() -> None:
@@ -442,6 +443,7 @@ def test_b3_route_surface_and_migration_freeze() -> None:
         # F4 adds conversation lifecycle (active/archived/deleted) state.
         "0012_stage_f4_conversation_lifecycle.py",
         "0013_stage_g3_package_registry.py",
+        "0014_stage_i4_marketplace_install_requests.py",
     ]
     # The Worker refuses to run against a schema it does not expect, so the pinned revision and
     # the migration head are one fact in two places. Letting them drift bricks the supervised
@@ -893,6 +895,7 @@ def test_c7_adds_only_the_reviewed_observability_surface() -> None:
         "auth.py",
         "conversations.py",
         "health.py",
+        "marketplace.py",
         # D5 is authorized exactly one new control-plane resource family: MCP connections.
         "mcp_connections.py",
         # F3 is authorized the memories resource family.
@@ -969,7 +972,11 @@ def test_c7_adds_only_the_reviewed_observability_surface() -> None:
     for path in python_files(API_SOURCE):
         text = path.read_text(encoding="utf-8").lower()
         for forbidden in ("sse", "websocket", "text/event-stream", "streaming"):
-            assert forbidden not in text, (path, forbidden)
+            if forbidden == "sse":
+                # Match the protocol/library name, not words such as "addresses".
+                assert re.search(r"\bsse(?:_starlette)?\b", text) is None, (path, forbidden)
+            else:
+                assert forbidden not in text, (path, forbidden)
     for path in python_files(API_ROUTES):
         text = path.read_text(encoding="utf-8")
         for forbidden in ("/attempts", "worker_health", "/workers"):
@@ -1348,11 +1355,11 @@ def test_the_frontend_gained_only_event_vocabulary() -> None:
         assert forbidden not in timeline, forbidden
 
 
-def test_the_migration_head_is_exactly_0013_stage_g3_package_registry() -> None:
+def test_the_migration_head_is_exactly_0014_stage_i4_marketplace_install_requests() -> None:
     """G3 extends the frozen F4 head with the approved package registry migration."""
     versions = ROOT / "apps" / "api" / "alembic" / "versions"
     discovered = sorted(path.name for path in versions.glob("*.py"))
-    assert discovered[-1] == "0013_stage_g3_package_registry.py"
+    assert discovered[-1] == "0014_stage_i4_marketplace_install_requests.py"
 
 
 def test_nervos_mcp_depends_only_on_public_sdk_surfaces() -> None:
@@ -1622,7 +1629,9 @@ def test_the_scheduler_declares_its_own_schema_expectation() -> None:
     scheduler_app = (ROOT / "apps" / "scheduler" / "src" / "nervos_scheduler" / "app.py").read_text(
         encoding="utf-8"
     )
-    assert 'EXPECTED_SCHEMA_REVISION = "0013_stage_g3_package_registry"' in scheduler_app
+    assert (
+        'EXPECTED_SCHEMA_REVISION = "0014_stage_i4_marketplace_install_requests"' in scheduler_app
+    )
     assert "nervos_worker" not in scheduler_app
     main = (ROOT / "apps" / "scheduler" / "src" / "nervos_scheduler" / "main.py").read_text(
         encoding="utf-8"

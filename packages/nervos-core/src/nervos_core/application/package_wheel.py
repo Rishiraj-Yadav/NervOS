@@ -19,10 +19,10 @@ normalizers.
 
 from __future__ import annotations
 
-import email.parser
 import hashlib
 import json
-from collections.abc import Iterable, Mapping
+import re
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -30,7 +30,7 @@ from typing import cast
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import InvalidWheelFilename, parse_wheel_filename
-from packaging.version import Version
+from packaging.version import InvalidVersion, Version
 
 from nervos_core.application.package_archive import (
     ArchiveValidationProfile,
@@ -49,6 +49,11 @@ from nervos_core.application.package_paths import (
     UnsafePackagePath,
     canonical_package_path,
 )
+from nervos_core.application.package_wheel_metadata import (
+    MetadataValueLimitExceeded,
+    selected_headers,
+)
+from nervos_core.application.package_wheel_version import normalized_metadata_version
 
 # V1 is pure-Python only (Stage-G §22/§29, ADR 0026): `py3-none-any` and nothing else.
 REQUIRED_WHEEL_TAG = "py3-none-any"
@@ -61,6 +66,36 @@ _TARGET_PYTHON_VERSION = "3.12"
 _METADATA_MEMBER_SUFFIX = ".dist-info/METADATA"
 _WHEEL_MEMBER_SUFFIX = ".dist-info/WHEEL"
 _DIST_INFO_MARKER = ".dist-info/"
+
+# Conservative subset of packaging's IDENTIFIER grammar. Only a bare ASCII
+# alphanumeric name followed immediately by a marker qualifies. Extras, URLs,
+# specifiers, folding and all other spellings keep the complete parser path.
+_BARE_MARKED_REQUIREMENT = re.compile(r"[A-Za-z0-9]+([ \t]*;[^\r\n]*)\Z")
+
+# User-approved bounded metadata policy; ADR 0031. These apply to every
+# occurrence, including duplicates and inactive markers, across a whole package.
+MAX_REQUIREMENT_VALUE_BYTES = 64 * 1024
+MAX_REQUIREMENT_TOTAL_BYTES = 4 * 1024 * 1024
+MAX_REQUIREMENT_OCCURRENCES = 100_000
+
+
+@dataclass(slots=True)
+class RequirementBudget:
+    """One inspection pass's package-wide Requires-Dist admission budget."""
+
+    bytes_used: int = 0
+    occurrences: int = 0
+
+    def consume(self, value: str) -> None:
+        size = len(str(value).encode("utf-8", "surrogatepass"))
+        if size > MAX_REQUIREMENT_VALUE_BYTES:
+            raise InvalidDependencyWheel("Requires-Dist logical value budget exceeded")
+        self.bytes_used += size
+        self.occurrences += 1
+        if self.bytes_used > MAX_REQUIREMENT_TOTAL_BYTES:
+            raise InvalidDependencyWheel("Requires-Dist package byte budget exceeded")
+        if self.occurrences > MAX_REQUIREMENT_OCCURRENCES:
+            raise InvalidDependencyWheel("Requires-Dist package occurrence budget exceeded")
 
 
 class InvalidAgentWheel(ValueError):
@@ -136,17 +171,38 @@ def _split_wheel_member(paths: Iterable[str], suffix: str) -> list[str]:
     return sorted(path for path in paths if path.endswith(suffix))
 
 
-def _headers_all(raw: bytes) -> dict[str, list[str]]:
-    """All header values, keyed lowercase. Multi-valued headers (`Requires-Dist`, `Tag`) keep every
-    occurrence, because collapsing them would hide a duplicate declaration."""
-    message = email.parser.BytesParser().parsebytes(raw)
+def _metadata_headers(
+    chunks: Iterable[bytes], *, requirement_budget: RequirementBudget | None = None
+) -> dict[str, list[str]]:
+    """Retain consumed evidence; duplicate single-use fields need only two values."""
     collected: dict[str, list[str]] = {}
-    for key, value in message.items():
-        collected.setdefault(key.lower(), []).append(value)
+    budget = requirement_budget if requirement_budget is not None else RequirementBudget()
+    for key, value in _bounded_wheel_headers(
+        chunks, frozenset({"name", "version", "requires-python", "requires-dist"}), budget
+    ):
+        values = collected.setdefault(key, [])
+        if key == "requires-dist" or len(values) < 2:
+            values.append(value)
     return collected
 
 
-def inspect_wheel(raw: WheelSource, *, filename: str) -> WheelMetadata:
+def _bounded_wheel_headers(
+    chunks: Iterable[bytes], selected: frozenset[str], budget: RequirementBudget
+) -> Iterator[tuple[str, str]]:
+    try:
+        for key, value in selected_headers(
+            chunks, selected, value_limits={"requires-dist": MAX_REQUIREMENT_VALUE_BYTES}
+        ):
+            if key == "requires-dist":
+                budget.consume(value)
+            yield key, value
+    except MetadataValueLimitExceeded as error:
+        raise InvalidDependencyWheel(str(error)) from error
+
+
+def inspect_wheel(
+    raw: WheelSource, *, filename: str, requirement_budget: RequirementBudget | None = None
+) -> WheelMetadata:
     """Inspect one wheel's metadata as bytes. Never imports, never extracts.
 
     The filename is *not* parsed as a standard wheel filename. A wheel's real identity is its
@@ -178,17 +234,25 @@ def inspect_wheel(raw: WheelSource, *, filename: str) -> WheelMetadata:
     if len(wheel_paths) != 1:
         raise InvalidDependencyWheel("wheel must contain exactly one WHEEL")
 
-    wheel_headers = _headers_all(archive.read(wheel_paths[0]))
-    tags = wheel_headers.get("tag", [])
-    if not tags or any(tag != REQUIRED_WHEEL_TAG for tag in tags):
+    tag_seen, tags_valid = False, True
+    root_is_purelib: list[str] = []
+    for key, value in selected_headers(
+        archive.stream(wheel_paths[0]), frozenset({"tag", "root-is-purelib"})
+    ):
+        if key == "tag":
+            tag_seen = True
+            tags_valid = tags_valid and value == REQUIRED_WHEEL_TAG
+        elif len(root_is_purelib) < 2:
+            root_is_purelib.append(value)
+    if not tag_seen or not tags_valid:
         raise InvalidDependencyWheel(f"V1 requires every wheel tag to be {REQUIRED_WHEEL_TAG}")
 
-    root_is_purelib = wheel_headers.get("root-is-purelib", [])
     if root_is_purelib != ["true"]:
         raise InvalidDependencyWheel("V1 requires Root-Is-Purelib: true")
 
-    metadata_raw = archive.read(metadata_paths[0])
-    metadata = _headers_all(metadata_raw)
+    metadata = _metadata_headers(
+        archive.stream(metadata_paths[0]), requirement_budget=requirement_budget
+    )
     declared_name = metadata.get("name", [])
     declared_version = metadata.get("version", [])
     declared_requires_python = metadata.get("requires-python", [])
@@ -253,8 +317,10 @@ def _source_sha256(source: WheelSource) -> str:
 
 def _require_pep440(value: str) -> str:
     try:
+        if type(value) is str and len(value) > 65536:
+            return normalized_metadata_version(value)
         return normalized_distribution_version(value)
-    except MalformedIntegrityManifest as error:
+    except (MalformedIntegrityManifest, InvalidVersion) as error:
         raise InvalidDependencyWheel("wheel version is not valid PEP 440") from error
 
 
@@ -268,11 +334,47 @@ def _validate_requires_python(value: str | None) -> None:
         return
     if not value:
         raise InvalidDependencyWheel("wheel Requires-Python must not be empty")
+    if type(value) is str and len(value) > 65536:
+        _validate_large_requires_python(value)
+        return
     try:
         specifier = SpecifierSet(value)
     except InvalidSpecifier as error:
         raise InvalidDependencyWheel("wheel Requires-Python is not a valid specifier") from error
     if Version(_TARGET_PYTHON_VERSION) not in specifier:
+        raise InvalidDependencyWheel(
+            f"wheel Requires-Python does not support the V1 target Python {_TARGET_PYTHON_VERSION}"
+        )
+
+
+def _validate_large_requires_python(value: str) -> None:
+    """Same comma-separated SpecifierSet conjunction without an attacker-sized split list.
+
+    Validate every clause before reporting incompatibility, preserving the old
+    invalid-syntax precedence. Empty comma-separated clauses remain ignored.
+    The frozen target is a final version, so prerelease inference cannot change
+    its membership in the conjunction.
+    """
+    target = Version(_TARGET_PYTHON_VERSION)
+    compatible = True
+    cached: dict[str, bool] = {}
+    for match in re.finditer(r"[^,]+", value):
+        clause = match.group().strip()
+        if not clause:
+            continue
+        if clause in cached:
+            supported = cached[clause]
+        else:
+            try:
+                supported = target in SpecifierSet(clause)
+            except InvalidSpecifier as error:
+                raise InvalidDependencyWheel(
+                    "wheel Requires-Python is not a valid specifier"
+                ) from error
+            if len(cached) < 128 and len(clause) <= 1024:
+                cached[clause] = supported
+        compatible = compatible and supported
+    if not compatible:
         raise InvalidDependencyWheel(
             f"wheel Requires-Python does not support the V1 target Python {_TARGET_PYTHON_VERSION}"
         )
@@ -483,34 +585,74 @@ def validate_dependency_closure(
     is an error, never something to go and fetch.
     """
     build_wheelhouse_index(wheels)  # rejects duplicate distribution identities
+    requirement_budget = RequirementBudget()
     metadata_by_name = {
         metadata.name: metadata
         for metadata in (
-            inspect_wheel(wheels[filename], filename=filename)
+            inspect_wheel(
+                wheels[filename], filename=filename, requirement_budget=requirement_budget
+            )
             for filename in sorted(wheels, key=lambda item: item.encode("utf-8"))
         )
     }
 
     for wheel_bytes_name in sorted(wheels, key=lambda item: item.encode("utf-8")):
         metadata = inspect_wheel(wheels[wheel_bytes_name], filename=wheel_bytes_name)
-        for raw_requirement in metadata.requires_dist:
-            requirement = _parse_requirement(raw_requirement)
-            applicable = any(
-                _requirement_marker_applies(requirement, environment)
-                for environment in TARGET_ENVIRONMENTS
-            )
-            if not applicable:
-                continue
-            _require_satisfied(requirement, metadata_by_name, source=metadata.name)
+        _validate_requirements(metadata.requires_dist, metadata_by_name, source=metadata.name)
 
-    for raw_requirement in extra_requires:
+    _validate_requirements(
+        extra_requires, metadata_by_name, source="agent wheel", budget=requirement_budget
+    )
+
+
+def _validate_requirements(
+    requirements: Iterable[str],
+    available: Mapping[str, WheelMetadata],
+    *,
+    source: str,
+    budget: RequirementBudget | None = None,
+) -> None:
+    # Every raw occurrence is still retained in WheelMetadata and visited here.
+    # Only successfully validated identical short values are memoized within this
+    # immutable closure check. Invalid declarations still raise at their original
+    # position. Cache bounds affect optimization only, never accepted metadata.
+    validated: set[str] = set()
+    marker_tails: dict[str, bool] = {}
+    for raw_requirement in requirements:
+        if budget is not None:
+            budget.consume(raw_requirement)
+        if type(raw_requirement) is str and raw_requirement in validated:
+            continue
+        if type(raw_requirement) is str and len(raw_requirement) <= 1024:
+            matched = _BARE_MARKED_REQUIREMENT.fullmatch(raw_requirement)
+            if matched:
+                tail = matched.group(1)
+                if tail not in marker_tails and len(marker_tails) < 128:
+                    try:
+                        template = Requirement("nervosmarker" + tail)
+                    except InvalidRequirement:
+                        # The complete original parser below retains error evidence.
+                        pass
+                    else:
+                        marker_tails[tail] = any(
+                            _requirement_marker_applies(template, environment)
+                            for environment in TARGET_ENVIRONMENTS
+                        )
+                if marker_tails.get(tail) is False:
+                    # Name is guaranteed valid by the conservative lexical subset;
+                    # the standard parser validated every byte after it. Neither
+                    # marker parsing nor evaluation depends on the distribution name.
+                    # No occurrence is removed from the returned wheel metadata.
+                    continue
         requirement = _parse_requirement(raw_requirement)
         applicable = any(
             _requirement_marker_applies(requirement, environment)
             for environment in TARGET_ENVIRONMENTS
         )
         if applicable:
-            _require_satisfied(requirement, metadata_by_name, source="agent wheel")
+            _require_satisfied(requirement, available, source=source)
+        if type(raw_requirement) is str and len(validated) < 128 and len(raw_requirement) <= 1024:
+            validated.add(raw_requirement)
 
 
 def _require_satisfied(
@@ -550,4 +692,9 @@ def agent_requires_dist(raw: WheelSource) -> tuple[str, ...]:
     metadata_paths = _split_wheel_member(archive.paths(), _METADATA_MEMBER_SUFFIX)
     if len(metadata_paths) != 1:
         raise InvalidAgentWheel("agent wheel must contain exactly one METADATA")
-    return tuple(_headers_all(archive.read(metadata_paths[0])).get("requires-dist", ()))
+    return tuple(
+        value
+        for _, value in _bounded_wheel_headers(
+            archive.stream(metadata_paths[0]), frozenset({"requires-dist"}), RequirementBudget()
+        )
+    )
