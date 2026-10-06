@@ -124,9 +124,12 @@ jobs:
         run: uv lock --check
 
       - name: Bootstrap dependencies and Chromium
-        run: uv run python scripts/bootstrap.py      - name: Install Playwright system libraries
+        run: uv run python scripts/bootstrap.py
+
+      - name: Install Playwright system libraries
         # CI-runner-only OS provisioning. Local bootstrap never installs OS packages.
         run: pnpm --dir apps/web exec playwright install-deps chromium
+
       - name: Install bubblewrap for package containment
         # Same rationale as the marketplace job: the Stage-G journey installs a
         # package whose agent only launches inside Linux isolation, so the
