@@ -16,6 +16,8 @@ The properties that matter:
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -201,6 +203,34 @@ def _decision_wait(
             effective_config_digest=None,
             expires_at=NOW + timedelta(hours=1),
         ),
+    )
+
+
+# ---------------------------------------------------------------------------------------
+# Fixtures — the demo artifacts are built, never committed
+# ---------------------------------------------------------------------------------------
+
+# Referenced so static analysis does not mistake the autouse fixture for dead code.
+__all__ = ["_built_demo_artifacts"]
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _built_demo_artifacts() -> None:
+    """Build the demo archives when absent, exactly as the W6 runbook instructs.
+
+    The demo `.nervos` artifacts are deterministic build outputs and are deliberately
+    not committed, so a fresh checkout (CI) must build them before the artifact tests
+    run. Building is offline and deterministic; when the artifacts are already present
+    the builder refreshes them in place at no cost to the properties under test.
+    """
+    subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "build_autonomous_workflow_demos.py"),
+            str(ROOT / "artifacts" / "demos"),
+        ],
+        cwd=ROOT,
+        check=True,
     )
 
 

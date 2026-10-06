@@ -26,6 +26,11 @@ jobs:
     name: Hosted Marketplace PostgreSQL and S3 acceptance
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # The frozen Linux launcher mounts only system roots and never the user home
+      # (ADR 0038), so the base interpreter package environments build from must not
+      # live under $HOME. This is where uv installs its managed Python.
+      UV_PYTHON_INSTALL_DIR: /usr/local/share/nervos-python
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -35,6 +40,8 @@ jobs:
         # production Linux host has. Ubuntu 24.04 restricts unprivileged user
         # namespaces through AppArmor; this disposable runner re-enables them.
         run: |
+          sudo mkdir -p /usr/local/share/nervos-python
+          sudo chown "$(id -u):$(id -g)" /usr/local/share/nervos-python
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends bubblewrap
           bwrap --version
@@ -97,9 +104,29 @@ jobs:
     name: Deterministic browser journey
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      # Same as the marketplace job: keep the package base interpreter under a
+      # mounted system root so qualified containment can actually mount it.
+      UV_PYTHON_INSTALL_DIR: /usr/local/share/nervos-python
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install bubblewrap for package containment
+        # Same rationale as the marketplace job: the Stage-G journey installs a
+        # package whose agent only launches inside Linux isolation, so the
+        # launcher binary must exist on this runner too. This step also creates the
+        # UV_PYTHON_INSTALL_DIR, which must exist before the managed Python is
+        # installed into it (a runner user cannot mkdir under /usr/local/share).
+        run: |
+          sudo mkdir -p /usr/local/share/nervos-python
+          sudo chown "$(id -u):$(id -g)" /usr/local/share/nervos-python
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          bwrap --version
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
 
       - name: Set up pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
@@ -130,16 +157,5 @@ jobs:
         # CI-runner-only OS provisioning. Local bootstrap never installs OS packages.
         run: pnpm --dir apps/web exec playwright install-deps chromium
 
-      - name: Install bubblewrap for package containment
-        # Same rationale as the marketplace job: the Stage-G journey installs a
-        # package whose agent only launches inside Linux isolation, so the
-        # launcher binary must exist on this runner too.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bubblewrap
-          bwrap --version
-          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
       - name: Playwright end-to-end journey
         run: uv run python scripts/check.py e2e
