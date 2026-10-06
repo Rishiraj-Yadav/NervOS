@@ -57,6 +57,53 @@ jobs:
         run: uv python install
       - name: Install locked workspace dependencies
         run: uv sync --frozen --all-packages
+      - name: Package launcher diagnostic
+        # The install journey runs the package host inside the frozen launcher with its
+        # stderr discarded, so a launcher failure on a new runner image is undiagnosable
+        # from the acceptance error alone. Reproduce the same venv-through-bwrap shape
+        # here and print the child's evidence. Non-fatal: it only reports.
+        run: |
+          uv run python - <<'PY'
+          import subprocess, sys, tempfile, venv
+          from pathlib import Path
+
+          from nervos_core.application.sandbox import ContainmentUnavailable
+          from nervos_core.infrastructure.sandbox import create_containment, observe_sandbox_capability
+
+          print("capability:", observe_sandbox_capability())
+          print("running:", sys.executable)
+          print("base:", Path(getattr(sys, "_base_executable", sys.executable)).resolve())
+          root = Path(tempfile.mkdtemp(prefix="launcher-diagnostic-"))
+          environment = root / "env"
+          venv.EnvBuilder(with_pip=False, symlinks=False).create(environment)
+          print("pyvenv.cfg:", (environment / "pyvenv.cfg").read_text().strip())
+          scratch = root / "scratch"
+          scratch.mkdir()
+          try:
+              containment = create_containment()
+          except ContainmentUnavailable as error:
+              print("containment refused:", error)
+              raise SystemExit(0)
+          launch = containment.prepare(
+              python=environment / "bin" / "python",
+              scratch=scratch,
+              environment={},
+              arguments=("-c", "import sys; print('contained-ok', sys.version.split()[0])"),
+          )
+          completed = subprocess.run(
+              launch.command,
+              cwd=launch.cwd,
+              env=launch.environment,
+              capture_output=True,
+              text=True,
+              timeout=60,
+              preexec_fn=launch.preexec_fn,
+              start_new_session=launch.start_new_session,
+          )
+          print("exit:", completed.returncode)
+          print("stdout:", completed.stdout.strip())
+          print("stderr:", completed.stderr.strip())
+          PY
       - name: Disposable PostgreSQL 18 and authenticated S3 contract
         run: uv run python scripts/check.py marketplace-integration
 
