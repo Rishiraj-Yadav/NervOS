@@ -48,6 +48,9 @@ jobs:
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
+          # bwrap fails with "Creating new namespace failed: Resource temporarily
+          # unavailable" when the per-user user-namespace allowance is exhausted.
+          sudo sysctl -w user.max_user_namespaces=63359
       - name: Set up uv
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
@@ -174,6 +177,8 @@ jobs:
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
+          # Same namespace-allowance fix as the marketplace job.
+          sudo sysctl -w user.max_user_namespaces=63359
 
       - name: Set up pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
