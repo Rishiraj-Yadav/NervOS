@@ -30,9 +30,13 @@ test("installs a package and manages package agent instance lifecycle", async ({
   await page.getByLabel(/select .+ package file/i).setInputFiles(packageFile);
   await expect(page.getByText("com.acme.browserdemo@1.0.0", { exact: true })).toBeVisible();
   await expect(page.getByText("Signature Verified (Ed25519)")).toBeVisible();
-  await expect(page.getByText("Pre-Stage-H Isolation Notice")).toBeVisible();
   await expect(page.getByText(/^[0-9a-f]{64}$/i).first()).toBeVisible();
   await page.getByRole("button", { name: "Authorize & Install com.acme.browserdemo@1.0.0" }).click();
+  if (process.platform !== "linux") {
+    await expect(page.getByRole("alert")).toContainText("containment is unavailable", {timeout: 90000});
+    await expect(page).toHaveURL(/\/packages\/install$/);
+    return;
+  }
   await expect(page).toHaveURL(/\/packages\/com\.acme\.browserdemo\/1\.0\.0$/, {
     timeout: 90_000,
   });

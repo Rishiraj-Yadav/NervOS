@@ -179,7 +179,10 @@ def test_package_application_service_full_install_and_binding(
     assert '"greeting":"revised"' in revised_binding.effective_config_json
 
 
-def test_authorization_mismatch_fails_before_install(migrated_engine, tmp_path: Path) -> None:
+@pytest.mark.parametrize("platform_refused", [False, True])
+def test_authorization_or_platform_refusal_fails_before_install(
+    migrated_engine, tmp_path: Path, platform_refused: bool
+) -> None:
     store = PackageStore(tmp_path / "store")
     raw = _built_bytes()
     sdk_dummy = tmp_path / "nervos_sdk-0.1.0-py3-none-any.whl"
@@ -197,12 +200,17 @@ def test_authorization_mismatch_fails_before_install(migrated_engine, tmp_path: 
             host_dummy, "nervos-package-host", "0.1.0", hashlib.sha256(b"host-wheel").hexdigest()
         ),
     )
+
+    def refuse_platform() -> None:
+        raise RuntimeError("containment unavailable")
+
     service = PackageApplicationService(
         registry=SqlAlchemyPackageRegistryPersistence(migrated_engine),
         store=store,
         environment_builder=FakeEnvironmentBuilder(tmp_path / "store", runtime),
         health_checker=FakeHealthChecker(),
         clock=_now,
+        installation_preflight=refuse_platform if platform_refused else None,
     )
     mismatched_auth = PackageInstallAuthorization(
         package_id="com.acme.invoice",
@@ -212,5 +220,21 @@ def test_authorization_mismatch_fails_before_install(migrated_engine, tmp_path: 
         approved_by_user_id=1,
         approved_at=_now(),
     )
-    with pytest.raises(PackageAuthorizationMismatch):
+    if platform_refused:
+        verified = verify_package(archive_bytes=raw)
+        mismatched_auth = PackageInstallAuthorization(
+            package_id=verified.manifest.package_id,
+            package_version=verified.manifest.package_version,
+            content_digest=verified.content_digest,
+            signer_fingerprint=verified.signer_fingerprint,
+            approved_by_user_id=1,
+            approved_at=_now(),
+        )
+    expected_error = RuntimeError if platform_refused else PackageAuthorizationMismatch
+    with pytest.raises(expected_error):
         service.install(io.BytesIO(raw), mismatched_auth)
+    with migrated_engine.connect() as connection:
+        assert (
+            connection.execute(text("SELECT COUNT(*) FROM installed_package_versions")).scalar()
+            == 0
+        )

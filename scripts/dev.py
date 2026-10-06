@@ -65,6 +65,7 @@ def run_api(settings: Settings | None = None) -> int:
             "-m",
             "uvicorn",
             "nervos_api.main:app",
+            "--no-access-log",
             "--reload",
             "--host",
             "127.0.0.1",

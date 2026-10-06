@@ -4,12 +4,10 @@ import { Brand } from "../components/Brand";
 import { InlineError } from "../components/AsyncState";
 import { useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
-import { useNavigate } from "react-router-dom";
 
 export function SetupPage() {
   const setup = useSetup();
   const queryClient = useQueryClient();
-  const navigate = useNavigate();
   const [confirmationError, setConfirmationError] = useState<string | null>(null);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -25,8 +23,10 @@ export function SetupPage() {
       return;
     }
     try {
+      // The session write and the resulting route change are both derived from the gate: a
+      // navigate() here would race the write and redirect the freshly authenticated session back
+      // out of the page it just left.
       await setup.mutateAsync({ username, password });
-      await navigate("/", { replace: true });
     } catch (error) {
       if (error instanceof ApiHttpError && error.status === 409 && error.code === "setup_complete") {
         queryClient.setQueryData(queryKeys.setup, { setup_complete: true });
@@ -35,7 +35,6 @@ export function SetupPage() {
         } catch {
           // The route gate presents the authoritative authentication result.
         }
-        await navigate("/", { replace: true });
         return;
       }
       const passwordInput = form.elements.namedItem("password");

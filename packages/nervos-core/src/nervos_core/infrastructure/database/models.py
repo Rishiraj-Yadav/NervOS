@@ -35,6 +35,7 @@ NERVOS_BLANK_TEXT_SQL_CHARS = (
 # of the accepted set.
 TOOL_EVENT_TYPES = (
     "'tool.requested','tool.started','tool.succeeded','tool.failed','tool.denied','tool.ambiguous'"
+    ",'tool.approval_requested','tool.approval_decided'"
 )
 CONNECTION_STATUSES = "'connected','unavailable','needs_refresh','definition_changed','disabled'"
 DEFINITION_STATUSES = "'available','unavailable','unsupported_schema'"
@@ -50,6 +51,75 @@ MODEL_NAME_SQL = (
     "model_name = lower(model_name) AND length(model_name) BETWEEN 1 AND 64"
     " AND model_name NOT GLOB '*[^a-z0-9_-]*' AND model_name GLOB '[a-z0-9]*'"
 )
+
+
+class AgentMemoryPolicyRecord(Base):
+    __tablename__ = "agent_memory_policies"
+    __table_args__ = (
+        CheckConstraint("mode IN ('manual','review','automatic_private')", name="mode_value"),
+        CheckConstraint("revision > 0", name="revision_positive"),
+    )
+    agent_instance_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_instances.id"), primary_key=True
+    )
+    mode: Mapped[str] = mapped_column(String(24), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    extraction_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class AgentToolBindingRecord(Base):
+    __tablename__ = "agent_tool_bindings"
+    __table_args__ = (
+        UniqueConstraint("agent_instance_id", "alias", name="instance_alias"),
+        CheckConstraint("length(alias) BETWEEN 1 AND 128", name="alias_bound"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    agent_instance_id: Mapped[int] = mapped_column(ForeignKey("agent_instances.id"), nullable=False)
+    alias: Mapped[str] = mapped_column(String(128), nullable=False)
+    package_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    package_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    tool_definition_id: Mapped[int] = mapped_column(
+        ForeignKey("tool_definitions.id"), nullable=False
+    )
+    reviewed_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class RunIntegrationRecord(Base):
+    __tablename__ = "run_integrations"
+    run_id: Mapped[int] = mapped_column(ForeignKey("runs.id"), primary_key=True)
+    context_json: Mapped[str | None] = mapped_column(Text)
+    bindings_json: Mapped[str] = mapped_column(Text, nullable=False)
+    memory_mode: Mapped[str] = mapped_column(String(24), nullable=False)
+    policy_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    extraction_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    proposals_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    memory_state: Mapped[str] = mapped_column(String(24), nullable=False, default="none")
+    extraction_run_id: Mapped[int | None] = mapped_column(ForeignKey("runs.id"))
+
+
+class MemorySuggestionRecord(Base):
+    __tablename__ = "memory_suggestions"
+    __table_args__ = (
+        UniqueConstraint("source_run_id", "scope", "content_digest", name="source_fact"),
+        CheckConstraint("scope IN ('user','agent')", name="scope_value"),
+        CheckConstraint(
+            "state IN ('pending','saved','dismissed','duplicate','quota')", name="state_value"
+        ),
+        CheckConstraint("length(CAST(content AS BLOB)) BETWEEN 1 AND 2000", name="content_bound"),
+        Index("ix_memory_suggestions_owner_id", "owner_user_id", "id"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    owner_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    agent_instance_id: Mapped[int] = mapped_column(ForeignKey("agent_instances.id"), nullable=False)
+    source_run_id: Mapped[int] = mapped_column(ForeignKey("runs.id"), nullable=False)
+    scope: Mapped[str] = mapped_column(String(8), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    content_digest: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    memory_item_id: Mapped[int | None] = mapped_column(ForeignKey("memory_items.id"))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
 class MarketplaceInstallRequestRecord(Base):
@@ -703,6 +773,14 @@ class WorkerRecord(Base):
     started_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     last_heartbeat_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     stopped_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    # Stage-H runtime qualification: the bounded public package-sandbox capability this
+    # incarnation observed at startup. Observed health, never execution authority; a
+    # Worker that loses its launcher is still refused by the launch factory per start.
+    platform: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    sandbox_backend: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    package_execution_supported: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
 
 
 class QueuePartitionRecord(Base):
@@ -1749,3 +1827,494 @@ class ToolInvocationRecord(Base):
     result_truncated: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+
+# --- Stage H: security isolation (ADRs 0032-0036) -------------------------------------------
+
+# H1: encrypted secret metadata. Ciphertext is opaque AES-256-GCM material bound to the row
+# identity by AAD; no column anywhere carries plaintext. `revoked` rows keep only evidence.
+# The master key lives outside the database; `secret_keys` records only its identity.
+
+
+class SecretRecord(Base):
+    __tablename__ = "secrets"
+    __table_args__ = (
+        UniqueConstraint("owner_user_id", "name", name="owner_secret_name"),
+        CheckConstraint("status IN ('active','disabled','revoked')", name="status_value"),
+        CheckConstraint("length(name) BETWEEN 1 AND 128", name="name_bound"),
+        CheckConstraint("key_version >= 1", name="key_version_positive"),
+        CheckConstraint("rotation_count >= 0", name="rotation_nonnegative"),
+        CheckConstraint(
+            "(status = 'revoked' AND length(CAST(ciphertext AS BLOB)) = 0)"
+            " OR (status != 'revoked' AND length(CAST(ciphertext AS BLOB)) > 0)",
+            name="revocation_destroys_value",
+        ),
+        Index("ix_secrets_owner_id", "owner_user_id", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    provider_hint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    key_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    nonce: Mapped[bytes] = mapped_column(LargeBinary(16), nullable=False)
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    rotation_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class SecretKeyVersionRecord(Base):
+    __tablename__ = "secret_keys"
+    key_version: Mapped[int] = mapped_column(Integer, primary_key=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+# H2: a user's connection to one external account provider. Tokens live only in `secrets`
+# through `secret_id`; this row carries identity, scopes, and lifecycle metadata only.
+
+CONNECTION_CONNECTION_STATUSES = "'connected','needs_refresh','disconnected','revoked'"
+
+
+class AccountConnectionRecord(Base):
+    __tablename__ = "account_connections"
+    __table_args__ = (
+        CheckConstraint(f"state IN ({CONNECTION_CONNECTION_STATUSES})", name="state_value"),
+        CheckConstraint("length(provider) BETWEEN 1 AND 64", name="provider_bound"),
+        CheckConstraint("length(scopes_json) <= 4096", name="scopes_bound"),
+        CheckConstraint("length(display_name) BETWEEN 1 AND 128", name="display_name_bound"),
+        Index("ix_account_connections_owner_id", "owner_user_id", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    secret_id: Mapped[int] = mapped_column(ForeignKey("secrets.id"), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    scopes_json: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    refresh_failed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    refresh_revision: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    refresh_started_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    revocation_outcome: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+# H3: durable per-action approval. One row authorizes at most one dispatch of one exact
+# action input on one Attempt; every other path to a terminal state dispatches nothing.
+
+
+class AccountOAuthRequestRecord(Base):
+    __tablename__ = "account_oauth_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "length(state_hash) = 64 AND state_hash NOT GLOB '*[^0-9a-f]*'", name="state_hash_shape"
+        ),
+        CheckConstraint("expires_at > created_at", name="expiry_after_creation"),
+        Index("ix_account_oauth_requests_owner_expiry", "owner_user_id", "expires_at"),
+    )
+    state_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    secret_id: Mapped[int] = mapped_column(ForeignKey("secrets.id"), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    scopes_json: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+APPROVAL_STATES = "'pending','approved','consumed','denied','expired','cancelled','revoked'"
+
+
+class ActionApprovalRecord(Base):
+    __tablename__ = "action_approvals"
+    __table_args__ = (
+        CheckConstraint(f"state IN ({APPROVAL_STATES})", name="state_value"),
+        CheckConstraint(
+            "length(fingerprint) = 64 AND fingerprint NOT GLOB '*[^0-9a-f]*'",
+            name="fingerprint_shape",
+        ),
+        CheckConstraint(
+            "length(input_digest) = 64 AND input_digest NOT GLOB '*[^0-9a-f]*'",
+            name="input_digest_shape",
+        ),
+        CheckConstraint("expires_at > requested_at", name="expiry_after_request"),
+        CheckConstraint(
+            "(state = 'pending' AND decided_at IS NULL AND consumed_at IS NULL)"
+            " OR (state = 'approved' AND decided_at IS NOT NULL AND consumed_at IS NULL)"
+            " OR (state = 'consumed' AND decided_at IS NOT NULL AND consumed_at IS NOT NULL)"
+            " OR (state IN ('denied','expired','cancelled','revoked') AND consumed_at IS NULL)",
+            name="lifecycle_shape",
+        ),
+        UniqueConstraint("attempt_id", "tool_sequence", name="attempt_sequence"),
+        Index("ix_action_approvals_owner_state", "owner_user_id", "state", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    agent_instance_id: Mapped[int] = mapped_column(ForeignKey("agent_instances.id"), nullable=False)
+    run_id: Mapped[int] = mapped_column(ForeignKey("runs.id"), nullable=False)
+    job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id"), nullable=False)
+    attempt_id: Mapped[int] = mapped_column(ForeignKey("job_attempts.id"), nullable=False)
+    tool_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    tool_definition_id: Mapped[int] = mapped_column(
+        ForeignKey("tool_definitions.id"), nullable=False
+    )
+    upstream_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    input_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    preview_json: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    decided_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+WORKFLOW_STATUSES = (
+    "'pending','runnable','running','waiting','succeeded','failed','cancelled','needs_review'"
+)
+WORKFLOW_WAIT_KINDS = "'time','signal','owner_decision'"
+WORKFLOW_STEP_STATUSES = "'pending','running','succeeded','failed','cancelled'"
+WORKFLOW_DECISION_STATES = "'pending','approved','denied','expired','cancelled','consumed'"
+
+
+class WorkflowExecutionRecord(Base):
+    """One owner-scoped durable workflow execution (ADR 0039).
+
+    Deliberately *not* a Run and *not* a Conversation: this row owns ordered steps and
+    private application progress, and it references ordinary Runs rather than replacing
+    any of them. Waiting is a value of `status` here, which is why a waiting workflow
+    occupies no Worker slot, no lease, and no permanent process.
+    """
+
+    __tablename__ = "workflow_executions"
+    __table_args__ = (
+        CheckConstraint(f"status IN ({WORKFLOW_STATUSES})", name="status_value"),
+        CheckConstraint(
+            f"wait_kind IS NULL OR wait_kind IN ({WORKFLOW_WAIT_KINDS})", name="wait_kind_value"
+        ),
+        CheckConstraint(
+            "(status = 'waiting' AND wait_kind IS NOT NULL AND (wait_kind <> 'time' OR wakeup_at IS NOT NULL))"
+            " OR (status <> 'waiting' AND wait_kind IS NULL AND wakeup_at IS NULL)",
+            name="wait_shape",
+        ),
+        CheckConstraint("checkpoint_revision >= 0", name="checkpoint_revision_nonnegative"),
+        CheckConstraint("step_count >= 0", name="step_count_nonnegative"),
+        CheckConstraint("1 <= max_steps AND max_steps <= 128", name="max_steps_bound"),
+        CheckConstraint(
+            "1 <= model_call_reservation AND model_call_reservation <= 2048",
+            name="model_reservation_bound",
+        ),
+        CheckConstraint(
+            "0 <= tool_call_reservation AND tool_call_reservation <= 2048",
+            name="tool_reservation_bound",
+        ),
+        CheckConstraint(
+            "1 <= output_token_reservation AND output_token_reservation <= 2097152",
+            name="output_reservation_bound",
+        ),
+        CheckConstraint(
+            "reserved_model_calls >= 0 AND reserved_tool_calls >= 0 AND reserved_output_tokens >= 0",
+            name="reserved_nonnegative",
+        ),
+        CheckConstraint(
+            "reserved_model_calls <= model_call_reservation"
+            " AND reserved_tool_calls <= tool_call_reservation"
+            " AND reserved_output_tokens <= output_token_reservation",
+            name="reserved_within_budget",
+        ),
+        CheckConstraint("1 <= deadline_hours AND deadline_hours <= 168", name="deadline_bound"),
+        CheckConstraint(
+            "1 <= max_retained_checkpoints AND max_retained_checkpoints <= 128",
+            name="retention_bound",
+        ),
+        CheckConstraint("state_schema_version = 1", name="state_schema_version_value"),
+        CheckConstraint(
+            "length(submission_key) BETWEEN 1 AND 64 AND submission_key NOT GLOB '*[^a-z0-9_-]*'",
+            name="submission_key_bound",
+        ),
+        CheckConstraint(
+            "length(submission_digest) = 64 AND submission_digest NOT GLOB '*[^0-9a-f]*'",
+            name="submission_digest_shape",
+        ),
+        CheckConstraint("length(workflow_kind) BETWEEN 1 AND 64", name="workflow_kind_bound"),
+        CheckConstraint("length(agent_key) BETWEEN 1 AND 128", name="agent_key_bound"),
+        CheckConstraint(
+            "length(agent_definition_version) BETWEEN 1 AND 64", name="definition_version_bound"
+        ),
+        CheckConstraint(
+            "(status IN ('succeeded','failed','cancelled','needs_review') AND finished_at IS NOT NULL)"
+            " OR (status NOT IN ('succeeded','failed','cancelled','needs_review') AND finished_at IS NULL)",
+            name="terminal_shape",
+        ),
+        CheckConstraint("deadline_at >= created_at", name="deadline_after_creation"),
+        UniqueConstraint("owner_user_id", "submission_key", name="owner_submission_key"),
+        # Bounded due-work scan for the Scheduler tick: one index covers "not terminal,
+        # not paused, and due" without a full table read.
+        Index("ix_workflow_executions_due", "paused", "status", "wakeup_at", "id"),
+        Index("ix_workflow_executions_owner_id", "owner_user_id", "id"),
+        Index("ix_workflow_executions_agent_instance_id", "agent_instance_id", "id"),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    agent_instance_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_instances.id", ondelete="RESTRICT"), nullable=False
+    )
+    workflow_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    state_schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    submission_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    submission_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    paused: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="0")
+    checkpoint_revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    step_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    max_steps: Mapped[int] = mapped_column(Integer, nullable=False, server_default="32")
+    model_call_reservation: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="256"
+    )
+    tool_call_reservation: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="256"
+    )
+    output_token_reservation: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="262144"
+    )
+    reserved_model_calls: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    reserved_tool_calls: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    reserved_output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    deadline_hours: Mapped[int] = mapped_column(Integer, nullable=False, server_default="24")
+    max_retained_checkpoints: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="128"
+    )
+    deadline_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    wait_kind: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    wakeup_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    signal_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    decision_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    review_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    agent_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    agent_definition_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    model_provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    package_content_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    package_environment_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    effective_config_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    agent_instance_config_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class WorkflowStepRecord(Base):
+    """One workflow step: the pinned checkpoint plus the single Run that executes it.
+
+    `run_id` is written inside the very transaction that inserts the Run, so a step is
+    never observable in a "created but unlinked" state, and the unique constraints make a
+    duplicate continuation impossible even under a retry after an uncertain commit.
+    """
+
+    __tablename__ = "workflow_steps"
+    __table_args__ = (
+        CheckConstraint(f"status IN ({WORKFLOW_STEP_STATUSES})", name="status_value"),
+        CheckConstraint("step_number > 0", name="step_number_positive"),
+        CheckConstraint("expected_checkpoint_revision >= 0", name="expected_revision_nonnegative"),
+        CheckConstraint("state_schema_version = 1", name="state_schema_version_value"),
+        CheckConstraint(
+            "length(state_digest) = 64 AND state_digest NOT GLOB '*[^0-9a-f]*'",
+            name="state_digest_shape",
+        ),
+        CheckConstraint("length(CAST(state_json AS BLOB)) <= 65536", name="state_byte_bound"),
+        CheckConstraint("summary IS NULL OR length(summary) <= 512", name="summary_bound"),
+        CheckConstraint(
+            "(status IN ('succeeded','failed','cancelled') AND finished_at IS NOT NULL)"
+            " OR (status NOT IN ('succeeded','failed','cancelled') AND finished_at IS NULL)",
+            name="terminal_shape",
+        ),
+        UniqueConstraint("workflow_id", "step_number", name="workflow_step_number"),
+        UniqueConstraint("workflow_id", "run_id", name="workflow_run"),
+        UniqueConstraint("run_id", name="single_run_per_step"),
+        Index("ix_workflow_steps_workflow_id", "workflow_id", "step_number"),
+        Index("ix_workflow_steps_run_id", "run_id"),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workflow_id: Mapped[int] = mapped_column(
+        ForeignKey("workflow_executions.id", ondelete="RESTRICT"), nullable=False
+    )
+    step_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="RESTRICT"), nullable=True
+    )
+    expected_checkpoint_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    state_schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    state_json: Mapped[str] = mapped_column(Text, nullable=False)
+    state_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    summary: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class WorkflowCheckpointRecord(Base):
+    """One immutable committed revision of application state. Append-only evidence."""
+
+    __tablename__ = "workflow_checkpoints"
+    __table_args__ = (
+        CheckConstraint("revision >= 0", name="revision_nonnegative"),
+        CheckConstraint("step_number > 0", name="step_number_positive"),
+        CheckConstraint("state_schema_version = 1", name="state_schema_version_value"),
+        CheckConstraint(
+            "length(state_digest) = 64 AND state_digest NOT GLOB '*[^0-9a-f]*'",
+            name="state_digest_shape",
+        ),
+        CheckConstraint("length(CAST(state_json AS BLOB)) <= 65536", name="state_byte_bound"),
+        UniqueConstraint("workflow_id", "revision", name="workflow_revision"),
+        Index("ix_workflow_checkpoints_workflow_id", "workflow_id", "revision"),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workflow_id: Mapped[int] = mapped_column(
+        ForeignKey("workflow_executions.id", ondelete="RESTRICT"), nullable=False
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    step_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    state_schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    state_json: Mapped[str] = mapped_column(Text, nullable=False)
+    state_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class WorkflowSignalRecord(Base):
+    """One owner wakeup delivery. The unique key makes a duplicate a replay, not a re-advance."""
+
+    __tablename__ = "workflow_signals"
+    __table_args__ = (
+        CheckConstraint("expected_revision >= 0", name="expected_revision_nonnegative"),
+        CheckConstraint(
+            "length(payload_digest) = 64 AND payload_digest NOT GLOB '*[^0-9a-f]*'",
+            name="payload_digest_shape",
+        ),
+        CheckConstraint("length(CAST(signal_json AS BLOB)) <= 8192", name="signal_byte_bound"),
+        CheckConstraint("length(signal_key) BETWEEN 1 AND 64", name="signal_key_bound"),
+        CheckConstraint("accepted_at IS NULL OR accepted_at >= received_at", name="accepted_order"),
+        UniqueConstraint("workflow_id", "signal_key", name="workflow_signal_key"),
+        Index("ix_workflow_signals_workflow_id", "workflow_id", "id"),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workflow_id: Mapped[int] = mapped_column(
+        ForeignKey("workflow_executions.id", ondelete="RESTRICT"), nullable=False
+    )
+    owner_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    signal_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    signal_json: Mapped[str] = mapped_column(Text, nullable=False)
+    expected_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    outcome: Mapped[str] = mapped_column(String(32), nullable=False)
+    received_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    accepted_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class WorkflowDecisionRecord(Base):
+    """One durable owner decision about proposed work (ADR 0039).
+
+    **Not** a Stage-H `action_approvals` row: this authorizes *proposing* the next step and
+    grants nothing. Every dispatch still requires a fresh live-Attempt approval.
+    """
+
+    __tablename__ = "workflow_decisions"
+    __table_args__ = (
+        CheckConstraint(f"state IN ({WORKFLOW_DECISION_STATES})", name="state_value"),
+        CheckConstraint("checkpoint_revision >= 0", name="checkpoint_revision_nonnegative"),
+        CheckConstraint(
+            "length(action_fingerprint) = 64 AND action_fingerprint NOT GLOB '*[^0-9a-f]*'",
+            name="fingerprint_shape",
+        ),
+        CheckConstraint(
+            "length(arguments_digest) = 64 AND arguments_digest NOT GLOB '*[^0-9a-f]*'",
+            name="arguments_digest_shape",
+        ),
+        CheckConstraint("length(CAST(preview_json AS BLOB)) <= 65536", name="preview_byte_bound"),
+        CheckConstraint("expires_at > requested_at", name="expiry_after_request"),
+        CheckConstraint(
+            "(state = 'pending' AND decided_at IS NULL AND consumed_at IS NULL)"
+            " OR (state = 'approved' AND decided_at IS NOT NULL AND consumed_at IS NULL)"
+            " OR (state = 'consumed' AND decided_at IS NOT NULL AND consumed_at IS NOT NULL)"
+            " OR (state IN ('denied','expired','cancelled') AND consumed_at IS NULL)",
+            name="lifecycle_shape",
+        ),
+        UniqueConstraint(
+            "workflow_id",
+            "checkpoint_revision",
+            "tool_definition_id",
+            name="workflow_revision_tool",
+        ),
+        Index("ix_workflow_decisions_owner_state", "owner_user_id", "state", "id"),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workflow_id: Mapped[int] = mapped_column(
+        ForeignKey("workflow_executions.id", ondelete="RESTRICT"), nullable=False
+    )
+    owner_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    checkpoint_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    tool_definition_id: Mapped[int] = mapped_column(
+        ForeignKey("tool_definitions.id"), nullable=False
+    )
+    upstream_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    action_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    arguments_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    preview_json: Mapped[str] = mapped_column(Text, nullable=False)
+    package_content_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    effective_config_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    decided_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+# H5: local publisher trust, keyed by the Stage-G signer fingerprint. This is mechanism
+# evidence turned into an explicit local decision; hosted Marketplace state cannot flip it.
+
+TRUST_STATES = "'trusted','untrusted','revoked'"
+
+
+class PublisherTrustRecord(Base):
+    __tablename__ = "publisher_trust"
+    __table_args__ = (
+        CheckConstraint(f"state IN ({TRUST_STATES})", name="state_value"),
+        CheckConstraint(
+            "length(signer_fingerprint) = 64 AND signer_fingerprint NOT GLOB '*[^0-9a-f]*'",
+            name="fingerprint_shape",
+        ),
+        CheckConstraint("length(reason) <= 512", name="reason_bound"),
+        UniqueConstraint("signer_fingerprint", name="signer_identity"),
+    )
+
+    signer_fingerprint: Mapped[str] = mapped_column(String(64), primary_key=True)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    decided_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="manual")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)

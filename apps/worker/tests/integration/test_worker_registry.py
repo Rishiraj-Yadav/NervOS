@@ -19,6 +19,7 @@ from nervos_core.application.lease_reclamation import (
     WorkerLiveness,
     WorkerState,
 )
+from nervos_core.application.sandbox import WorkerSandboxCapability
 from nervos_core.domain.jobs import JobStatus
 from nervos_core.domain.runs import RunStatus
 from nervos_worker.registry import (
@@ -57,9 +58,16 @@ class Clock:
         return self.value
 
 
+# A deterministic fixture capability: this suite proves registry liveness, not sandbox
+# qualification, so it states an unsupported host rather than probing the test machine.
+TEST_CAPABILITY = WorkerSandboxCapability(False, "test", None)
+
+
 def registry(engine: Engine, worker_id: str = "worker-1", clock: Clock | None = None):
     persistence, _ = build_execution_service(engine, {})
-    return WorkerRegistry(persistence, worker_id, clock=clock or Clock())
+    return WorkerRegistry(
+        persistence, worker_id, clock=clock or Clock(), capability=TEST_CAPABILITY
+    )
 
 
 def claim_with_a_short_lease(engine: Engine, worker_id: str = "dead-worker"):
@@ -105,7 +113,7 @@ def test_heartbeat_advances_and_graceful_stop_is_recorded(
     try:
         persistence, _ = build_execution_service(engine, {})
         clock = Clock()
-        registry = WorkerRegistry(persistence, "worker-1", clock=clock)
+        registry = WorkerRegistry(persistence, "worker-1", clock=clock, capability=TEST_CAPABILITY)
         registry.register()
 
         clock.value = NOW + timedelta(seconds=25)
@@ -252,8 +260,12 @@ def test_two_workers_register_independently_and_one_can_be_stale(
         run_id = submit(engine)
         persistence, _ = build_execution_service(engine, {})
 
-        stale = WorkerRegistry(persistence, "stale-worker", clock=Clock())
-        healthy = WorkerRegistry(persistence, "healthy-worker", clock=Clock())
+        stale = WorkerRegistry(
+            persistence, "stale-worker", clock=Clock(), capability=TEST_CAPABILITY
+        )
+        healthy = WorkerRegistry(
+            persistence, "healthy-worker", clock=Clock(), capability=TEST_CAPABILITY
+        )
         stale.register()
         healthy.register()
         healthy.heartbeat()

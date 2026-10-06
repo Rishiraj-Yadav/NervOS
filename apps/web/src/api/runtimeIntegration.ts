@@ -1,0 +1,39 @@
+import { apiRequest, apiRequestNoContent } from "./client";
+
+export const integrationKey = ["runtime-integration"] as const;
+const record = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
+const rows = (v: unknown, check: (row: unknown) => boolean): boolean => Array.isArray(v) && v.every(check);
+
+export interface ToolPage { items: Tool[]; next_before_id: number | null }
+export interface Tool { id: number; name: string; display_name: string; source_kind: string; connection_id: number | null; status: string; fingerprint: string; input_schema_sha256: string }
+export interface Requirement { alias: string; upstream_name: string; input_schema_sha256: string; required: boolean }
+export interface Binding { alias: string; definition_id: number; fingerprint: string }
+export interface Grant { definition_id: number; fingerprint: string }
+export interface ToolHistory { id: number; run_id: number; name: string; status: string; error_code: string | null }
+export interface AgentTools { requirements: Requirement[]; bindings: Binding[]; grants: Grant[]; history: ToolHistory[] }
+export interface MemoryPolicy { mode: "manual" | "review" | "automatic_private"; revision: number; extraction_enabled: boolean }
+export interface Suggestion { id: number; agent_instance_id: number; source_run_id: number; scope: string; content: string; state: string; memory_item_id: number | null }
+export interface Suggestions { items: Suggestion[]; next_before_id: number | null }
+export interface RunContext { available: boolean; current_input: string | null; rendered_context: string | null; memories: { id: number; version: number; scope: string; content: string }[]; history: { role: string; content: string; turn: number }[]; memory_state: string; context_bytes: number; context_limit_bytes: number }
+export interface SandboxCapability { supported: boolean; platform: string; backend: string | null; reason: string | null }
+export interface RuntimeHealth { observed_at: string; execution_available: boolean; owner_jobs: Record<string, number>; package_sandbox: SandboxCapability }
+export interface Connection { id: number; display_name: string; transport: string; enabled: boolean; catalog_status: string; last_error_code: string | null; endpoint: string | null; server_key: string | null }
+export interface Connections { items: Connection[]; next_before_id: number | null }
+
+const isTool = (v: unknown): v is Tool => record(v) && typeof v.id === "number" && typeof v.name === "string" && typeof v.display_name === "string" && typeof v.source_kind === "string" && typeof v.status === "string" && typeof v.fingerprint === "string" && typeof v.input_schema_sha256 === "string";
+const isConnection = (v: unknown): v is Connection => record(v) && typeof v.id === "number" && typeof v.display_name === "string" && typeof v.transport === "string" && typeof v.enabled === "boolean" && typeof v.catalog_status === "string";
+export const getTools = (connection?: number, before?: number) => { const params = new URLSearchParams(); if (connection) params.set("connection_id", String(connection)); if (before) params.set("before_id", String(before)); return apiRequest<ToolPage>(`/tools?${params}`, (v): v is ToolPage => record(v) && rows(v.items, isTool) && (v.next_before_id === null || typeof v.next_before_id === "number")); };
+export const getAgentTools = (id: number) => apiRequest<AgentTools>(`/agent-instances/${id}/tools`, (v): v is AgentTools => record(v) && rows(v.requirements, r => record(r) && typeof r.alias === "string" && typeof r.upstream_name === "string" && typeof r.required === "boolean" && typeof r.input_schema_sha256 === "string") && rows(v.bindings, r => record(r) && typeof r.alias === "string" && typeof r.definition_id === "number" && typeof r.fingerprint === "string") && rows(v.grants, r => record(r) && typeof r.definition_id === "number" && typeof r.fingerprint === "string") && rows(v.history, r => record(r) && typeof r.id === "number" && typeof r.run_id === "number" && typeof r.name === "string" && typeof r.status === "string"));
+export const getPolicy = (id: number) => apiRequest<MemoryPolicy>(`/agent-instances/${id}/memory-policy`, isPolicy);
+function isPolicy(v: unknown): v is MemoryPolicy { return record(v) && ["manual", "review", "automatic_private"].includes(String(v.mode)) && typeof v.revision === "number" && typeof v.extraction_enabled === "boolean"; }
+export const updatePolicy = (id: number, body: {mode: MemoryPolicy["mode"]; extraction_enabled: boolean; expected_revision: number}) => apiRequest<MemoryPolicy>(`/agent-instances/${id}/memory-policy`, isPolicy, {method: "PATCH", body});
+export const getSuggestions = (id?: number, before?: number) => { const params = new URLSearchParams(); if (id) params.set("agent_instance_id", String(id)); if (before) params.set("before_id", String(before)); return apiRequest<Suggestions>(`/memory-suggestions?${params}`, (v): v is Suggestions => record(v) && rows(v.items, r => record(r) && typeof r.id === "number" && typeof r.agent_instance_id === "number" && typeof r.source_run_id === "number" && typeof r.scope === "string" && typeof r.content === "string" && typeof r.state === "string") && (v.next_before_id === null || typeof v.next_before_id === "number")); };
+export const decideSuggestion = (id: number, approve: boolean) => apiRequestNoContent(`/memory-suggestions/${id}/decision`, {method: "POST", body: {approve}});
+export const permission = (id: number, definition_id: number, action: "grant" | "revoke" | "reconfirm") => apiRequestNoContent(`/agent-instances/${id}/tool-permissions`, {method: "POST", body: {definition_id, action}});
+export const bindTool = (id: number, alias: string, definition_id: number) => apiRequestNoContent(`/agent-instances/${id}/tool-bindings`, {method: "POST", body: {alias, definition_id}});
+export const unbindTool = (id: number, alias: string) => apiRequestNoContent(`/agent-instances/${id}/tool-bindings/${encodeURIComponent(alias)}`, {method: "DELETE"});
+export const getRunContext = (id: number) => apiRequest<RunContext>(`/runs/${id}/context`, (v): v is RunContext => record(v) && typeof v.available === "boolean" && typeof v.memory_state === "string" && typeof v.context_bytes === "number" && typeof v.context_limit_bytes === "number" && rows(v.memories, r => record(r) && typeof r.id === "number" && typeof r.version === "number" && typeof r.scope === "string" && typeof r.content === "string") && rows(v.history, r => record(r) && typeof r.role === "string" && typeof r.content === "string" && typeof r.turn === "number"));
+export const getRuntimeHealth = () => apiRequest<RuntimeHealth>("/runtime-health", (v): v is RuntimeHealth => record(v) && typeof v.observed_at === "string" && typeof v.execution_available === "boolean" && record(v.owner_jobs) && Object.values(v.owner_jobs).every(n => typeof n === "number") && record(v.package_sandbox) && typeof v.package_sandbox.supported === "boolean" && typeof v.package_sandbox.platform === "string" && (v.package_sandbox.backend === null || typeof v.package_sandbox.backend === "string") && (v.package_sandbox.reason === null || typeof v.package_sandbox.reason === "string"));
+export const getConnections = (before?: number) => apiRequest<Connections>(`/mcp-connections${before ? `?before_id=${before}` : ""}`, (v): v is Connections => record(v) && rows(v.items, isConnection) && (v.next_before_id === null || typeof v.next_before_id === "number"));
+export const createConnection = (body: { display_name: string; transport: "stdio" | "http"; server_key?: string; endpoint?: string; credential_ref?: string }) => apiRequest<Connection>("/mcp-connections", isConnection, {method: "POST", body});
+export const connectionAction = (id: number, action: "refresh" | "enable" | "disable") => apiRequest<Connection>(`/mcp-connections/${id}/${action}`, isConnection, {method: "POST"});

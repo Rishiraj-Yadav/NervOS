@@ -5,7 +5,7 @@ Separate hosted read-only FastAPI service under `apps/marketplace`; frozen autho
 I4 installation and Stage H isolation/trust were excluded from the I1 acceptance.
 The current worktree implements the I2–I4 MVP and integrated I5 journeys; see
 [current implementation and acceptance limits](stage-i/i4-i5-implementation.md).
-Stage H remains future work. External acceptance is separate.
+Stage H is now complete; external acceptance is separate.
 
 ## Configuration
 

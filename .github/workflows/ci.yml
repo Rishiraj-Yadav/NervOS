@@ -26,9 +26,31 @@ jobs:
     name: Hosted Marketplace PostgreSQL and S3 acceptance
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # The frozen Linux launcher mounts only system roots and never the user home
+      # (ADR 0038), so the base interpreter package environments build from must not
+      # live under $HOME. This is where uv installs its managed Python.
+      UV_PYTHON_INSTALL_DIR: /usr/local/share/nervos-python
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install bubblewrap for package containment
+        # The runtime refuses package execution without qualified Linux isolation
+        # (ADR 0035/0038), so the hosted acceptance needs the same launcher a
+        # production Linux host has. Ubuntu 24.04 restricts unprivileged user
+        # namespaces through AppArmor; this disposable runner re-enables them.
+        run: |
+          sudo mkdir -p /usr/local/share/nervos-python
+          sudo chown "$(id -u):$(id -g)" /usr/local/share/nervos-python
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          bwrap --version
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          # Hedge for runner images that ship the per-user namespace allowance at 0:
+          # creating a user namespace would otherwise fail with ENOSPC.
+          sudo sysctl -w user.max_user_namespaces=63359
       - name: Set up uv
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
@@ -38,6 +60,60 @@ jobs:
         run: uv python install
       - name: Install locked workspace dependencies
         run: uv sync --frozen --all-packages
+      - name: Package launcher diagnostic
+        # The install journey runs the package host inside the frozen launcher with its
+        # stderr discarded, so a launcher failure on a new runner image is undiagnosable
+        # from the acceptance error alone. Reproduce the same venv-through-bwrap shape
+        # here and print the child's evidence. Non-fatal: it only reports.
+        run: |
+          uv run python - <<'PY'
+          import os, resource, subprocess, sys, tempfile, venv
+          from pathlib import Path
+
+          from nervos_core.application.sandbox import ContainmentUnavailable
+          from nervos_core.infrastructure.sandbox import create_containment, observe_sandbox_capability
+
+          print("capability:", observe_sandbox_capability())
+          count = sum(
+              1
+              for pid in os.listdir("/proc")
+              if pid.isdigit() and os.stat(f"/proc/{pid}").st_uid == os.getuid()
+          )
+          print("processes for uid:", count)
+          print("NPROC rlimit:", resource.getrlimit(resource.RLIMIT_NPROC))
+          print("running:", sys.executable)
+          print("base:", Path(getattr(sys, "_base_executable", sys.executable)).resolve())
+          root = Path(tempfile.mkdtemp(prefix="launcher-diagnostic-"))
+          environment = root / "env"
+          venv.EnvBuilder(with_pip=False, symlinks=False).create(environment)
+          print("pyvenv.cfg:", (environment / "pyvenv.cfg").read_text().strip())
+          scratch = root / "scratch"
+          scratch.mkdir()
+          try:
+              containment = create_containment()
+          except ContainmentUnavailable as error:
+              print("containment refused:", error)
+              raise SystemExit(0)
+          launch = containment.prepare(
+              python=environment / "bin" / "python",
+              scratch=scratch,
+              environment={},
+              arguments=("-c", "import sys; print('contained-ok', sys.version.split()[0])"),
+          )
+          completed = subprocess.run(
+              launch.command,
+              cwd=launch.cwd,
+              env=launch.environment,
+              capture_output=True,
+              text=True,
+              timeout=60,
+              preexec_fn=launch.preexec_fn,
+              start_new_session=launch.start_new_session,
+          )
+          print("exit:", completed.returncode)
+          print("stdout:", completed.stdout.strip())
+          print("stderr:", completed.stderr.strip())
+          PY
       - name: Disposable PostgreSQL 18 and authenticated S3 contract
         run: uv run python scripts/check.py marketplace-integration
 
@@ -85,9 +161,31 @@ jobs:
     name: Deterministic browser journey
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      # Same as the marketplace job: keep the package base interpreter under a
+      # mounted system root so qualified containment can actually mount it.
+      UV_PYTHON_INSTALL_DIR: /usr/local/share/nervos-python
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install bubblewrap for package containment
+        # Same rationale as the marketplace job: the Stage-G journey installs a
+        # package whose agent only launches inside Linux isolation, so the
+        # launcher binary must exist on this runner too. This step also creates the
+        # UV_PYTHON_INSTALL_DIR, which must exist before the managed Python is
+        # installed into it (a runner user cannot mkdir under /usr/local/share).
+        run: |
+          sudo mkdir -p /usr/local/share/nervos-python
+          sudo chown "$(id -u):$(id -g)" /usr/local/share/nervos-python
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          bwrap --version
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          # Same namespace-allowance fix as the marketplace job.
+          sudo sysctl -w user.max_user_namespaces=63359
 
       - name: Set up pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10

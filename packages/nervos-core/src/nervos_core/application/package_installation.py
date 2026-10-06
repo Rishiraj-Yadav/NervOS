@@ -26,6 +26,10 @@ from nervos_core.application.package_verification import (
     MANIFEST_PATH,
     VerifiedPackage,
 )
+from nervos_core.application.publisher_trust import (
+    PublisherTrustService,
+    ensure_installable,
+)
 from nervos_core.domain.agents import AgentInstance
 from nervos_core.domain.package_installation import (
     AgentInstancePackageBinding,
@@ -196,12 +200,18 @@ class PackageApplicationService:
         environment_builder: PackageEnvironmentBuilder,
         health_checker: PackageHealthChecker,
         clock: Callable[[], datetime],
+        trust: PublisherTrustService | None = None,
+        installation_preflight: Callable[[], None] | None = None,
     ) -> None:
         self._registry = registry
         self._store = store
         self._environment_builder = environment_builder
         self._health_checker = health_checker
         self._clock = clock
+        # Stage H5 (ADR 0036). Absent means "no local revocation state", which is the
+        # Stage-G behaviour exactly; the API composition always supplies it.
+        self._trust = trust
+        self._installation_preflight = installation_preflight
 
     def install(
         self,
@@ -212,6 +222,10 @@ class PackageApplicationService:
         installed_id: int | None = None
         try:
             self._require_authorization(staged, authorization)
+            if self._trust is not None:
+                ensure_installable(self._trust, staged.verified.signer_fingerprint)
+            if self._installation_preflight is not None:
+                self._installation_preflight()
             reader = BoundedArchiveReader(
                 staged.archive, profile=ArchiveValidationProfile.NERVOS_V1
             )
@@ -363,6 +377,8 @@ class PackageApplicationService:
         target_detail = self._registry.get_package_detail(
             current_detail.package_id, target_package_version
         )
+        if self._trust is not None:
+            ensure_installable(self._trust, target_detail.signer_fingerprint)
         if target_detail.status.value != "active":
             target_id = current_detail.package_id
             raise ValueError(f"Target {target_id}@{target_package_version} is not active.")

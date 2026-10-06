@@ -19,9 +19,11 @@ from nervos_core.application.model_completion import (
     ModelUsage,
     StopOutcome,
 )
+from nervos_core.application.runtime_integration import MemoryProposal
 from nervos_core.domain.agents import AgentDefinitionId
 from nervos_core.domain.context import ContextSnapshotData
 from nervos_core.domain.runs import Run, RunStatus, is_blank_text
+from nervos_core.domain.workflows import WorkflowStepResult
 
 # Only a normalized natural stop is representable as a succeeded Run. Every other
 # normalized termination becomes a stable safe execution failure with no output.
@@ -109,11 +111,19 @@ class DuplicateAgentHandler(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class ChatOutcome:
-    """Validated provider-neutral result of one trusted Chat execution."""
+    """Validated provider-neutral result of one trusted Chat execution.
+
+    `workflow_step` is the additive ADR 0039 result: it is `None` for every ordinary Run,
+    so a legacy handler keeps returning exactly the shape it always did. When it *is*
+    present it has already been fully validated — bounds, directive exclusivity, decision
+    binding — before it reaches this object, so nothing downstream re-parses package data.
+    """
 
     output_text: str
     finish_reason: str
     usage: ModelUsage
+    memory_proposals: tuple[MemoryProposal, ...] = ()
+    workflow_step: WorkflowStepResult | None = None
 
 
 class TrustedAgentHandler(Protocol):

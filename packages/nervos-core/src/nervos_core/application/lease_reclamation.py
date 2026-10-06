@@ -27,6 +27,8 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Protocol
 
+from nervos_core.application.sandbox import WorkerSandboxCapability
+
 # Timing constants are internal, per the C0 rule that an exposed setting needs a demonstrated
 # operator requirement. Only the Worker service reads them.
 
@@ -129,7 +131,9 @@ class ClaimReclamationPersistence(Protocol):
 class WorkerRegistryPersistence(Protocol):
     """The durable registry writes one Worker process needs, and nothing more."""
 
-    def register_worker(self, *, worker_id: str, now: datetime) -> None: ...
+    def register_worker(
+        self, *, worker_id: str, capability: WorkerSandboxCapability, now: datetime
+    ) -> None: ...
 
     def heartbeat_worker(self, *, worker_id: str, now: datetime) -> WorkerLiveness: ...
 

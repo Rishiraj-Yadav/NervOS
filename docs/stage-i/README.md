@@ -5,7 +5,7 @@
 **I0 IMPLEMENTED AS GOVERNANCE / PENDING EXTERNAL ACCEPTANCE.** The preceding planning
 architecture was accepted for this governance freeze with review refinements. These final
 documents await external acceptance; that approval is a prerequisite to I1 authorization.
-**I1 NOT STARTED. Marketplace runtime functionality NOT IMPLEMENTED. Stage H NOT STARTED.**
+**I1 NOT STARTED. Marketplace runtime functionality NOT IMPLEMENTED. Stage H COMPLETE.**
 ADRs 0027–0030 and this master plan govern future I1–I5. They introduce no runtime behavior.
 
 Reviewed baseline: `main` and `origin/main` at

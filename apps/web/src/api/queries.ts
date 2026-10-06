@@ -177,7 +177,8 @@ export function useLogout() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: logout,
-    onSuccess: () => {
+    onSuccess: async () => {
+      await queryClient.cancelQueries({ queryKey: ["runtime-integration"] });
       queryClient.setQueryData<User | null>(queryKeys.currentUser, null);
       queryClient.removeQueries({ queryKey: queryKeys.agentInstances });
       queryClient.removeQueries({ queryKey: ["conversations"] });
@@ -185,6 +186,7 @@ export function useLogout() {
       queryClient.removeQueries({ queryKey: ["automations"] });
       queryClient.removeQueries({ queryKey: ["agent-runs"] });
       queryClient.removeQueries({ queryKey: ["run-events"] });
+      queryClient.removeQueries({ queryKey: ["runtime-integration"] });
     },
   });
 }

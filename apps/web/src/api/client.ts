@@ -36,7 +36,11 @@ export class ApiProtocolError extends Error {
 type Validator<T> = (value: unknown) => value is T;
 
 interface RequestOptions {
-  method?: "GET" | "POST" | "PATCH" | "DELETE";
+  // A closed vocabulary rather than `string`: only methods the API actually exposes are
+  // reachable from the dashboard. `PUT` is here because the Stage-H secret and
+  // publisher-trust resources replace a subresource in full
+  // (`PUT /secrets/{id}/value`, `PUT /publisher-trust/{fingerprint}`).
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: unknown;
   formData?: FormData;
 }

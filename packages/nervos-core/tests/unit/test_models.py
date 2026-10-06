@@ -42,6 +42,24 @@ def test_metadata_contains_exact_application_tables() -> None:
         "installed_package_dependencies",
         "agent_instance_package_bindings",
         "marketplace_install_requests",
+        "agent_memory_policies",
+        "agent_tool_bindings",
+        "run_integrations",
+        "memory_suggestions",
+        # Stage H's security tables. Each stores metadata or ciphertext; none of them can hold a
+        # secret in the clear, because the encryption key lives outside the database entirely.
+        "secrets",
+        "secret_keys",
+        "account_connections",
+        "account_oauth_requests",
+        "action_approvals",
+        "publisher_trust",
+        # Durable autonomous workflows (ADR 0039): five new tables, nothing else altered.
+        "workflow_executions",
+        "workflow_steps",
+        "workflow_checkpoints",
+        "workflow_signals",
+        "workflow_decisions",
     }
 
 

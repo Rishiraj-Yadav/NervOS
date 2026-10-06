@@ -29,6 +29,7 @@ from nervos_core.application.package_installation import (
 from nervos_core.application.package_signing import Ed25519PackageSigner
 from nervos_core.application.package_storage import PackageStore
 from nervos_core.application.package_verification import verify_package
+from nervos_core.application.publisher_trust import PublisherRevoked, PublisherTrustService
 from nervos_core.domain.package_installation import (
     PackageInstallAuthorization,
     PackageInstallStatus,
@@ -41,6 +42,7 @@ from nervos_core.domain.package_query import (
 )
 from nervos_core.infrastructure.database import create_sqlite_engine
 from nervos_core.infrastructure.database.packages import SqlAlchemyPackageRegistryPersistence
+from nervos_core.infrastructure.database.publisher_trust import SqlAlchemyPublisherTrustPersistence
 from package_fixtures import (  # pyright: ignore[reportMissingImports]
     TEST_SIGNING_SEED,
     VALID_CONFIG_SCHEMA,
@@ -121,8 +123,49 @@ def test_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
     env_builder = FakeEnvironmentBuilder(store.environments_root, runtime)
     health = FakeHealthChecker()
-    service = PackageApplicationService(registry, store, env_builder, health, clock=_now)
+    trust = PublisherTrustService(SqlAlchemyPublisherTrustPersistence(engine), _now)
+    service = PackageApplicationService(
+        registry, store, env_builder, health, clock=_now, trust=trust
+    )
     return service, registry, store, engine
+
+
+def test_revoked_target_cannot_be_rebound_and_preserves_binding(test_setup) -> None:
+    service, registry, _, engine = test_setup
+    archive = _built_bytes()
+    verified = verify_package(archive_bytes=archive)
+    service.install(
+        io.BytesIO(archive),
+        PackageInstallAuthorization(
+            package_id=verified.manifest.package_id,
+            package_version=verified.manifest.package_version,
+            content_digest=verified.content_digest,
+            signer_fingerprint=verified.signer_fingerprint,
+            archive_digest=verified.archive_digest,
+            approved_by_user_id=1,
+            approved_at=_now(),
+        ),
+    )
+    instance, original = service.create_package_instance(
+        owner_user_id=1,
+        package_id=verified.manifest.package_id,
+        package_version=verified.manifest.package_version,
+        display_name="Revocation regression",
+        model_provider="anthropic",
+        model_name="offline-test-model",
+        config={},
+    )
+    trust = PublisherTrustService(SqlAlchemyPublisherTrustPersistence(engine), _now)
+    trust.decide(signer_fingerprint=verified.signer_fingerprint, state="revoked", decided_by=1)
+    with pytest.raises(PublisherRevoked):
+        service.rebind_instance(
+            owner_user_id=1,
+            agent_instance_id=instance.id,
+            target_package_version=verified.manifest.package_version,
+            config=None,
+            expected_config_revision=original.config_revision,
+        )
+    assert registry.get_binding_for_instance(instance.id) == original
 
 
 def test_package_instance_creation_and_config_patch(test_setup) -> None:

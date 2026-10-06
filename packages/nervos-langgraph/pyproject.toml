@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nervos-langgraph"
+version = "0.1.0"
+description = "Pinned LangGraph workflow adapter for the NervOS Agent SDK"
+requires-python = ">=3.12"
+# Pinned exactly, on purpose. This package exists to prove one *qualified* framework
+# version works with the NervOS durable-workflow contract; it is deliberately not a range,
+# because an unqualified LangGraph would make the compatibility matrix unverifiable.
+dependencies = [
+    "langgraph==1.2.12",
+    "nervos-sdk",
+]
+
+[tool.uv.sources]
+nervos-sdk = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nervos_langgraph"]

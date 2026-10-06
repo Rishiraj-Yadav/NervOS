@@ -23,6 +23,7 @@ MODEL_OUTPUT_INCOMPLETE = "model_output_incomplete"
 MODEL_OUTPUT_TOO_LARGE = "model_output_too_large"
 MODEL_REFUSED = "model_refused"
 INTERNAL_EXECUTION_ERROR = "internal_execution_error"
+SANDBOX_UNAVAILABLE = "sandbox_unavailable"
 # Infrastructural closeout code. It names a durable-execution outcome rather than a provider
 # response, and it lives in the same allowlist as every provider code precisely so that there
 # is exactly one place that decides which codes may ever be persisted and what they say.
@@ -83,6 +84,9 @@ SAFE_ERROR_MESSAGES: Mapping[str, str] = MappingProxyType(
         MODEL_OUTPUT_TOO_LARGE: "The model response exceeded the configured limit.",
         MODEL_REFUSED: "The model could not complete this request.",
         INTERNAL_EXECUTION_ERROR: "The model execution failed safely.",
+        SANDBOX_UNAVAILABLE: (
+            "Package filesystem and network isolation is unavailable; execution was refused."
+        ),
         EXECUTION_OUTCOME_AMBIGUOUS: (
             "NervOS could not determine whether this run's model request completed, so it was "
             "closed as failed rather than replayed."
@@ -317,6 +321,7 @@ class ModelRequest:
     compaction_context: str | None = None
     user_memory_context: str | None = None
     agent_memory_context: str | None = None
+    temperature: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

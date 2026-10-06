@@ -22,6 +22,7 @@ the write lock.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from collections.abc import Callable, Sequence
@@ -62,11 +63,14 @@ from nervos_core.application.model_completion import (
 )
 from nervos_core.application.queue_policy import PRODUCTION_QUEUE_POLICY, QueuePolicy
 from nervos_core.application.retry_policy import RetryPolicy, retry_due_at
+from nervos_core.application.runtime_integration import MemoryProposal
+from nervos_core.application.sandbox import WorkerSandboxCapability
 from nervos_core.application.tool_invocations import (
     DISPATCHED_STATUSES,
     ClaimHandle,
     InvocationStatus,
 )
+from nervos_core.application.workflows import WorkflowStepCommitter
 from nervos_core.domain.agents import AgentDefinitionId
 from nervos_core.domain.context import (
     ContextSnapshotData,
@@ -91,6 +95,7 @@ from nervos_core.domain.runs import (
     validate_error_message,
     validate_input_text,
 )
+from nervos_core.domain.workflows import WorkflowStepResult, complete_directive
 from nervos_core.infrastructure.database.models import (
     AgentInstanceRecord,
     AgentToolGrantRecord,
@@ -103,6 +108,7 @@ from nervos_core.infrastructure.database.models import (
     RunRecord,
     ToolInvocationRecord,
     WorkerRecord,
+    WorkflowStepRecord,
 )
 from nervos_core.infrastructure.database.packages import (
     resolve_run_execution_snapshot_on_connection,
@@ -111,6 +117,12 @@ from nervos_core.infrastructure.database.run_events import (
     EventOwnershipViolation,
     append_event_on_connection,
     sequence_base,
+)
+from nervos_core.infrastructure.database.runtime_integration import (
+    capture_integration,
+    capture_proposals,
+    independent_context,
+    snapshot_from_json,
 )
 from nervos_core.infrastructure.database.transaction import TransactionRunner
 
@@ -410,6 +422,7 @@ def insert_run_and_job_on_connection(
     agent_capacity: int,
     provider_capacity: int,
     progress: _SubmissionProgress | None = None,
+    context_preassembled: bool = False,
 ) -> Run:
     """Insert one Run, its Job, and the two opening events, on the caller's connection.
 
@@ -475,6 +488,21 @@ def insert_run_and_job_on_connection(
     resolved_definition = AgentDefinitionId(
         str(instance["agent_key"]), str(instance["agent_definition_version"])
     )
+    accepted_context = (
+        None
+        if context_preassembled
+        else independent_context(
+            connection,
+            owner_user_id,
+            agent_instance_id,
+            resolved_definition,
+            input_text,
+            limits,
+            now,
+        )
+    )
+    if accepted_context is not None:
+        input_text = accepted_context.rendered_context
     executable = resolve_run_execution_snapshot_on_connection(
         connection,
         agent_instance_id=agent_instance_id,
@@ -519,6 +547,7 @@ def insert_run_and_job_on_connection(
     if run_pk is None or run_pk[0] is None:
         raise PersistenceUnavailable
     run_id = int(run_pk[0])
+    capture_integration(connection, run_id, instance, accepted_context)
     if progress is not None:
         progress.run_id = run_id
 
@@ -786,10 +815,16 @@ class SqlAlchemyJobExecutionPersistence:
         engine: Engine,
         *,
         policy: QueuePolicy = PRODUCTION_QUEUE_POLICY,
+        workflow_steps: WorkflowStepCommitter | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._engine = engine
         self._policy = policy
+        # ADR 0039: the only writer of workflow progress, injected so this module needs no
+        # workflow infrastructure import. It is handed *this* transaction's connection, so
+        # a step's Run success and its durable workflow progress are one commit or one
+        # rollback.
+        self._workflow_steps = workflow_steps
         self._runner = TransactionRunner(engine, sleep)
 
     # -- claim -------------------------------------------------------------------------
@@ -1391,8 +1426,16 @@ class SqlAlchemyJobExecutionPersistence:
         usage: ModelUsage,
         elapsed_ms: int,
         now: datetime,
+        memory_proposals: tuple[MemoryProposal, ...] = (),
+        workflow_step: WorkflowStepResult | None = None,
     ) -> bool:
-        """Atomically close Attempt + Job + Run as succeeded and append `run.succeeded`."""
+        """Atomically close Attempt + Job + Run as succeeded and append `run.succeeded`.
+
+        When `workflow_step` is present, the same transaction also advances that workflow's
+        durable state, step outcome and status. There is deliberately no separate workflow
+        write to fall back to: if the workflow write cannot commit, the Run's success must not
+        commit either, and the Attempt is left for the ordinary recovery path.
+        """
 
         def operation(connection: Connection) -> bool:
             attempt_update = connection.execute(
@@ -1445,6 +1488,32 @@ class SqlAlchemyJobExecutionPersistence:
             )
             if _rowcount(run_update) != 1:
                 raise _Fenced
+            capture_proposals(connection, claim.run_id, memory_proposals)
+            result = workflow_step
+            if result is None and self._workflow_steps is not None:
+                linked_state = connection.execute(
+                    select(WorkflowStepRecord.state_json).where(
+                        WorkflowStepRecord.run_id == claim.run_id
+                    )
+                ).scalar_one_or_none()
+                if linked_state is not None:
+                    result = WorkflowStepResult(
+                        directive=complete_directive(), state=json.loads(linked_state)
+                    )
+            if result is not None:
+                # Committed inside the fence, before the closing event, so a lost fence here
+                # rolls the whole terminalization back rather than leaving a succeeded Run
+                # with no durable workflow state. A `False` result means the revision moved
+                # under us.
+                committer = self._workflow_steps
+                if committer is None or not committer.commit_step(
+                    connection,
+                    run_id=claim.run_id,
+                    attempt_id=claim.attempt_id,
+                    result=result,
+                    now=now,
+                ):
+                    raise _Fenced
             _append_event_on_connection(
                 connection,
                 run_id=claim.run_id,
@@ -2076,8 +2145,16 @@ class SqlAlchemyJobExecutionPersistence:
 
     # -- worker registry -----------------------------------------------------------------
 
-    def register_worker(self, *, worker_id: str, now: datetime) -> None:
-        """Durably register one process incarnation. A restart draws a new identity."""
+    def register_worker(
+        self, *, worker_id: str, capability: WorkerSandboxCapability, now: datetime
+    ) -> None:
+        """Durably register one process incarnation. A restart draws a new identity.
+
+        The observed sandbox capability is recorded with the incarnation so the
+        control-plane projection reports what a Worker actually proved at startup, not
+        what the API host guesses. It remains observability: the launch factory decides
+        every package start.
+        """
 
         def operation(connection: Connection) -> bool:
             connection.execute(
@@ -2086,6 +2163,9 @@ class SqlAlchemyJobExecutionPersistence:
                     started_at=now,
                     last_heartbeat_at=now,
                     stopped_at=None,
+                    platform=capability.platform,
+                    sandbox_backend=capability.backend,
+                    package_execution_supported=capability.package_execution_supported,
                 )
             )
             return True
@@ -2527,7 +2607,14 @@ class SqlAlchemyJobExecutionPersistence:
                 .one_or_none()
             )
             if row is None:
-                return None
+                from nervos_core.infrastructure.database.models import RunIntegrationRecord
+
+                raw = connection.scalar(
+                    select(RunIntegrationRecord.context_json).where(
+                        RunIntegrationRecord.run_id == run_id
+                    )
+                )
+                return snapshot_from_json(raw, run_id) if raw else None
             created = _as_utc(row["created_at"])
             assert created is not None
             comp_ver = row["compaction_version"]

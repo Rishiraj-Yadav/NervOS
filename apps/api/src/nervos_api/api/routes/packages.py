@@ -11,6 +11,7 @@ from nervos_core.domain.package_installation import (
     validate_package_status,
 )
 from nervos_core.domain.package_query import PackageRemovalOutcome
+from starlette.concurrency import run_in_threadpool
 
 from nervos_api.api.dependencies import (
     CurrentUserDependency,
@@ -94,7 +95,7 @@ async def install_package(
         approved_by_user_id=user.id,
         approved_at=utc_now(),
     )
-    result = service.install(file.file, authorization)
+    result = await run_in_threadpool(service.install, file.file, authorization)
     if result.package.status is not PackageInstallStatus.ACTIVE:
         response.status_code = status.HTTP_200_OK
     return PackageVersionSummaryResponse(

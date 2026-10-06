@@ -6,6 +6,10 @@ Stage C — the persistent execution engine — is complete. C1 through C6 built
 
 ## Durable execution path
 
+For installed package agents, an SDK model request that omits its model uses the model name
+saved on the Run. The Worker forwards that exact name to the selected provider; it does not
+send a literal `default` model name. Explicit SDK model selections retain their existing behavior.
+
 The implemented path is:
 
 ```text
@@ -267,8 +271,54 @@ are indistinguishable by design and only the durable lease event was ever observ
 repeats its own limit: NervOS stopped waiting locally, and a request already sent may still have been
 processed.
 
+## Package execution isolation
+
+Untrusted `.nervos` package code runs inside a Linux [bubblewrap](https://github.com/containers/bubblewrap)
+namespace that the Worker prepares **before** the package host process exists. Isolation is a
+launch-time property, not something attached after start: the complete command, environment and
+pre-exec policy are built first, and a failure to build it refuses the Run.
+
+| Platform | Backend | Status |
+|---|---|---|
+| Linux with `bwrap` installed | bubblewrap user/mount/PID/network namespaces + frozen POSIX rlimits | **qualified** |
+| Linux without `bwrap`, Windows, macOS | none | refused with `sandbox_unavailable` |
+
+**What the package can see.** Read-only system/runtime roots, the exact immutable package
+environment, and one private writable attempt scratch directory. It cannot see the user home,
+the NervOS database, configuration, secret-key files, the package-store siblings, another
+package environment, or another attempt's scratch. The host environment is cleared; only a
+bounded set of locale/runtime values and the attempt scratch survive, and no credential is ever
+in the child.
+
+**What the package can do.** No network interface exists in the namespace, so a direct outbound
+connection fails. Model, MCP and account operations continue to work because they are
+Worker-mediated over the existing package-host standard streams. Memory, CPU, process,
+descriptor and file-size limits bind before exec; stdout/stderr and frame bounds are enforced and
+a cap violation terminates the contained process group. Cancellation, timeout, lease loss,
+protocol failure and Worker shutdown all terminate the whole group, and scratch is removed with
+the attempt.
+
+**Prerequisite on the interpreter.** Only read-only system roots are mounted, and the user home
+never is. A NervOS installation whose Python lives under `/usr`, `/usr/local` or `/opt` is
+qualified; an interpreter under the user home cannot be exposed, so that host reports
+`package_execution_supported: false` and refuses package execution.
+
+**Qualification.** Run `make qualify-linux` (or
+`uv run python scripts/linux_qualification.py`) on a Linux kernel with `bwrap` installed. It
+probes a protected host file, a direct outbound connection, scratch writability, package
+environment read-only, sibling invisibility, descendant termination and resource limits against
+the real kernel, then runs the deterministic signed-package journey through the same launcher.
+Exit code `0` means qualified, `1` means a property failed, and `2` means the host is not a Linux
+kernel with `bwrap` — a prerequisite skip that is never a pass. Container and WSL runs qualify
+the sandbox contract on a real Linux kernel but are not native-host acceptance. Windows and
+macOS hosts report the refusal before any package import; trusted built-in agents are unaffected.
+
+**Browser journey.** `uv run python scripts/e2e.py` drives the supervised browser journeys.
+Its package-install journey requires a qualified platform, because installation fails closed
+without one; it passes on the qualified Linux environment.
+
 ## Still not implemented
 
-Local AgentPackage installation and package-backed execution are implemented in Stage G; see [Agent Packages](agent-packages.md). Marketplace discovery and persistent secret management remain unimplemented (Stages I and H). Stage-G package execution uses a subprocess and isolated dependency environment but is not a hostile-code sandbox. Provider-side remote cancellation is not implemented and is not claimed. Active-concurrency limits are not runtime-tunable: changing them means changing policy code, and per-Agent-Instance custom limits are not implemented (see ADR 0013). A Worker dashboard, a public Attempt API, a queue-position or fairness-rank API, and SSE/WebSocket streaming are **not** implemented; Run history is read through the Run Events endpoint and the dashboard timeline described above. Workspace/shared memory and FTS/vector/embedding search are NOT implemented (deferred to Stage J).
+Local AgentPackage installation and package-backed execution are implemented in Stage G; see [Agent Packages](agent-packages.md). Marketplace discovery is implemented as an MVP with external/production acceptance pending (Stage I). Stage H supplies encrypted secret management, PKCE account authorization, server-side credential brokering and per-action approval, and it isolates package execution with a pre-exec bubblewrap launcher on Linux (see [Package execution isolation](#package-execution-isolation)). Package execution on any unqualified platform — including every Windows and macOS host — is refused with `sandbox_unavailable` rather than run uncontained. Built-in trusted agents continue to run. See [ADR 0037](adr/0037-stage-h-security-repair-contract.md), [ADR 0038](adr/0038-pre-exec-package-isolation.md) and the [current implementation status](implementation-status.md) for the verified boundary. Provider-side remote cancellation is not implemented and is not claimed. Active-concurrency limits are not runtime-tunable: changing them means changing policy code, and per-Agent-Instance custom limits are not implemented (see ADR 0013). A Worker dashboard, a public Attempt API, a queue-position or fairness-rank API, and SSE/WebSocket streaming are **not** implemented; Run history is read through the Run Events endpoint and the dashboard timeline described above. Workspace/shared memory and FTS/vector/embedding search are NOT implemented (deferred to Stage J).
 
 Two C4 limitations remain worth knowing when reading a retried Run. First, `elapsed_ms` and the usage counters describe the **terminal Attempt** only: they exclude earlier Attempts, the retry wait, and total Run wall-clock duration, and there is no cumulative cross-Attempt token accounting. Second, the read-only UI polls for a bounded period and then stops. **That polling bound was retired by C7** — the current model is in [Polling an execution timeline](#polling-an-execution-timeline) above. The underlying point still holds for a stale page: a Run can outlast any observation window through Worker downtime, provider duration, pre-start loss, lease recovery, or host downtime, and the Run's durable state is correct regardless, because reloading the page always shows the current state.

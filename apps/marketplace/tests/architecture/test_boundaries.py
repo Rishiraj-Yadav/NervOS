@@ -75,7 +75,7 @@ def test_schema_isolation() -> None:
     assert len(list(versions.glob("0014_stage_i4_marketplace_install_requests.py"))) == 1
     for area in ("worker", "scheduler"):
         source = (ROOT / f"apps/{area}/src/nervos_{area}/app.py").read_text()
-        assert 'EXPECTED_SCHEMA_REVISION = "0014_stage_i4_marketplace_install_requests"' in source
+        assert 'EXPECTED_SCHEMA_REVISION = "0024_durable_workflows"' in source
 
 
 def test_no_serving_mutations() -> None:

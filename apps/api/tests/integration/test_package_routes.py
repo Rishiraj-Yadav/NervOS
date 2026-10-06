@@ -237,6 +237,7 @@ def api_client(migrated_app, tmp_path: Path) -> TestClient:
         store.environments_root, runtime
     )
     app.state.package_application_service._health_checker = FakeHealthChecker()
+    app.state.package_application_service._installation_preflight = lambda: None
 
     client = TestClient(app)
     client.post(

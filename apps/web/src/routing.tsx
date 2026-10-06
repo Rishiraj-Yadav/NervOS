@@ -11,12 +11,18 @@ import { ConversationsPage } from "./pages/ConversationsPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { LoginPage } from "./pages/LoginPage";
 import { MemoriesPage } from "./pages/MemoriesPage";
+import { WorkflowsPage } from "./pages/WorkflowsPage";
+import { RunPage } from "./pages/RunPage";
 import { MarketplacePage } from "./pages/MarketplacePage";
 import { NotFoundPage } from "./pages/NotFoundPage";
 import { PackagesPage } from "./pages/PackagesPage";
 import { PackageInstallPage } from "./pages/PackageInstallPage";
 import { PackageDetailPage } from "./pages/PackageDetailPage";
 import { SetupPage } from "./pages/SetupPage";
+import { AppNavigation } from "./components/AppNavigation";
+import { ConnectionsPage } from "./pages/ConnectionsPage";
+import { RuntimeHealthPage } from "./pages/RuntimeHealthPage";
+import { SecurityPage } from "./pages/SecurityPage";
 import { useQuery } from "@tanstack/react-query";
 import {
   Navigate,
@@ -34,7 +40,12 @@ export function NewAutomationRoute() { return <SessionView page="new-automation"
 export function ConversationsRoute() { return <SessionView page="conversations" />; }
 export function ConversationRoute() { return <SessionView page="conversation" />; }
 export function MemoriesRoute() { return <SessionView page="memories" />; }
+export function WorkflowsRoute() { return <SessionView page="workflows" />; }
+export function RunRoute() { return <SessionView page="run" />; }
 export function MarketplaceRoute() { return <SessionView page="marketplace" />; }
+export function ConnectionsRoute() { return <SessionView page="connections" />; }
+export function RuntimeHealthRoute() { return <SessionView page="runtime-health" />; }
+export function SecurityRoute() { return <SessionView page="security" />; }
 
 type Session =
   | { kind: "unconfigured" }
@@ -91,7 +102,8 @@ export function NotFoundRoute() {
   return <NotFoundPage />;
 }
 
-function SessionView({ page }: { page: "home" | "setup" | "login" | "agents" | "agent" | "packages" | "package-install" | "package-detail" | "automations" | "automation" | "new-automation" | "conversations" | "conversation" | "memories" | "marketplace" }) {
+type Page = "home" | "setup" | "login" | "agents" | "agent" | "packages" | "package-install" | "package-detail" | "automations" | "automation" | "new-automation" | "conversations" | "conversation" | "memories" | "workflows" | "run" | "marketplace" | "connections" | "runtime-health" | "security";
+function SessionView({ page }: { page: Page }) {
   const session = useOutletContext<Session>();
   const location = useLocation();
 
@@ -103,8 +115,31 @@ function SessionView({ page }: { page: "home" | "setup" | "login" | "agents" | "
       ? <LoginPage />
       : <Navigate to="/login" replace state={{ from: location.pathname }} />;
   }
+  // Setup and login are entry points, not destinations: once a session exists the gate owns the way
+  // out of them. The transition is derived from this render rather than navigated imperatively from
+  // the page, because an imperative navigate raced the session write -- the router re-rendered with
+  // the new location while the gate still held the previous session, redirected straight back, and
+  // bounced the user off the page they had just reached.
+  if (page === "setup" || page === "login") {
+    return <><AppNavigation /><Navigate to={sessionDestination(location.state)} replace /></>;
+  }
+  return <><AppNavigation /><AuthenticatedView page={page} user={session.user} /></>;
+}
+
+/** Where an authenticated session leaves setup or login for. Anything unrecognised goes home. */
+function sessionDestination(state: unknown): string {
+  if (typeof state !== "object" || state === null || !("from" in state)) {
+    return "/";
+  }
+  const { from } = state;
+  return typeof from === "string" && from.startsWith("/") && from !== "/login" && from !== "/setup"
+    ? from
+    : "/";
+}
+
+function AuthenticatedView({page, user}: {page: Page; user: User}) {
   if (page === "home") {
-    return <DashboardPage user={session.user} />;
+    return <DashboardPage user={user} />;
   }
   if (page === "agents") {
     return <AgentInstancesPage />;
@@ -119,7 +154,12 @@ function SessionView({ page }: { page: "home" | "setup" | "login" | "agents" | "
   if (page === "conversations") return <ConversationsPage />;
   if (page === "conversation") return <ConversationPage />;
   if (page === "memories") return <MemoriesPage />;
+  if (page === "workflows") return <WorkflowsPage />;
+  if (page === "run") return <RunPage />;
   if (page === "marketplace") return <MarketplacePage />;
+  if (page === "connections") return <ConnectionsPage />;
+  if (page === "runtime-health") return <RuntimeHealthPage />;
+  if (page === "security") return <SecurityPage />;
   return <Navigate to="/" replace />;
 }
 

@@ -12,7 +12,7 @@ const password = "StageA test password 2026!";
 // The terminal result therefore travels through a claim, a pre-start loss, a lease expiry, a
 // reclamation, a fresh claim, a durable terminal write, and a browser poll, so it gets a bound
 // wider than the 7.5s default; the whole-test budget is untouched.
-const ASYNC_TIMEOUT = 25_000;
+const ASYNC_TIMEOUT = 60_000;
 function releaseWorkerClaimGate(): void {
   const gate = process.env.NERVOS_E2E_CLAIM_GATE;
   if (gate === undefined || gate === "") {

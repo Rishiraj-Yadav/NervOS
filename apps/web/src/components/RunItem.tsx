@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { useState } from "react";
 
 import { formatInstant, type Run } from "../api/agentInstances";
+import { RunContextPanel } from "./RuntimeControls";
 
 const STATUS_LABELS: Record<Run["status"], string> = {
   created: "Queued",
@@ -148,6 +149,7 @@ export function RunItem({
           ) : null}
         </div>
       ) : null}
+      <RunContextPanel runId={run.id} />
     </article>
   );
 }

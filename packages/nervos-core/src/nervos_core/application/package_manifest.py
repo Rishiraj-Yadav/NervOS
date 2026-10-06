@@ -24,6 +24,7 @@ import yaml
 
 from nervos_core.application.builtin_tools import builtin_tool_specs
 from nervos_core.application.clock import Clock
+from nervos_core.application.runtime_integration import package_integration
 from nervos_core.domain.agents import AgentDefinition
 from nervos_core.domain.packages import (
     EXTENSION_KEY_PATTERN,
@@ -174,6 +175,7 @@ def parse_package_manifest(raw: bytes, *, clock: Clock | None = None) -> Package
     root = _as_text_mapping(cast(Mapping[object, object], documents[0]), "manifest")
     manifest = parse_package_manifest_mapping(root)
     validate_manifest_tool_ids(manifest, clock=clock)
+    package_integration(manifest)
     return manifest
 
 
@@ -189,7 +191,7 @@ def parse_package_manifest_mapping(data: Mapping[str, object]) -> PackageManifes
     package_id = _required_text(data, "package_id")
     validate_package_id(package_id)
 
-    return PackageManifest(
+    manifest = PackageManifest(
         manifest_version=ManifestVersion(_required_text(data, "manifest_version")),
         identity=PackageIdentity(
             package_id, PackageVersion(_required_text(data, "package_version"))
@@ -209,6 +211,8 @@ def parse_package_manifest_mapping(data: Mapping[str, object]) -> PackageManifes
         resources=_parse_resources(_optional_mapping(data, "resources")),
         extensions=MappingProxyType(extensions),
     )
+    package_integration(manifest)
+    return manifest
 
 
 def project_agent_definition(manifest: PackageManifest) -> AgentDefinition:

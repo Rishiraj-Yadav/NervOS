@@ -25,6 +25,7 @@ from nervos_core.application.job_execution import ClaimedAttempt, JobExecutionSe
 from nervos_core.application.lease_reclamation import LeaseReclaimer
 from nervos_core.application.retry_policy import PRODUCTION_RETRY_POLICY, RetryPolicy
 from nervos_core.application.run_execution import RunExecutor
+from nervos_core.application.sandbox import WorkerSandboxCapability
 from nervos_core.application.tool_invocation_mediator import ToolInvocationMediator
 from nervos_core.application.tool_loop import ToolLoop
 from nervos_core.application.trusted_chat import (
@@ -42,6 +43,7 @@ from nervos_core.infrastructure.database.tool_invocations import (
     SqlAlchemyToolInvocationPersistence,
 )
 from nervos_core.infrastructure.database.tools import SqlAlchemyToolPermissionEvaluator
+from nervos_core.infrastructure.database.workflows import SqlAlchemyWorkflowStepFinalizer
 
 # The Worker application itself is production code; only the provider mapping is a double.
 from nervos_worker.app import (
@@ -171,7 +173,12 @@ async def claim_once_then_die(
         )
     )
     worker_id = generate_worker_id()
-    registry = WorkerRegistry(persistence, worker_id, clock=utc_now)
+    registry = WorkerRegistry(
+        persistence,
+        worker_id,
+        clock=utc_now,
+        capability=WorkerSandboxCapability(False, "test", None),
+    )
     reclaimer = ReclaimLoop(LeaseReclaimer(persistence), clock=utc_now)
     registry.register()
     reclaimer.startup_pass()
@@ -226,7 +233,9 @@ async def run() -> int:
         persistence = (
             GatedJobPersistence(engine, Path(gate))
             if gate
-            else SqlAlchemyJobExecutionPersistence(engine)
+            else SqlAlchemyJobExecutionPersistence(
+                engine, workflow_steps=SqlAlchemyWorkflowStepFinalizer()
+            )
         )
         if os.environ.get(PRE_START_CRASH_VARIABLE, "").strip():
             return await claim_once_then_die(
@@ -282,7 +291,12 @@ async def run() -> int:
         # a call, and D2's live predicate still decides every one at call time.
         reconcile_tool_definitions(engine)
         worker_id = generate_worker_id()
-        registry = WorkerRegistry(persistence, worker_id, clock=utc_now)
+        registry = WorkerRegistry(
+            persistence,
+            worker_id,
+            clock=utc_now,
+            capability=WorkerSandboxCapability(False, "test", None),
+        )
         reclaimer = ReclaimLoop(LeaseReclaimer(persistence), clock=utc_now)
         worker = Worker(
             persistence,

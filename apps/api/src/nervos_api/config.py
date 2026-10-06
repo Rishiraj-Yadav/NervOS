@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     mcp_allowed_origins: str = ""
     mcp_stdio_servers: str = ""
     mcp_credential_aliases: str = ""
+    # Stage H1 (ADR 0032). The master key is operator-owned material that never enters the
+    # database and never has a default value: a missing or malformed file makes every secret
+    # operation fail closed rather than silently run without encryption.
+    secrets_key_file: Path = Path("~/.nervos/secrets.key")
+    secrets_key_version: int = Field(default=1, ge=1)
+    account_oauth_providers: str = ""
 
     @field_validator("database_path", "package_store", mode="before")
     @classmethod
@@ -69,6 +75,15 @@ class Settings(BaseSettings):
         path = value.expanduser().resolve(strict=False)
         if path.is_dir():
             raise ValueError("database path must identify a file")
+        return path
+
+    @field_validator("secrets_key_file")
+    @classmethod
+    def normalize_secrets_key_file(cls, value: Path) -> Path:
+        """Expand the key path without creating it and without reading its contents."""
+        path = value.expanduser().resolve(strict=False)
+        if path.exists() and path.is_dir():
+            raise ValueError("secrets key file must identify a file")
         return path
 
     @field_validator("package_store")

@@ -12,7 +12,15 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from execution_support import NOW, attempt_row, event_types, job_row, migrate, run_row
+from execution_support import (
+    NOW,
+    TEST_CAPABILITY,
+    attempt_row,
+    event_types,
+    job_row,
+    migrate,
+    run_row,
+)
 from nervos_core.application.job_execution import LEASE_DURATION
 from nervos_core.application.lease_reclamation import (
     RECLAIM_BACKOFF,
@@ -277,7 +285,7 @@ def test_registry_heartbeat_is_monotonic_and_classified(
     engine = prepare(tmp_path, monkeypatch)
     try:
         persistence = SqlAlchemyJobExecutionPersistence(engine, sleep=lambda _: None)
-        persistence.register_worker(worker_id="worker-1", now=NOW)
+        persistence.register_worker(worker_id="worker-1", capability=TEST_CAPABILITY, now=NOW)
 
         assert (
             persistence.heartbeat_worker(worker_id="worker-1", now=NOW + timedelta(seconds=20))
@@ -329,7 +337,7 @@ def test_registry_state_never_reclaims_a_live_leased_job(
     engine = prepare(tmp_path, monkeypatch)
     try:
         persistence = SqlAlchemyJobExecutionPersistence(engine, sleep=lambda _: None)
-        persistence.register_worker(worker_id="worker-1", now=NOW)
+        persistence.register_worker(worker_id="worker-1", capability=TEST_CAPABILITY, now=NOW)
         claimed = claim(engine, worker_id="worker-1")
 
         # The registry row looks stale long before the lease expires.
@@ -358,7 +366,7 @@ def test_registry_state_never_reclaims_a_live_leased_job(
                 now=NOW,
             )
             p2 = SqlAlchemyJobExecutionPersistence(engine2, sleep=lambda _: None)
-            p2.register_worker(worker_id="worker-9", now=NOW)
+            p2.register_worker(worker_id="worker-9", capability=TEST_CAPABILITY, now=NOW)
             live = p2.claim_next(
                 worker_id="worker-9",
                 provider_ids=(PROVIDER,),

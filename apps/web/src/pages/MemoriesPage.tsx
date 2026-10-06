@@ -9,6 +9,7 @@ import { agentInstancesQuery } from "../api/queries";
 import { MemoryItem, MemoryVersionItem } from "../api/memories";
 import { ErrorState, InlineError, LoadingState } from "../components/AsyncState";
 import { ApiHttpError } from "../api/client";
+import { MemorySuggestions } from "../components/RuntimeControls";
 
 export function MemoriesPage() {
   const [scopeFilter, setScopeFilter] = useState<"all" | "user" | "agent">("all");
@@ -130,6 +131,7 @@ export function MemoriesPage() {
         </div>
       </header>
 
+      <MemorySuggestions instanceId={selectedAgent === "" ? undefined : Number(selectedAgent)} />
       <section className="panel page-card">
         <div className="section-heading">
           <div className="tab-group" role="tablist">

@@ -65,6 +65,27 @@ APPLICATION_TABLES = {
     "installed_package_dependencies",
     "agent_instance_package_bindings",
     "marketplace_install_requests",
+    "agent_memory_policies",
+    "agent_tool_bindings",
+    "run_integrations",
+    "memory_suggestions",
+    # Stage H: the encrypted secret store and its key versions (H1), account connections (H2),
+    # durable per-action approvals (H3), and local publisher trust (H5). H4 adds no table: its
+    # policy is code, and the containment evidence is the process boundary itself.
+    "secrets",
+    "secret_keys",
+    "account_connections",
+    "account_oauth_requests",
+    "action_approvals",
+    "publisher_trust",
+    # Durable autonomous workflows (ADR 0039): the workflow execution, its ordered steps,
+    # its append-only checkpoints, and the owner signal/decision evidence. These are new
+    # tables only -- no existing table was altered, so prior migration evidence is intact.
+    "workflow_executions",
+    "workflow_steps",
+    "workflow_checkpoints",
+    "workflow_signals",
+    "workflow_decisions",
 }
 DEFAULT_DATABASE = (Path.home() / ".nervos" / "nervos.db").resolve(strict=False)
 
@@ -126,17 +147,27 @@ def test_upgrade_drift_downgrade_and_reupgrade(
         assert application_tables(engine) == APPLICATION_TABLES
         with engine.connect() as connection:
             current_revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
-            assert current_revision == I4_REVISION
+            assert current_revision == LATEST_REVISION
             assert connection.scalar(text("PRAGMA foreign_keys")) == 1
             assert connection.scalar(text("PRAGMA busy_timeout")) == 5000
         command.check(config)
     finally:
         engine.dispose()
 
-    command.downgrade(config, "base")
+    # Stage H refuses to downgrade: dropping the secret, connection, approval or
+    # publisher-trust tables would destroy security evidence irrecoverably. The refusal
+    # happens before any DDL, so the schema is left exactly as it was rather than
+    # half-dropped -- which is also why `downgrade base` is no longer a supported path
+    # for a migrated database.
+    with pytest.raises(RuntimeError, match="refused"):
+        command.downgrade(config, "base")
     engine = create_sqlite_engine(database_path)
     try:
-        assert application_tables(engine) == set()
+        assert application_tables(engine) == APPLICATION_TABLES
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+                LATEST_REVISION
+            )
     finally:
         engine.dispose()
 
@@ -367,10 +398,10 @@ def test_populated_stage_a_survives_b1_downgrade_and_reupgrade(
         )
     finally:
         engine.dispose()
-    command.upgrade(config, "head")
+    command.upgrade(config, PRE_STAGE_H_REVISION)
     engine = create_sqlite_engine(path)
     try:
-        assert application_tables(engine) == APPLICATION_TABLES
+        assert application_tables(engine) == PRE_STAGE_H_APPLICATION_TABLES
         assert engine.connect().scalar(text("SELECT count(*) FROM agent_instances")) == 0
         assert engine.connect().scalar(text("SELECT count(*) FROM runs")) == 0
     finally:
@@ -384,11 +415,10 @@ def test_populated_stage_a_survives_b1_downgrade_and_reupgrade(
             assert connection.scalar(text("SELECT count(*) FROM auth_sessions")) == 1
     finally:
         engine.dispose()
-    command.upgrade(config, "head")
-    command.check(config)
+    command.upgrade(config, PRE_STAGE_H_REVISION)
     engine = create_sqlite_engine(path)
     try:
-        assert application_tables(engine) == APPLICATION_TABLES
+        assert application_tables(engine) == PRE_STAGE_H_APPLICATION_TABLES
         assert {item["name"] for item in inspect(engine).get_indexes("runs")} == {
             "ix_runs_agent_instance_id_id",
             "ix_runs_installed_package_version_id",
@@ -396,6 +426,11 @@ def test_populated_stage_a_survives_b1_downgrade_and_reupgrade(
         }
     finally:
         engine.dispose()
+
+    # `check` compares the database against the full ORM metadata, so it is a head assertion and
+    # cannot run against a deliberately pre-Stage-H revision.
+    command.upgrade(config, "head")
+    command.check(config)
 
 
 def test_b1_migrated_lifecycle_shapes_are_enforced(
@@ -1237,7 +1272,7 @@ def test_the_c5_downgrade_refuses_to_strand_a_cancelled_run(
     """0004 cannot represent `cancelled`, so downgrade refuses rather than rewriting history."""
     database_path = tmp_path / "c5-downgrade.db"
     config = alembic_config(database_path, monkeypatch)
-    command.upgrade(config, "head")
+    command.upgrade(config, PRE_STAGE_H_REVISION)
     engine = create_sqlite_engine(database_path)
     try:
         seed_c1_parents(engine, run_count=0)
@@ -1271,7 +1306,7 @@ def test_the_c5_downgrade_is_clean_when_nothing_needs_cancellation(
 ) -> None:
     database_path = tmp_path / "c5-clean-downgrade.db"
     config = alembic_config(database_path, monkeypatch)
-    command.upgrade(config, "head")
+    command.upgrade(config, PRE_STAGE_H_REVISION)
     engine = create_sqlite_engine(database_path)
     try:
         # A Run that no cancellation touched must survive the round trip untouched.
@@ -1280,14 +1315,14 @@ def test_the_c5_downgrade_is_clean_when_nothing_needs_cancellation(
         engine.dispose()
 
     command.downgrade(config, "0004_stage_c3_worker_registry")
-    command.upgrade(config, "head")
+    command.upgrade(config, PRE_STAGE_H_REVISION)
 
     engine = create_sqlite_engine(database_path)
     try:
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM runs")) == 1
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                I4_REVISION
+                PRE_STAGE_H_REVISION
             )
     finally:
         engine.dispose()
@@ -1373,7 +1408,7 @@ def test_migration_0006_creates_only_the_fairness_table(
         assert "queue_partitions" in application_tables(engine)
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                I4_REVISION
+                LATEST_REVISION
             )
             columns = [
                 str(row[1])
@@ -1464,7 +1499,7 @@ def test_the_c6_downgrade_drops_metadata_and_reconstructs_it(
     """
     database_path = tmp_path / "c6-downgrade.db"
     config = alembic_config(database_path, monkeypatch)
-    command.upgrade(config, "head")
+    command.upgrade(config, PRE_STAGE_H_REVISION)
     engine = create_sqlite_engine(database_path)
     try:
         seed_c1_parents(engine, run_count=2)
@@ -1488,10 +1523,10 @@ def test_the_c6_downgrade_drops_metadata_and_reconstructs_it(
     finally:
         engine.dispose()
 
-    command.upgrade(config, "head")
+    command.upgrade(config, PRE_STAGE_H_REVISION)
     engine = create_sqlite_engine(database_path)
     try:
-        assert application_tables(engine) == APPLICATION_TABLES
+        assert application_tables(engine) == PRE_STAGE_H_APPLICATION_TABLES
         assert partition_markers(engine) == markers
         assert execution_snapshot(engine) == history
     finally:
@@ -1518,6 +1553,22 @@ REVIEWED_MIGRATIONS = [
     "0012_stage_f4_conversation_lifecycle.py",
     "0013_stage_g3_package_registry.py",
     "0014_stage_i4_marketplace_install_requests.py",
+    "0015_runtime_integration.py",
+    # Stage H: encrypted secrets, account connections, durable approvals, a sandbox
+    # adoption marker, and local publisher trust.
+    "0016_stage_h1_secret_manager.py",
+    "0017_stage_h2_account_connections.py",
+    "0018_stage_h3_action_approvals.py",
+    "0019_stage_h4_sandbox_policy.py",
+    "0020_stage_h5_publisher_trust.py",
+    "0021_stage_h_approval_events.py",
+    "0022_stage_h_account_oauth.py",
+    # Worker-observed sandbox capability projection (ADR 0037/0038); adds columns to
+    # the existing `workers` registry table and no new table.
+    "0023_worker_sandbox_capability.py",
+    # Durable autonomous workflows (ADR 0039): five new tables, no alteration to an
+    # existing one, so every prior migration's evidence is untouched.
+    "0024_durable_workflows.py",
 ]
 
 
@@ -1533,14 +1584,15 @@ def test_c7_consumed_no_migration_number() -> None:
     Stage D's D1 later consumed `0007` for the tool, capability and audit schema, and Stage E's E1
     has since consumed `0008` for the trigger tables. F1 later consumed `0009` for the conversation
     tables, and F2 consumed `0010` for context snapshots and compactions. G3 later consumed `0013`
-    for package registry. None weakens this claim, and the claim is not rewritten to accommodate
-    them: the migrations that follow C6's are exactly D1's, E1's, F1's, F2's, F3's, F4's and G3's,
-    and the number C7 could have taken is provably still not C7's.
+    for package registry, and the durable-workflow milestone consumed `0024`. None weakens this
+    claim, and the claim is not rewritten to accommodate them: the migrations that follow C6's are
+    exactly D1's, E1's, F1's, F2's, F3's, F4's, G3's, Stage H's, I4's, runtime-integration's and
+    the workflow's, and the number C7 could have taken is provably still not C7's.
     """
     names = sorted(path.name for path in VERSIONS.glob("*.py"))
 
     assert names == REVIEWED_MIGRATIONS
-    assert names[-1] == "0014_stage_i4_marketplace_install_requests.py"
+    assert names[-1] == "0024_durable_workflows.py"
     assert any(name.startswith("0014") for name in names)
 
 
@@ -1580,7 +1632,28 @@ F2_REVISION = "0010_stage_f2_context_snapshots_and_compactions"
 F3_REVISION = "0011_stage_f3_scoped_memory"
 F4_REVISION = "0012_stage_f4_conversation_lifecycle"
 G3_REVISION = "0013_stage_g3_package_registry"
-I4_REVISION = "0014_stage_i4_marketplace_install_requests"
+LATEST_REVISION = "0024_durable_workflows"
+# The last revision before Stage H. H1, H2, H3 and H5 refuse to downgrade by design --
+# dropping the secret, approval or publisher-trust tables would destroy security evidence
+# irrecoverably -- so a test proving an *earlier* migration's downgrade contract starts
+# here rather than at head. Starting at head would let Stage H's refusal mask the
+# behavior actually under test.
+PRE_STAGE_H_REVISION = "0015_runtime_integration"
+PRE_STAGE_H_APPLICATION_TABLES = APPLICATION_TABLES - {
+    "secrets",
+    "secret_keys",
+    "account_connections",
+    "account_oauth_requests",
+    "action_approvals",
+    "publisher_trust",
+    # The workflow tables arrived after Stage H, so they are absent at this revision for the
+    # same reason: `PRE_STAGE_H_APPLICATION_TABLES` describes exactly the schema at 0015.
+    "workflow_executions",
+    "workflow_steps",
+    "workflow_checkpoints",
+    "workflow_signals",
+    "workflow_decisions",
+}
 # The E1 downgrade lands at D1, not at C6: `0008`'s `down_revision` is `0007`, so downgrading E1
 # exercises exactly one migration's downgrade. Asking for `0006` would additionally run D1's own
 # downgrade, which is D1's contract to prove (see `test_migrations_d1.py`) and not E1's.
@@ -1631,13 +1704,14 @@ def test_the_stage_e_downgrade_refuses_while_stage_e_state_exists(
 ) -> None:
     # A refusal must happen before any DDL, so a refused downgrade leaves nothing half-dropped.
     database_path = tmp_path / "stage-e-downgrade.db"
-    _, engine = migrate_database(database_path, monkeypatch)
+    config = alembic_config(database_path, monkeypatch)
+    command.upgrade(config, PRE_STAGE_H_REVISION)
+    engine = create_sqlite_engine(database_path)
     try:
         _seed_stage_e(engine, trigger=True, occurrence=True)
     finally:
         engine.dispose()
 
-    config = alembic_config(database_path, monkeypatch)
     with pytest.raises(RuntimeError):
         command.downgrade(config, D1_REVISION)
 
@@ -1658,13 +1732,14 @@ def test_the_stage_e_downgrade_refuses_for_a_trigger_with_no_occurrence(
 ) -> None:
     # Configuration alone is enough to refuse: a disabled trigger is still authored state.
     database_path = tmp_path / "stage-e-trigger-only.db"
-    _, engine = migrate_database(database_path, monkeypatch)
+    config = alembic_config(database_path, monkeypatch)
+    command.upgrade(config, PRE_STAGE_H_REVISION)
+    engine = create_sqlite_engine(database_path)
     try:
         _seed_stage_e(engine, trigger=True, occurrence=False)
     finally:
         engine.dispose()
 
-    config = alembic_config(database_path, monkeypatch)
     with pytest.raises(RuntimeError):
         command.downgrade(config, D1_REVISION)
 
@@ -1741,7 +1816,10 @@ def test_the_stage_e_downgrade_is_clean_when_nothing_needs_keeping(
     engine = create_sqlite_engine(database_path)
     try:
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == I4_REVISION
+            assert (
+                connection.scalar(text("SELECT version_num FROM alembic_version"))
+                == LATEST_REVISION
+            )
     finally:
         engine.dispose()
 
@@ -1817,16 +1895,19 @@ def test_migration_0010_creates_snapshots_and_compactions_and_context_mode(
     finally:
         engine.dispose()
 
-    # 2. Upgrade to 0010 (head)
-    command.upgrade(config, "head")
+    # 2. Upgrade to 0010. This is the last pre-Stage-H revision, so 0010's own
+    #    downgrade below stays reachable.
+    command.upgrade(config, PRE_STAGE_H_REVISION)
     engine = create_sqlite_engine(database_path)
     try:
-        assert application_tables(engine) == APPLICATION_TABLES
+        assert application_tables(engine) == PRE_STAGE_H_APPLICATION_TABLES
         assert "run_context_snapshots" in application_tables(engine)
         assert "conversation_compactions" in application_tables(engine)
 
         with engine.connect() as conn:
-            assert conn.scalar(text("SELECT version_num FROM alembic_version")) == I4_REVISION
+            assert conn.scalar(text("SELECT version_num FROM alembic_version")) == (
+                PRE_STAGE_H_REVISION
+            )
 
             # Verify existing link backfilled with f1_single_turn
             mode = conn.scalar(text("SELECT context_mode FROM conversation_run_links WHERE id = 1"))
@@ -1920,10 +2001,10 @@ def test_migration_0010_creates_snapshots_and_compactions_and_context_mode(
     finally:
         engine.dispose()
 
-    command.upgrade(config, "head")
+    command.upgrade(config, PRE_STAGE_H_REVISION)
     engine = create_sqlite_engine(database_path)
     try:
-        assert application_tables(engine) == APPLICATION_TABLES
+        assert application_tables(engine) == PRE_STAGE_H_APPLICATION_TABLES
     finally:
         engine.dispose()
 

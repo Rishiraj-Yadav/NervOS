@@ -2,24 +2,22 @@ import { useLogin } from "../api/queries";
 import { Brand } from "../components/Brand";
 import { InlineError } from "../components/AsyncState";
 import { type FormEvent } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
 
 export function LoginPage() {
   const login = useLogin();
-  const navigate = useNavigate();
-  const location = useLocation();
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
     const data = new FormData(form);
     try {
+      // The session write and the resulting route change are both derived from the gate: a
+      // navigate() here would race the write and redirect the freshly authenticated session back
+      // out of the page it just left.
       await login.mutateAsync({
         username: String(data.get("username") ?? ""),
         password: String(data.get("password") ?? ""),
       });
-      const destination = getReturnPath(location.state);
-      await navigate(destination, { replace: true });
     } catch {
       const password = form.elements.namedItem("password");
       if (password instanceof HTMLInputElement) {
@@ -49,12 +47,4 @@ export function LoginPage() {
       </section>
     </main>
   );
-}
-
-function getReturnPath(state: unknown): string {
-  if (typeof state !== "object" || state === null || !("from" in state)) {
-    return "/";
-  }
-  const from = state.from;
-  return typeof from === "string" && from.startsWith("/") ? from : "/";
 }

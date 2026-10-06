@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from nervos_core.application.account_actions import AccountActionBroker
 from nervos_core.application.builtin_tools import (
     BUILTIN_SOURCE_REF,
     builtin_tool_specs,
@@ -21,8 +22,10 @@ from nervos_core.application.builtin_tools import (
 from nervos_core.application.job_execution import JobExecutionService
 from nervos_core.application.lease_reclamation import LeaseReclaimer
 from nervos_core.application.model_completion import ModelCompletion
+from nervos_core.application.publisher_trust import PublisherTrustService
 from nervos_core.application.retry_policy import PRODUCTION_RETRY_POLICY
 from nervos_core.application.run_execution import RunExecutor
+from nervos_core.application.secrets import SecretManager, SecretResolver
 from nervos_core.application.tool_invocation_mediator import ToolInvocationMediator
 from nervos_core.application.tool_loop import ToolLoop
 from nervos_core.application.trusted_chat import (
@@ -31,6 +34,11 @@ from nervos_core.application.trusted_chat import (
 )
 from nervos_core.domain.tools import ToolDescriptor
 from nervos_core.infrastructure.database import create_session_factory, create_sqlite_engine
+from nervos_core.infrastructure.database.account_authority import SqlAlchemyAccountDispatchAuthority
+from nervos_core.infrastructure.database.account_connections import (
+    SqlAlchemyAccountConnectionPersistence,
+)
+from nervos_core.infrastructure.database.approvals import SqlAlchemyApprovalGate
 from nervos_core.infrastructure.database.conversations import (
     SqlAlchemyConversationPersistence,
 )
@@ -39,6 +47,13 @@ from nervos_core.infrastructure.database.mcp_connections import (
     SqlAlchemyMcpConnectionPersistence,
 )
 from nervos_core.infrastructure.database.packages import SqlAlchemyPackageRegistryPersistence
+from nervos_core.infrastructure.database.publisher_trust import (
+    SqlAlchemyPublisherTrustPersistence,
+)
+from nervos_core.infrastructure.database.runtime_integration import (
+    SqlAlchemyRuntimeIntegrationPersistence,
+)
+from nervos_core.infrastructure.database.secrets import SqlAlchemySecretPersistence
 from nervos_core.infrastructure.database.tool_definitions import (
     SqlAlchemyToolDefinitionPersistence,
 )
@@ -46,6 +61,13 @@ from nervos_core.infrastructure.database.tool_invocations import (
     SqlAlchemyToolInvocationPersistence,
 )
 from nervos_core.infrastructure.database.tools import SqlAlchemyToolPermissionEvaluator
+from nervos_core.infrastructure.database.workflows import (
+    SqlAlchemyWorkflowStepFinalizer,
+    SqlAlchemyWorkflowStepSource,
+)
+from nervos_core.infrastructure.sandbox import observe_sandbox_capability
+from nervos_core.infrastructure.security.secret_keys import FileMasterKeyResolver
+from nervos_mcp.account_tokens import HttpAccountTokenTransport, load_account_providers
 from nervos_mcp.gateway import McpGateway
 from nervos_mcp.operator_config import load_operator_config
 from nervos_mcp.policy.egress import StrictEgressPolicy
@@ -57,15 +79,17 @@ from nervos_models import (
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from nervos_worker.account_actions import WorkerAccountActionDispatcher, load_account_bindings
 from nervos_worker.config import WorkerSettings, get_worker_settings
 from nervos_worker.identity import generate_worker_id
 from nervos_worker.mcp import McpRegistrySynchronizer, build_mcp_gateway
+from nervos_worker.memory_extraction import MemoryExtractionAdapter
 from nervos_worker.package_execution import PackageExecutionAdapter
 from nervos_worker.registry import ReclaimLoop, WorkerRegistry
 from nervos_worker.service import Worker
 
-# Bumped only by the milestone that adds a migration. F4 ships migration 0012.
-EXPECTED_SCHEMA_REVISION = "0014_stage_i4_marketplace_install_requests"
+# Bumped only by the milestone that adds a migration. Stage H ships migrations 0016-0023.
+EXPECTED_SCHEMA_REVISION = "0024_durable_workflows"
 
 
 def utc_now() -> datetime:
@@ -106,7 +130,11 @@ def create_worker(settings: WorkerSettings | None = None) -> WorkerComposition:
     resolved = settings or get_worker_settings()
     engine = create_sqlite_engine(resolved.database_path)
     session_factory = create_session_factory(engine)
-    persistence = SqlAlchemyJobExecutionPersistence(engine)
+    # ADR 0039: the step commit runs on the finalizer's *own* connection inside the same
+    # transaction as the Run's success. Without it a workflow step could never checkpoint.
+    persistence = SqlAlchemyJobExecutionPersistence(
+        engine, workflow_steps=SqlAlchemyWorkflowStepFinalizer()
+    )
     anthropic_secret = (
         resolved.anthropic_api_key.get_secret_value()
         if resolved.anthropic_api_key is not None
@@ -144,12 +172,33 @@ def create_worker(settings: WorkerSettings | None = None) -> WorkerComposition:
     )
     tool_authority = SqlAlchemyToolPermissionEvaluator(engine)
     tool_invocations = SqlAlchemyToolInvocationPersistence(engine)
+    keys = FileMasterKeyResolver(resolved.secrets_key_file, resolved.secrets_key_version)
+    secret_store = SqlAlchemySecretPersistence(engine)
+    account_actions = WorkerAccountActionDispatcher(
+        AccountActionBroker(
+            connections=SqlAlchemyAccountConnectionPersistence(engine),
+            manager=SecretManager(secret_store, keys, utc_now),
+            resolver=SecretResolver(secret_store, keys),
+            providers=load_account_providers(resolved.account_oauth_providers),
+            transport=HttpAccountTokenTransport(),
+            authority=SqlAlchemyAccountDispatchAuthority(engine),
+            clock=utc_now,
+        ),
+        mcp_gateway,
+        load_account_bindings(resolved.account_tool_bindings),
+        gmail_egress=StrictEgressPolicy(mcp_operator.allowed_origins),
+    )
+    # Stage H3 (ADR 0034): external actions pass the durable approval gate before dispatch.
     tool_mediator = ToolInvocationMediator(
         registry=tool_registry,
         authorize=tool_authority,
         invocations=tool_invocations,
         clock=utc_now,
+        approvals=SqlAlchemyApprovalGate(engine),
+        account_actions=account_actions,
     )
+    # Stage H5 (ADR 0036): local publisher trust, shared by the package execution gate.
+    publisher_trust = PublisherTrustService(SqlAlchemyPublisherTrustPersistence(engine), utc_now)
     package_persistence = SqlAlchemyPackageRegistryPersistence(engine)
     tool_loop = ToolLoop(
         registry=tool_registry,
@@ -166,6 +215,26 @@ def create_worker(settings: WorkerSettings | None = None) -> WorkerComposition:
         mediator=tool_mediator,
     )
     conversations = SqlAlchemyConversationPersistence(engine)
+
+    def project_completed_run(
+        *, run_id: int, status: str, output_text: str | None, error_code: str | None
+    ) -> bool:
+        return conversations.project_terminal_run(
+            run_id=run_id,
+            status=status,
+            output_text=output_text,
+            error_code=error_code,
+            now=utc_now(),
+        )
+
+    integrations = SqlAlchemyRuntimeIntegrationPersistence(
+        engine,
+        (
+            resolved.max_pending_jobs,
+            resolved.max_pending_jobs_per_agent,
+            resolved.max_pending_jobs_per_provider,
+        ),
+    )
     execution = JobExecutionService(
         persistence,
         RunExecutor(
@@ -176,7 +245,12 @@ def create_worker(settings: WorkerSettings | None = None) -> WorkerComposition:
                 mediator=tool_mediator,
                 registry=tool_registry,
                 packages=package_persistence,
+                synchronizer=mcp_synchronizer,
+                integrations=integrations,
+                trust=publisher_trust,
+                workflow_steps=SqlAlchemyWorkflowStepSource(engine),
             ),
+            memory_extraction=MemoryExtractionAdapter(integrations),
         ),
         completions,
         utc_now,
@@ -184,10 +258,14 @@ def create_worker(settings: WorkerSettings | None = None) -> WorkerComposition:
         # composition root names the one policy that decides when a safe failure may be
         # replayed.
         retry_policy=PRODUCTION_RETRY_POLICY,
-        conversation_projection=conversations.project_terminal_run,
+        conversation_projection=project_completed_run,
     )
     worker_id = generate_worker_id()
-    registry = WorkerRegistry(persistence, worker_id, clock=utc_now)
+    # Observed, never assumed: the Worker probes its own launcher once at startup and
+    # publishes only the bounded result. The launch factory still decides every start.
+    registry = WorkerRegistry(
+        persistence, worker_id, clock=utc_now, capability=observe_sandbox_capability()
+    )
     reclaimer = ReclaimLoop(LeaseReclaimer(persistence), clock=utc_now)
     worker = Worker(
         persistence,
@@ -199,6 +277,7 @@ def create_worker(settings: WorkerSettings | None = None) -> WorkerComposition:
         max_active=resolved.max_active_jobs,
         registry=registry,
         reclaimer=reclaimer,
+        memory_maintenance=lambda: integrations.maintain_memory(utc_now()),
     )
     return WorkerComposition(
         settings=resolved,
@@ -234,8 +313,12 @@ def reconcile_tool_definitions(engine: Engine) -> tuple[ToolDescriptor, ...]:
     definition becomes usable solely through an explicit grant, and D2's live predicate still
     decides every call.
     """
+    from nervos_mcp.connectors.gmail_registry import register_gmail_reads
+
+    definitions = SqlAlchemyToolDefinitionPersistence(engine)
+    register_gmail_reads(definitions, utc_now)
     return reconcile_builtin_definitions(
-        SqlAlchemyToolDefinitionPersistence(engine),
+        definitions,
         specs=builtin_tool_specs(clock=utc_now),
         now=utc_now(),
     )

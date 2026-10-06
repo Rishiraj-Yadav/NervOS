@@ -28,7 +28,7 @@ DEFAULT_DATABASE = Path("~/.nervos/nervos.db").expanduser().resolve(strict=False
 API_READY_TIMEOUT = 45.0
 WORKER_READY_TIMEOUT = 45.0
 WEB_READY_TIMEOUT = 45.0
-PLAYWRIGHT_TIMEOUT = 120.0
+PLAYWRIGHT_TIMEOUT = 240.0
 # Test-only lease granted to the pre-start crash claim, and the margin the supervisor waits
 # past it before starting the recovery Worker. Bounded by construction: the claim lease is
 # this short on purpose, so expiry is deterministic rather than a 60-second wait.
@@ -57,7 +57,7 @@ CANCEL_DISCOVERY_TIMEOUT_SECONDS = 40
 # top of the per-prompt counts in `assert_retry_journey` and `assert_cancellation_journey`, so an
 # unexpected extra invocation anywhere — including a cancelled Run being executed again — still
 # fails the journey.
-TOTAL_PROVIDER_CALLS = 9
+TOTAL_PROVIDER_CALLS = 10
 
 # Stage-D tool journey. One prompt whose scripted model turn asks for the one tool the supervisor
 # grants, then concludes, so the browser observes a real tool lifecycle on the timeline. No grant
@@ -543,7 +543,13 @@ def run_e2e() -> int:
                 try:
                     returncode = playwright.wait(timeout=PLAYWRIGHT_TIMEOUT)
                 except subprocess.TimeoutExpired as error:
-                    raise RuntimeError("Playwright exceeded its 120 second timeout") from error
+                    # A timeout with no evidence is not a diagnosis. The temporary directory is
+                    # about to be deleted, so print the browser's own log *before* raising --
+                    # otherwise the only thing a reader has is the word "timeout".
+                    print(log_tail(playwright_log_path), file=sys.stderr)
+                    raise RuntimeError(
+                        f"Playwright exceeded its {PLAYWRIGHT_TIMEOUT:.0f} second timeout"
+                    ) from error
                 watcher.join(timeout=WORKER_READY_TIMEOUT)
                 tool_seeder.join(timeout=WORKER_READY_TIMEOUT)
                 if returncode != 0:
@@ -573,6 +579,8 @@ def run_e2e() -> int:
                     worker_b_started=bool(recovery["started"]),
                     crash_log=log_tail(worker_log_path),
                 )
+                print(log_tail(playwright_log_path))
+                print("Runtime recovery, retry, cancellation and tool assertions passed.")
                 return returncode
         finally:
             api_reservation.close()

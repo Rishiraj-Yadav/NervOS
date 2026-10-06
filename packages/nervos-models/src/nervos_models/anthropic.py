@@ -119,6 +119,8 @@ class AnthropicModelCompletion:
             "messages": _messages(request),
             "timeout": timeout_seconds,
         }
+        if request.temperature is not None:
+            request_kwargs["temperature"] = request.temperature
         if request.tools:
             request_kwargs["tools"] = [
                 {

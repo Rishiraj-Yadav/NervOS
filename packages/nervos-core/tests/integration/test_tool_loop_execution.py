@@ -1044,16 +1044,17 @@ def test_the_tool_invocations_table_records_no_raw_arguments_or_results(engine: 
 def test_the_tool_definition_columns_are_unchanged_by_d4(engine: Engine) -> None:
     """D4 adds no column, no table, and no migration to the accepted D1 schema.
 
-    The head has since advanced to E1's migration, which creates the two Stage E trigger tables and
-    touches no D1 table — so the claim this test makes is unchanged: the schema D4 read is the
-    schema D1 froze. The assertion stays an exact head equality rather than being relaxed to a
-    minimum, so a later migration that *does* alter a D1 table still fails here.
+    The head has since advanced repeatedly -- E1, F1-F4, G3, Stage H, and the durable-workflow
+    milestone -- and every one of those migrations adds only new tables, never a column on a D1
+    table. So the claim this test makes is unchanged: the schema D4 read is the schema D1 froze.
+    The assertion stays an exact head equality rather than being relaxed to a minimum, so a
+    later migration that *does* alter a D1 table still fails here.
     """
     with engine.connect() as connection:
         revisions = list(
             connection.execute(text("SELECT version_num FROM alembic_version")).scalars()
         )
-    assert revisions == ["0014_stage_i4_marketplace_install_requests"]
+    assert revisions == ["0024_durable_workflows"]
 
 
 def test_a_tool_source_ref_for_builtins_carries_no_connection(tmp_path: Path) -> None:

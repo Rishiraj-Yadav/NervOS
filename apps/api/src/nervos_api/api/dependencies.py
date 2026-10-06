@@ -6,7 +6,10 @@ from datetime import UTC, datetime
 from typing import Annotated, cast
 
 from fastapi import Cookie, Depends, Request
+from nervos_core.application.account_connections import AccountConnectionService
+from nervos_core.application.account_oauth import AccountOAuthService
 from nervos_core.application.agents import AgentService
+from nervos_core.application.approvals import ApprovalService
 from nervos_core.application.authentication import (
     AuthenticationRequired,
     AuthenticationService,
@@ -18,8 +21,12 @@ from nervos_core.application.memory import MemoryService
 from nervos_core.application.model_providers import ModelProviderCatalog
 from nervos_core.application.package_installation import PackageApplicationService
 from nervos_core.application.package_query import PackageQueryService
+from nervos_core.application.publisher_trust import PublisherTrustService
 from nervos_core.application.run_cancellation import RunCancellationService
+from nervos_core.application.runtime_integration import RuntimeIntegrationService
+from nervos_core.application.secrets import SecretManager
 from nervos_core.application.triggers import TriggerManagementService
+from nervos_core.application.workflow_views import WorkflowViewService
 
 from nervos_api.api.cookies import SESSION_COOKIE_NAME
 from nervos_api.api.errors import InvalidOrigin
@@ -91,6 +98,30 @@ def get_package_query_service(request: Request) -> PackageQueryService:
     return cast(PackageQueryService, request.app.state.package_query_service)
 
 
+def get_secret_manager(request: Request) -> SecretManager:
+    """Return the owner-scoped encrypted Secret Manager; routes never build one."""
+    return cast(SecretManager, request.app.state.secret_manager)
+
+
+def get_account_connection_service(request: Request) -> AccountConnectionService:
+    """Return the owner-scoped account-connection service."""
+    return cast(AccountConnectionService, request.app.state.account_connection_service)
+
+
+def get_account_oauth_service(request: Request) -> AccountOAuthService:
+    return cast(AccountOAuthService, request.app.state.account_oauth_service)
+
+
+def get_approval_service(request: Request) -> ApprovalService:
+    """Return the owner-facing durable approval decision service."""
+    return cast(ApprovalService, request.app.state.approval_service)
+
+
+def get_publisher_trust_service(request: Request) -> PublisherTrustService:
+    """Return the owner-facing publisher trust service."""
+    return cast(PublisherTrustService, request.app.state.publisher_trust_service)
+
+
 def require_configured_origin(
     request: Request,
     settings: Annotated[Settings, Depends(get_settings)],
@@ -149,5 +180,32 @@ PackageQueryServiceDependency = Annotated[
     PackageQueryService,
     Depends(get_package_query_service),
 ]
+SecretManagerDependency = Annotated[SecretManager, Depends(get_secret_manager)]
+AccountConnectionServiceDependency = Annotated[
+    AccountConnectionService,
+    Depends(get_account_connection_service),
+]
+AccountOAuthDependency = Annotated[AccountOAuthService, Depends(get_account_oauth_service)]
+ApprovalServiceDependency = Annotated[ApprovalService, Depends(get_approval_service)]
+PublisherTrustServiceDependency = Annotated[
+    PublisherTrustService,
+    Depends(get_publisher_trust_service),
+]
 OriginDependency = Annotated[None, Depends(require_configured_origin)]
+
+
+def get_runtime_integration_service(request: Request) -> RuntimeIntegrationService:
+    return cast(RuntimeIntegrationService, request.app.state.runtime_integration_service)
+
+
+RuntimeIntegrationDependency = Annotated[
+    RuntimeIntegrationService, Depends(get_runtime_integration_service)
+]
+
+
+def get_workflow_view_service(request: Request) -> WorkflowViewService:
+    return cast(WorkflowViewService, request.app.state.workflow_view_service)
+
+
+WorkflowsDependency = Annotated[WorkflowViewService, Depends(get_workflow_view_service)]
 CurrentUserDependency = Annotated[PublicUser, Depends(get_current_user)]

@@ -28,6 +28,7 @@ from sqlalchemy import Engine, insert, select, update
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import SQLAlchemyError
 
+from nervos_core.application.approvals import ApprovalRequest, input_digest
 from nervos_core.application.errors import PersistenceUnavailable
 from nervos_core.application.model_completion import TOOL_DENIED, safe_error_message
 from nervos_core.application.tool_invocations import (
@@ -46,8 +47,9 @@ from nervos_core.application.tool_invocations import (
     arguments_shape,
     permission_decision_value,
 )
-from nervos_core.application.tool_permissions import PermissionDecision
+from nervos_core.application.tool_permissions import PermissionDecision, PermissionDenialReason
 from nervos_core.domain.jobs import AttemptStatus, JobStatus, RunEventType
+from nervos_core.infrastructure.database.approvals import consume_on_connection
 from nervos_core.infrastructure.database.models import (
     JobAttemptRecord,
     JobRecord,
@@ -190,7 +192,12 @@ class SqlAlchemyToolInvocationPersistence:
         return self._runner.run(operation)
 
     def mark_started(
-        self, *, claim: ClaimHandle, invocation_id: int, now: datetime
+        self,
+        *,
+        claim: ClaimHandle,
+        invocation_id: int,
+        now: datetime,
+        approval: ApprovalRequest | None = None,
     ) -> StartOutcome:
         """Re-check authority and the live permission predicate, then commit exactly one branch.
 
@@ -229,6 +236,11 @@ class SqlAlchemyToolInvocationPersistence:
                         ToolInvocationRecord.status,
                         ToolInvocationRecord.run_id,
                         ToolInvocationRecord.tool_definition_id,
+                        ToolInvocationRecord.job_id,
+                        ToolInvocationRecord.tool_sequence,
+                        ToolInvocationRecord.upstream_name,
+                        ToolInvocationRecord.definition_fingerprint,
+                        ToolInvocationRecord.arguments_digest,
                     ).where(
                         ToolInvocationRecord.id == invocation_id,
                         ToolInvocationRecord.attempt_id == claim.attempt_id,
@@ -245,6 +257,22 @@ class SqlAlchemyToolInvocationPersistence:
                 run_id=int(row["run_id"]),
                 tool_definition_id=int(row["tool_definition_id"]),
             )
+            if approval is not None:
+                if (
+                    approval.run_id != row["run_id"]
+                    or approval.job_id != row["job_id"]
+                    or approval.attempt_id != claim.attempt_id
+                    or approval.tool_sequence != row["tool_sequence"]
+                    or approval.tool_definition_id != row["tool_definition_id"]
+                    or approval.upstream_name != row["upstream_name"]
+                    or approval.fingerprint != row["definition_fingerprint"]
+                    or input_digest(approval.arguments) != row["arguments_digest"]
+                ):
+                    return StartOutcome(StartOutcomeKind.FENCED)
+                if decision.allowed and not consume_on_connection(connection, approval, now):
+                    decision = PermissionDecision(
+                        allowed=False, reason=PermissionDenialReason.HARD_POLICY_DENIED
+                    )
             if not decision.allowed:
                 if (
                     _rowcount(

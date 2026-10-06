@@ -73,7 +73,7 @@ Outcome: agents become installable software. G0–G5 are complete, externally ac
 - **G2 — deterministic `.nervos` builder + verifier:** canonical package construction, archive validation, content digest, Ed25519 verification, tamper detection, pure-Python wheelhouse validation, cross-platform safe format. **Complete; externally accepted.** No installation, durable registry, package execution, persistent publisher trust, or sandbox.
 - **G3 — Transactional installation + durable registry + package-backed execution:** package-registry migration, SQL-backed definition source, installation state machine, storage, isolated dependency environment, config snapshot + immutable Run semantics, exact executable pinning, package-host subprocess, activation health check. **Complete; externally accepted.**
 - **G4 — Lifecycle:** side-by-side versions, explicit upgrade/rebind with capability delta, rollback, uninstall, unified CLI/API/UI lifecycle surfaces. **Complete, externally accepted, and merged.**
-- **G5 — Integrated acceptance and hardening.** Complete, externally accepted and merged. Bootstrap prepares real local runtime wheels; package ToolPort requests from the Run-pinned signed manifest use the shared Stage-D mediator and durable audit; real-host tests prove granted execution and ungranted denial; the supervised browser E2E installs and runs a signed package offline. Stage H has not started; bounded Stage I intentionally precedes H hardening.
+- **G5 — Integrated acceptance and hardening.** Complete, externally accepted and merged. Bootstrap prepares real local runtime wheels; package ToolPort requests from the Run-pinned signed manifest use the shared Stage-D mediator and durable audit; real-host tests prove granted execution and ungranted denial; the supervised browser E2E installs and runs a signed package offline. Stage H has since been implemented; bounded Stage I intentionally preceded H hardening.
 
 ## Stage H — Security isolation
 
@@ -85,6 +85,17 @@ interactive per-call approvals (`Ask`/`Approve`/`Deny`), the encrypted secret ma
 sandbox, resource and network isolation.** The minimal operator-owned trust and egress controls
 Stage D adds to make onboarding possible are replaced and hardened here.
 
+**Stage H is delivered and qualified on Linux** under ADR 0037 and ADR 0038. It delivers encrypted
+secret lifecycle management (H1), PKCE account authorization and server-side credential brokering
+(H2), durable same-Attempt approval (H3), and publisher trust/revocation enforcement (H5). H4
+isolates package execution with a **pre-exec bubblewrap launcher** (user, mount, PID and network
+namespaces, capability drop, cleared environment, read-only package environment and one private
+writable scratch), proven against a protected host file and direct outbound network access. Linux
+with `bwrap` is the only qualified platform; Windows and macOS refuse package execution with
+`sandbox_unavailable` rather than running a package uncontained. Local migration head is
+`0023_worker_sandbox_capability`. Canonical authority is [implementation status](implementation-status.md),
+ADR 0037 and ADR 0038.
+
 Outcome: safer third-party execution.
 
 ## Stage I — Marketplace
@@ -94,9 +105,10 @@ I1 COMPLETE / EXTERNALLY ACCEPTED.** Canonical authority:
 [Stage-I master plan](stage-i/README.md) and ADRs 0027–0030.
 
 The intentional order is **G → bounded/pre-H I → H hardening**. Stage letters retain their
-historical identity. H is not started and remains responsible for sandbox/containment,
-encrypted secrets, interactive approvals, persistent local publisher trust and local
-revocation enforcement. Stage I cannot claim these protections.
+historical identity. H now provides encrypted secrets, interactive approvals, account credential
+brokering and persistent local publisher trust. It does not yet enable untrusted package execution
+until filesystem/network isolation is qualified. Stage I itself still cannot claim those protections: hosted
+Marketplace production acceptance, OIDC, and external publication authority remain open.
 
 - **I0 — Governance freeze:** frozen master plan and ADRs; complete and externally accepted.
 - **I1 — Hosted Marketplace Foundation and Immutable Catalog:** separate hosted persistence,
@@ -110,8 +122,17 @@ revocation enforcement. Stage I cannot claim these protections.
 - **I5 — Integrated Acceptance and Closeout:** deterministic v1/v2 publication-to-local-execution,
   historical pinning, warnings, offline runtime, recovery and full regression/documentation gates.
 
-I2–I5 are also not started. Installation remains separate from instance creation, grants,
-triggers and memory. No automatic upgrade/rebind or metadata-derived local trust in pre-H V1.
+I2–I5 are implemented as a bounded MVP in this worktree; see `docs/implementation-status.md`
+for current evidence and pending external/production acceptance. Installation remains separate
+from grants and triggers. Priority-1 runtime integration adds only the owner-controlled memory policy
+and per-instance package tool bindings described by ADR 0031; it does not add OAuth or Stage-H controls.
+
+The approved Priority-1 pre-H integration is implemented in this worktree as a local MVP: structured
+package context and selected-memory delivery, explicitly bound MCP tools through Stage-D permissions,
+bounded memory proposals and opt-in extraction, and owner-facing connection, permission, memory,
+context and runtime-health controls. This work does not change Stage-I marketplace acceptance and
+does not constitute Stage-H security isolation or production acceptance. See the [runtime integration
+guide](runtime-integration/README.md).
 
 ## Stage J — Multi-agent collaboration
 
