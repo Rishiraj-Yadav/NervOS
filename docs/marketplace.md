@@ -3,7 +3,7 @@
 ## Status and authority
 
 **I0 COMPLETE / EXTERNALLY ACCEPTED.
-I1 COMPLETE / EXTERNALLY ACCEPTED. Stage H NOT STARTED.**
+I1 COMPLETE / EXTERNALLY ACCEPTED. Stage H COMPLETE.**
 
 The canonical contract is [Stage-I master plan](stage-i/README.md), with ADRs
 [0027](adr/0027-marketplace-authority-hosted-local-boundary-and-pre-h-distribution-mode.md),

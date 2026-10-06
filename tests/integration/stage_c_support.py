@@ -46,6 +46,7 @@ from nervos_core.application.model_completion import (
 from nervos_core.application.queue_policy import PRODUCTION_QUEUE_POLICY, QueuePolicy
 from nervos_core.application.retry_policy import PRODUCTION_RETRY_POLICY
 from nervos_core.application.run_execution import RunExecutor
+from nervos_core.application.sandbox import WorkerSandboxCapability
 from nervos_core.application.trusted_chat import create_builtin_handler_registry
 from nervos_core.domain.jobs import RetryDisposition
 from nervos_core.domain.runs import STAGE_B_LIMITS
@@ -493,7 +494,9 @@ def build_worker(
     completion_map = completions or {PROVIDER_ID: ScriptedCompletion()}
     now = clock or (lambda: datetime.now(UTC))
     persistence = execution(engine, policy=policy)
-    registry = WorkerRegistry(persistence, worker_id, clock=now)
+    registry = WorkerRegistry(
+        persistence, worker_id, clock=now, capability=WorkerSandboxCapability(False, "test", None)
+    )
     worker = Worker(
         persistence,
         JobExecutionService(
@@ -561,7 +564,12 @@ async def run_until_settled(
 
 def worker_states(engine: Engine, worker_id: str, *, now: datetime) -> dict[str, str]:
     """Derived registry health for every Worker row, keyed by id."""
-    registry = WorkerRegistry(execution(engine), worker_id, clock=lambda: now)
+    registry = WorkerRegistry(
+        execution(engine),
+        worker_id,
+        clock=lambda: now,
+        capability=WorkerSandboxCapability(False, "test", None),
+    )
     return {snapshot.worker_id: str(snapshot.state) for snapshot in registry.snapshots()}
 
 

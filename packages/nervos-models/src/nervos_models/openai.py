@@ -116,6 +116,8 @@ class OpenAIModelCompletion:
             "stream": False,
             "timeout": request.timeout_ms / 1000,
         }
+        if request.temperature is not None:
+            request_kwargs["temperature"] = request.temperature
         if request.tools:
             request_kwargs["tools"] = [
                 {

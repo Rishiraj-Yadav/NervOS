@@ -1,4 +1,4 @@
-.PHONY: bootstrap dev-api dev-worker dev-scheduler dev-web test test-e2e e2e lint typecheck security check clean-check
+.PHONY: bootstrap dev-api dev-worker dev-scheduler dev-web test test-e2e e2e lint typecheck security check clean-check qualify-linux
 
 PYTHON ?= python
 
@@ -39,6 +39,9 @@ check:
 
 clean-check:
 	uv run python scripts/clean_check.py
+
+qualify-linux:
+	uv run python scripts/linux_qualification.py
 
 .PHONY: dev-marketplace test-marketplace-integration
 dev-marketplace:

@@ -124,6 +124,14 @@ const EVENT_COPY: Record<RunEventType, EventCopy> = {
     headline: () => "Tool outcome unknown",
     detail: safeFailure,
   },
+  "tool.approval_requested": {
+    headline: () => "Waiting for action approval",
+    detail: () => "Open Security to approve or deny this action before the Run times out.",
+  },
+  "tool.approval_decided": {
+    headline: () => "Action approval resolved",
+    detail: () => null,
+  },
 };
 
 function TimelineRow({ event }: { event: RunEvent }) {

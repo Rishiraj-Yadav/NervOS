@@ -21,11 +21,13 @@ from nervos_core.application.model_completion import (
     ModelCompletion,
     ModelProviderError,
 )
+from nervos_core.application.runtime_integration import MemoryProposal
 from nervos_core.application.tool_invocations import ClaimHandle
 from nervos_core.application.trusted_chat import ChatOutcome, TrustedAgentHandlerResolver
 from nervos_core.domain.agents import AgentDefinitionId
 from nervos_core.domain.context import ContextSnapshotData
 from nervos_core.domain.runs import ModelUsage, Run
+from nervos_core.domain.workflows import WorkflowStepResult
 
 # Upper bound accepted by the signed 64-bit integer column used for elapsed milliseconds.
 MAX_ELAPSED_MS = 2**63 - 1
@@ -60,6 +62,11 @@ class ExecutionOutcome:
     elapsed_ms: int
     error_code: str | None
     error_message: str | None
+    memory_proposals: tuple[MemoryProposal, ...] = ()
+    # ADR 0039: one bounded workflow step result, or None for every ordinary Run. Present
+    # only on a *succeeded* outcome, because durable workflow progress may only be committed by
+    # a fenced success -- a failed or lost Attempt never advances a workflow.
+    workflow_step: WorkflowStepResult | None = None
 
     def __post_init__(self) -> None:
         if not 0 <= self.elapsed_ms <= MAX_ELAPSED_MS:
@@ -77,6 +84,8 @@ class ExecutionOutcome:
             raise ValueError("invalid failed outcome")
         if self.error_code is None or self.error_message is None:
             raise ValueError("failed outcome requires a safe normalized error")
+        if self.workflow_step is not None:
+            raise ValueError("a failed outcome cannot carry a workflow step")
 
 
 class ToolLoopHandler(Protocol):
@@ -111,6 +120,10 @@ class PackageRunExecutionPort(Protocol):
     ) -> ChatOutcome: ...
 
 
+class MemoryExtractionPort(PackageRunExecutionPort, Protocol):
+    async def matches(self, run_id: int) -> bool: ...
+
+
 class RunExecutor:
     """Execute one trusted Run with exactly one bounded model request."""
 
@@ -120,11 +133,13 @@ class RunExecutor:
         monotonic: MonotonicClock = system_monotonic_nanoseconds,
         tool_loop: ToolLoopHandler | None = None,
         package_execution: PackageRunExecutionPort | None = None,
+        memory_extraction: MemoryExtractionPort | None = None,
     ) -> None:
         self._handlers = handlers
         self._monotonic = monotonic
         self._tool_loop = tool_loop
         self._package_execution = package_execution
+        self._memory_extraction = memory_extraction
 
     async def execute(
         self,
@@ -160,6 +175,8 @@ class RunExecutor:
             elapsed_ms=self.elapsed_ms(start),
             error_code=None,
             error_message=None,
+            memory_proposals=outcome.memory_proposals,
+            workflow_step=outcome.workflow_step,
         )
 
     async def _invoke(
@@ -175,6 +192,10 @@ class RunExecutor:
         closed as an internal execution error rather than silently degrading to a single call the
         Run never authorized.
         """
+        if self._memory_extraction is not None and await self._memory_extraction.matches(run.id):
+            if claim is None:
+                raise ModelProviderError(INTERNAL_EXECUTION_ERROR)
+            return await self._memory_extraction.run(completion, run, claim, 0, snapshot=snapshot)
         if run.executable.execution_kind.value == "package":
             if self._package_execution is None or claim is None:
                 raise ModelProviderError(INTERNAL_EXECUTION_ERROR)

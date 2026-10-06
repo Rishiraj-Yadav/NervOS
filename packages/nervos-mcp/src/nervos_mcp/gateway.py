@@ -42,7 +42,7 @@ from nervos_mcp.errors import (
     McpErrorCode,
     McpProtocolError,
 )
-from nervos_mcp.operator_config import McpOperatorConfig
+from nervos_mcp.operator_config import McpOperatorConfig, SecretValue
 from nervos_mcp.policy.egress import EgressPolicy
 from nervos_mcp.transports.http import http_transport
 from nervos_mcp.transports.stdio import stdio_transport
@@ -141,6 +141,28 @@ class McpGateway:
             # discarded and the outcome reported as unknown rather than guessed at.
             await self.invalidate(connection_id)
             raise ToolOutcomeUnknown() from error
+
+    async def call_tool_with_credential(
+        self,
+        connection_id: int,
+        upstream_name: str,
+        arguments: dict[str, Any],
+        credential: SecretValue,
+        *,
+        expected_endpoint: str,
+    ) -> Any:
+        """Fresh HTTP session with a broker-owned credential; never cache account tokens."""
+        connection = self._require_connection(connection_id)
+        if connection.transport.value != "http" or connection.endpoint != expected_endpoint:
+            raise McpConfigurationError(McpErrorCode.CREDENTIAL_ALIAS_NOT_AVAILABLE)
+        async with AsyncExitStack() as stack:
+            client = await self._open_client(stack, connection, account_credential=credential)
+            try:
+                return await client.call_tool(upstream_name, arguments)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                raise ToolOutcomeUnknown from None
 
     def _require_connection(self, connection_id: int) -> McpConnectionRow:
         """Read the durable row, refusing anything that must not be executed right now.
@@ -264,7 +286,13 @@ class McpGateway:
         session.closable.set()
         await session.owner
 
-    async def _open_client(self, stack: AsyncExitStack, connection: McpConnectionRow) -> Client:
+    async def _open_client(
+        self,
+        stack: AsyncExitStack,
+        connection: McpConnectionRow,
+        *,
+        account_credential: SecretValue | None = None,
+    ) -> Client:
         """Build and enter one client, enforcing the one accepted protocol revision."""
         if connection.transport.value == "stdio":
             spec = self._operator.stdio_server(connection.server_key or "")
@@ -276,8 +304,8 @@ class McpGateway:
             transport: Any = stdio_transport(spec, credential=credential)
         else:
             endpoint = connection.endpoint or ""
-            secret_value = None
-            if connection.credential_ref is not None:
+            secret_value = account_credential
+            if secret_value is None and connection.credential_ref is not None:
                 secret_value = self._operator.resolve_secret(connection.credential_ref, endpoint)
             transport = http_transport(endpoint, self._policy, credential=secret_value)
         client = await stack.enter_async_context(Client(transport, mode="auto"))

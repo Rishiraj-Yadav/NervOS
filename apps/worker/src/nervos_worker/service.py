@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 
 from nervos_core.application.clock import Clock, require_utc
@@ -75,6 +75,7 @@ class Worker:
         shutdown_drain_seconds: float = DEFAULT_SHUTDOWN_DRAIN_SECONDS,
         heartbeat_interval: float = WORKER_HEARTBEAT_INTERVAL.total_seconds(),
         reclaim_interval: float = RECLAIM_INTERVAL.total_seconds(),
+        memory_maintenance: Callable[[], None] | None = None,
     ) -> None:
         if not 1 <= concurrency <= 16:
             raise ValueError("worker concurrency must be between 1 and 16")
@@ -95,6 +96,7 @@ class Worker:
         self._shutdown_drain_seconds = shutdown_drain_seconds
         self._heartbeat_interval = heartbeat_interval
         self._reclaim_interval = reclaim_interval
+        self._memory_maintenance = memory_maintenance
 
     @property
     def provider_ids(self) -> tuple[str, ...]:
@@ -125,6 +127,10 @@ class Worker:
             ),
             asyncio.create_task(self._reclaim_periodically(stop), name="nervos-worker-reclaimer"),
         ]
+        if self._memory_maintenance is not None:
+            auxiliary.append(
+                asyncio.create_task(self._maintain_memory(stop), name="nervos-memory-maintenance")
+            )
         try:
             await self._wait_for_stop(stop, [*slots, *auxiliary])
         finally:
@@ -135,6 +141,16 @@ class Worker:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
             await asyncio.to_thread(self._registry.stop)
+
+    async def _maintain_memory(self, stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            try:
+                if self._memory_maintenance is not None:
+                    await asyncio.to_thread(self._memory_maintenance)
+            except Exception:
+                logger.warning("memory_maintenance_deferred code=persistence_unavailable")
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(stop.wait(), timeout=5)
 
     async def _registry_heartbeat(self, stop: asyncio.Event) -> None:
         """Renew registry liveness independently of every Job heartbeat.

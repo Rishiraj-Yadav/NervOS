@@ -8,11 +8,15 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
+from nervos_core.application.sandbox import WorkerSandboxCapability
 from nervos_core.infrastructure.database import create_sqlite_engine
 from sqlalchemy import Engine, text
 
 ROOT = Path(__file__).resolve().parents[4]
 NOW = datetime(2026, 9, 14, tzinfo=UTC)
+# A deterministic fixture capability. These suites prove execution authority; they state
+# an unsupported host rather than probing whatever machine happens to run them.
+TEST_CAPABILITY = WorkerSandboxCapability(False, "test", None)
 
 
 def migrate(

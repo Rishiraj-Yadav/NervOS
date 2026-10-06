@@ -9,11 +9,15 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
+from nervos_core.application.account_connections import AccountConnectionService
+from nervos_core.application.account_oauth import AccountOAuthService
 from nervos_core.application.agent_definitions import create_composite_agent_definition_resolver
 from nervos_core.application.agents import AgentService
+from nervos_core.application.approvals import ApprovalService
 from nervos_core.application.authentication import (
     AuthenticationError,
     AuthenticationService,
@@ -22,19 +26,30 @@ from nervos_core.application.conversations import ConversationService
 from nervos_core.application.mcp_connection_service import McpConnectionService
 from nervos_core.application.memory import MemoryService
 from nervos_core.application.package_environment import PackageEnvironmentBuilder
-from nervos_core.application.package_health import SubprocessPackageHealthChecker
+from nervos_core.application.package_health import QualifiedPackageHealthChecker
 from nervos_core.application.package_installation import PackageApplicationService
 from nervos_core.application.package_query import PackageQueryService
 from nervos_core.application.package_storage import PackageStore
+from nervos_core.application.publisher_trust import PublisherTrustService
 from nervos_core.application.run_cancellation import RunCancellationService
+from nervos_core.application.runtime_integration import RuntimeIntegrationService
+from nervos_core.application.secrets import SecretManager, SecretResolver
 from nervos_core.application.triggers import TriggerManagementService
 from nervos_core.application.webhooks import (
     WebhookDeliveryService,
     WebhookProvisioningService,
     WebhookSecretService,
 )
+from nervos_core.application.workflow_views import WorkflowViewService
+from nervos_core.application.workflows import WorkflowCreationRequest, WorkflowService
+from nervos_core.domain.workflows import WorkflowBudget
 from nervos_core.infrastructure.database import create_session_factory, create_sqlite_engine
+from nervos_core.infrastructure.database.account_connections import (
+    SqlAlchemyAccountConnectionPersistence,
+)
+from nervos_core.infrastructure.database.account_oauth import SqlAlchemyAccountOAuthPersistence
 from nervos_core.infrastructure.database.agents import SqlAlchemyAgentPersistence
+from nervos_core.infrastructure.database.approvals import SqlAlchemyApprovalPersistence
 from nervos_core.infrastructure.database.authentication import SqlAlchemyAuthenticationPersistence
 from nervos_core.infrastructure.database.conversations import SqlAlchemyConversationPersistence
 from nervos_core.infrastructure.database.jobs import (
@@ -49,13 +64,24 @@ from nervos_core.infrastructure.database.packages import (
     SqlAlchemyPackageRegistryPersistence,
     SqlInstalledPackageDefinitionSource,
 )
+from nervos_core.infrastructure.database.publisher_trust import (
+    SqlAlchemyPublisherTrustPersistence,
+)
+from nervos_core.infrastructure.database.runtime_integration import (
+    SqlAlchemyRuntimeIntegrationPersistence,
+)
+from nervos_core.infrastructure.database.secrets import SqlAlchemySecretPersistence
 from nervos_core.infrastructure.database.triggers import SqlAlchemyTriggerPersistence
+from nervos_core.infrastructure.database.workflows import SqlAlchemyWorkflowPersistence
+from nervos_core.infrastructure.sandbox import create_containment
 from nervos_core.infrastructure.scheduling import create_schedule_evaluator
 from nervos_core.infrastructure.security import Argon2PasswordHasher, SecureSessionTokens
+from nervos_core.infrastructure.security.secret_keys import FileMasterKeyResolver
 from nervos_core.infrastructure.webhooks import (
     create_webhook_credential_factory,
     create_webhook_secret_verifier,
 )
+from nervos_mcp.account_tokens import HttpAccountTokenTransport, load_account_providers
 from nervos_mcp.adapters import OperatorFacts, build_discovery
 from nervos_mcp.operator_config import load_operator_config
 from nervos_mcp.policy.egress import StrictEgressPolicy
@@ -183,14 +209,50 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     package_store = PackageStore(resolved_settings.package_store)
     package_persistence = SqlAlchemyPackageRegistryPersistence(engine)
     package_env_builder = PackageEnvironmentBuilder(package_store.environments_root)
-    package_health_checker = SubprocessPackageHealthChecker()
+    package_health_checker = QualifiedPackageHealthChecker(create_containment)
+    # Stage H5 (ADR 0036): local publisher trust is consulted by the install gate and, in the
+    # Worker, by the execution gate. Composition reads no state and starts no network work.
+    publisher_trust_service = PublisherTrustService(
+        SqlAlchemyPublisherTrustPersistence(engine), utc_now
+    )
     package_application_service = PackageApplicationService(
         package_persistence,
         package_store,
         package_env_builder,
         package_health_checker,
         clock=utc_now,
+        trust=publisher_trust_service,
+        installation_preflight=package_health_checker.validate_platform,
     )
+    # Stage H1/H2/H3: the secret store, the account connections that reference it, and the
+    # owner-facing approval decisions. The master key is resolved lazily and fails closed, so
+    # composing the app never reads key material.
+    secret_persistence = SqlAlchemySecretPersistence(engine)
+    secret_manager = SecretManager(
+        secret_persistence,
+        FileMasterKeyResolver(
+            resolved_settings.secrets_key_file, resolved_settings.secrets_key_version
+        ),
+        utc_now,
+    )
+    account_connection_service = AccountConnectionService(
+        SqlAlchemyAccountConnectionPersistence(engine), utc_now
+    )
+    account_oauth_service = AccountOAuthService(
+        providers=load_account_providers(resolved_settings.account_oauth_providers),
+        persistence=SqlAlchemyAccountOAuthPersistence(engine),
+        secrets_manager=secret_manager,
+        resolver=SecretResolver(
+            secret_persistence,
+            FileMasterKeyResolver(
+                resolved_settings.secrets_key_file, resolved_settings.secrets_key_version
+            ),
+        ),
+        connections=account_connection_service,
+        transport=HttpAccountTokenTransport(),
+        clock=utc_now,
+    )
+    approval_service = ApprovalService(SqlAlchemyApprovalPersistence(engine), utc_now)
     package_query_service = PackageQueryService(package_persistence, package_store)
 
     @asynccontextmanager
@@ -203,6 +265,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(AuthenticationBoundaryMiddleware, settings=resolved_settings)
     app.add_middleware(ApiSecurityHeadersMiddleware)
     app.state.settings = resolved_settings
+    app.state.account_oauth_service = account_oauth_service
     app.state.database_engine = engine
     app.state.session_factory = session_factory
     app.state.authentication_service = authentication_service
@@ -217,6 +280,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.trigger_management_service = trigger_management_service
     app.state.conversation_service = conversation_service
     app.state.memory_service = memory_service
+    # Package-sandbox capability is reported by the Worker that executes packages, not
+    # computed here: this process may run on a different host with a different launcher.
+    app.state.runtime_integration_service = RuntimeIntegrationService(
+        SqlAlchemyRuntimeIntegrationPersistence(engine), utc_now
+    )
+    # Workflow creation pins the agent's definition and its ordinary per-step Run limits at
+    # creation time, resolved through the same resolver the rest of the API uses. A workflow
+    # therefore cannot start against limits or a package identity the API would not accept
+    # for an ordinary Run.
+    workflow_service = WorkflowService(SqlAlchemyWorkflowPersistence(engine), clock=utc_now)
+
+    def create_workflow(
+        *,
+        owner_user_id: int,
+        agent_instance_id: int,
+        submission_key: str,
+        input_text: str,
+        workflow_kind: str,
+    ) -> dict[str, Any]:
+        instance = agent_service.get_instance(owner_user_id, agent_instance_id)
+        definition_id = instance.definition_id
+        definition = definitions.resolve(definition_id)
+        execution = workflow_service.create(
+            WorkflowCreationRequest(
+                owner_user_id=owner_user_id,
+                agent_instance_id=agent_instance_id,
+                workflow_kind=workflow_kind,
+                submission_key=submission_key,
+                input_text=input_text,
+                limits=definition.limits,
+                definition_id=definition_id,
+                budget=WorkflowBudget(),
+                now=utc_now(),
+            )
+        )
+        return WorkflowViewService(workflow_service, create=create_workflow).summary(execution)
+
+    app.state.workflow_view_service = WorkflowViewService(workflow_service, create=create_workflow)
     app.state.marketplace_discovery = MarketplaceDiscoveryService(
         resolved_settings.marketplace_origin,
         resolved_settings.marketplace_timeout_seconds,
@@ -233,6 +334,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.package_application_service = package_application_service
     app.state.package_query_service = package_query_service
+    app.state.secret_manager = secret_manager
+    app.state.account_connection_service = account_connection_service
+    app.state.approval_service = approval_service
+    app.state.publisher_trust_service = publisher_trust_service
     app.add_exception_handler(Exception, unexpected_error_handler)
     app.add_exception_handler(AuthenticationError, authentication_error_handler)
     app.add_exception_handler(InvalidOrigin, authentication_error_handler)

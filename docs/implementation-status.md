@@ -54,7 +54,7 @@ transactional package installation, durable registry, exact package-definition r
 content-addressed offline Python 3.12 environments, immutable Run executable/config snapshots, and
 package-host execution — is COMPLETE and externally accepted.** It preserves the existing Run → Job
 → Attempt → Worker authority and remains a pre-Stage-H runtime/dependency-isolation boundary rather
-than a hostile-code sandbox. **G4 — Package Lifecycle Product Surface — is COMPLETE, externally accepted, and merged.** It adds authenticated package inspection/install/list/detail APIs, atomic package-backed AgentInstance creation, schema-validated config updates, side-by-side rebind/rollback, obligation-aware removal with `pending_removal`, a thin API-backed CLI, and Packages/Agent lifecycle UI. No migration 0014 was added; G4 uses the existing 0013 schema. Persistent publisher trust and sandboxing remain out of scope. **G5 — Integrated acceptance and hardening — is COMPLETE, externally accepted, and merged. Stage G is COMPLETE, externally accepted, and merged.** Bootstrap prepares real local SDK/package-host wheels which package environment creation consumes fail-closed. The Worker routes package ToolPort calls from the exact Run-pinned verified manifest through the same Stage-D mediator, grant authority, timeout, executor, result normalization, and durable invocation audit used by ToolLoop. Real package-host acceptance proves granted execution and ungranted denial; the supervised browser journey builds and installs a signed package, creates a package AgentInstance, and executes a Run through the real package environment and host. No migration 0014 was added. The authorized order is G → bounded/pre-H I → H hardening; Stage H has not started.
+than a hostile-code sandbox. **G4 — Package Lifecycle Product Surface — is COMPLETE, externally accepted, and merged.** It adds authenticated package inspection/install/list/detail APIs, atomic package-backed AgentInstance creation, schema-validated config updates, side-by-side rebind/rollback, obligation-aware removal with `pending_removal`, a thin API-backed CLI, and Packages/Agent lifecycle UI. No migration 0014 was added; G4 uses the existing 0013 schema. Persistent publisher trust and sandboxing remain out of scope. **G5 — Integrated acceptance and hardening — is COMPLETE, externally accepted, and merged. Stage G is COMPLETE, externally accepted, and merged.** Bootstrap prepares real local SDK/package-host wheels which package environment creation consumes fail-closed. The Worker routes package ToolPort calls from the exact Run-pinned verified manifest through the same Stage-D mediator, grant authority, timeout, executor, result normalization, and durable invocation audit used by ToolLoop. Real package-host acceptance proves granted execution and ungranted denial; the supervised browser journey builds and installs a signed package, creates a package AgentInstance, and executes a Run through the real package environment and host. No migration 0014 was added. The authorized order is G → bounded/pre-H I → H hardening; **Stage H has implementation gaps documented in the 2026-10-03 verification review**.
 
 Stage C — Persistent execution engine is COMPLETE. The C0 architecture freeze, the C1 durable execution foundation, C2 — asynchronous submission and minimal durable Worker execution — C3 — Worker registry/health, expired-lease reconciliation, and fencing hardening — C4 — the safe execution retry engine — C5 — owner cancellation and Attempt execution-timeout orchestration — C6 — authoritative global/per-Agent/per-provider execution concurrency, durable Agent fairness, and full admission backpressure — C7 — public read-only execution observability, the Run Events API, the execution timeline, and the polling model — and C8 — integrated deterministic Stage C acceptance and closeout — are implemented, externally reviewed, and accepted.
 
@@ -77,8 +77,19 @@ integration, browser, build, type, lint and security gates passed. External and
 remaining production acceptance remain pending; Stage I is not yet declared fully accepted.
 The frozen governance authority is `docs/stage-i/README.md` and ADRs 0027–0030.
 The intentional execution order is **G → bounded/pre-H I → H hardening**, without renaming stages.
-**Stage H NOT STARTED** and retains sandbox, secrets, interactive approval, persistent local trust
-and local revocation-enforcement authority. I0 adds no runtime feature, migration or dependency.
+**Stage H security isolation is delivered and qualified on one platform.** The 2026-10-03 audit
+findings are repaired under ADR 0037 and ADR 0038: versioned secret re-encryption with retirement
+fencing, PKCE S256 account authorization with server-side credential brokering and live dispatch
+checks, durable same-Attempt approval with atomic consumption and invocation start, publisher
+trust/revocation at install, rebind, rollback and execution admission, and a **pre-exec Linux
+bubblewrap launcher** that proves real filesystem and network denial before package code starts.
+Package execution is qualified only on a Linux kernel with `bwrap` installed; Windows and macOS
+refuse with the static `sandbox_unavailable` outcome and never run a package uncontained.
+Trusted built-in agents are unaffected and keep their existing execution path. See
+[Stage-H verification review](stage-h/verification-review-2026-10-03.md) for the audit and
+[the Stage-H plan](stage-h/README.md) for the qualified-platform evidence and residual risk.
+Hosted Marketplace production acceptance, OIDC, and external publication authority remain Stage I;
+local account OAuth is part of H2 under ADR 0033. I0 adds no runtime feature, migration or dependency.
 
 ## Stage I governance
 
@@ -98,8 +109,38 @@ remain unaccepted for production. Separately composed publisher writes now expos
 upload/quarantine, isolated static verification and explicit immutable publication. The local
 Marketplace UI/proxy and exact retained-ticket download/approval handoff to the existing Stage-G
 installer are implemented. Local schema head and Worker/Scheduler guards are
-`0014_stage_i4_marketplace_install_requests`. The ticket table does not replace package registry
-or Run executable evidence. See `stage-i/i4-i5-implementation.md` for current evidence and limits.
+`0023_worker_sandbox_capability`. Migration `0015_runtime_integration` adds owner memory policies, exact package-tool bindings,
+per-run context/binding snapshots, and durable memory suggestions. It does not alter hosted Marketplace migrations or replace package registry/Run executable evidence. Approved Priority-1 runtime integration extends package execution with explicit MCP bindings through the Stage-D mediator, structured context, selected-memory SDK delivery, opt-in proposal retention/extraction, safe runtime health, and dashboard controls. Stage H remains incomplete after code audit. See [runtime integration guide](runtime-integration/README.md) and [ADR 0031](adr/0031-runtime-integration-context-memory-and-mcp.md). See `stage-i/i4-i5-implementation.md` for current evidence and limits.
+
+## Approved Priority-1 runtime integration
+
+The approved pre-Stage-H runtime integration MVP is implemented in this worktree. It preserves the
+ordinary Run → Job → Worker execution path and supports explicitly declared package MCP aliases,
+owner-selected local bindings, per-instance grants through the existing Stage-D mediator, structured
+SDK context with immutable selected-memory snapshots, bounded agent memory proposals, optional
+recoverable extraction Runs, owner review/policy controls, per-run context inspection, safe runtime
+health, and dashboard controls. Independent runs do not invent conversations or replay their
+history. Package manifests without the additive extension retain their legacy behavior.
+
+This is local implementation and deterministic qualification, not external or production acceptance.
+It does not add its own secret, account or approval model, and it does not add a second sandbox:
+package isolation is Stage H's pre-exec launcher. See the [runtime integration guide](runtime-integration/README.md)
+for setup, compatibility and operational limits.
+
+Current verification for the runtime-qualification closeout (2026-10-04): the complete repository
+Python suite executed **3,359 tests -- 3,354 passed, 5 skipped, 0 failed**. The skips are
+POSIX/Linux-only sandbox and qualified-isolation cases, which cannot run on this Windows host and
+are reported as skipped rather than passed. The frontend suite passed **163 tests** (19 files);
+frontend lint and production build passed. Ruff check and format are clean, Pyright reports
+**0 errors, 0 warnings**, and the security scan passed (777 files, no findings). Linux package
+isolation was qualified separately on a real kernel: all twelve required properties passed on
+Linux `6.18.40.1-microsoft-standard-WSL2` with bubblewrap `0.8.0` (container-hosted, not native
+host) via `make qualify-linux`. Existing SQLAlchemy/Python deprecation warnings remain; they did
+not cause test failures.
+
+Previously recorded verification (historical, superseded by the figures above): the complete
+repository Python suite executed **3,323 tests -- 3,321 passed, 2 skipped, 0 failed**. The frontend
+suite passed **162 tests** (18 files) and the deterministic Playwright E2E journey passed end to end.
 Final MVP verification: 3,271 Python tests, 154 frontend tests, 52 real hosted integration
 tests, four supervised browser journeys, production web build, lint/format, type checks,
 and security scan (700 files, no findings) passed. The real journey preserves v1 history,
@@ -139,6 +180,61 @@ also timed out; the final sequential run passed. I0 architecture acceptance and 
 authorization subsequently permitted the implementation above. The frozen master plan retains
 its historical governance-candidate header; this document records current delivered state.
 
+## Autonomous workflows (W0–W6)
+
+**W0–W6 MVP integration repairs are complete and verified.** The
+[2026-10-05 closeout](autonomous-workflows/verification-closeout-2026-10-05.md)
+records lifecycle, checkpoint, signal/decision, budget, native Gmail routing,
+installed Linux package and dashboard acceptance. It supersedes the defects in
+the historical 2026-10-04 review and records the full-suite stale-test failure
+and passing corrective reruns explicitly. Live Google account qualification
+remains a deployment check; no sending capability is implemented. Authority:
+[ADR 0039](adr/0039-durable-autonomous-workflows.md).
+The frozen contract is [workflow-contract.md](autonomous-workflows/workflow-contract.md); the
+operational runbook is [runbook.md](autonomous-workflows/runbook.md).
+
+- [x] **W0** — contract freeze: status machine, budgets, checkpoint and wait semantics, and the
+  owner-decision boundary, fixed before any runtime code.
+- [x] **W1** — durable state and checkpoints under migration
+  `0024_durable_workflows`, which is the current head. Step commit is fenced inside
+  `SqlAlchemyJobExecutionPersistence.succeed(..., workflow_steps=...)`.
+- [x] **W2** — continuations, waits and recovery, advanced **only** by
+  `WorkflowContinuationService.tick()` from the existing Scheduler. There is no second queue
+  and no permanent agent process.
+- [x] **W3** — durable owner decisions, kept distinct from Stage-H H3 live-dispatch approvals.
+- [x] **W4** — the additive `workflow-v1` host feature, and one qualified framework adapter in
+  `packages/nervos-langgraph` pinned to `langgraph==1.2.12`.
+- [x] **W5** — the read-only Gmail connector, plus the owner-scoped `/workflows` API and the
+  `/workflows` dashboard.
+- [x] **W6** — two generated demo packages (`artifacts/demos/research-workflow.nervos`,
+  `artifacts/demos/mail-triage.nervos`), the runbook, and this status record.
+
+**Owner-safe projection is a security property here, not a formatting choice.** The list
+projection carries no checkpoint content; the detail projection carries checkpoint *shape*
+(revision, byte size, top-level key names). Values are available only through the explicit
+owner-authorized checkpoint inspection endpoint, stored under private dashboard query keys.
+Recovery guidance is derived only
+from the reason the runtime actually recorded. `expected_revision` is **required** on both
+signal and decision, so neither can be applied against state the owner never saw.
+
+Two behaviours are easy to misread and are therefore pinned by tests: a **refused** signal is
+deliberately **not recorded**, so a stale-revision or wrong-key probe cannot burn the signal
+identity and block the legitimate delivery that follows; and `replayed` applies only to an
+already-**accepted** signal.
+
+The `workflow-v1` capability is refused host-side **before `initialize`**, and the host — not
+the package — binds revision, digests and expiry. A manifest must declare the exact string
+`workflow: workflow-v1`; `true` and unknown values are rejected at parse time.
+
+**Platform boundary, unchanged and deliberate.** `create_containment()` dispatches only on
+Linux; every other platform raises `ContainmentUnavailable` and both the API package health
+check and the Worker refuse before package code runs. The frozen plan requires this refusal to
+be preserved. Consequently the **package demos require a supported Linux deployment**, and on
+a non-Linux host `scripts/check.py e2e` verifies package-install refusal in `stage-g`;
+the actual package installation/execution acceptance runs on Linux. Nothing in the
+workflow domain, API, SDK port or Gmail
+connector is platform-limited; only package execution is.
+
 ## Stage D milestones
 
 - [x] D0 — Architecture, protocol, and safety freeze (documentation/governance only; no schema, no dependency, no implementation)
@@ -177,11 +273,35 @@ its historical governance-candidate header; this document records current delive
 - [x] G4 — Lifecycle: upgrade / version coexistence / rollback / uninstall + CLI/API/UI (**complete, externally accepted, and merged**)
 - [x] G5 — Integrated acceptance and hardening (complete, externally accepted, and merged)
 
+## Stage H milestones
+
+- [x] H0 — Security-isolation architecture freeze (governance only: this master plan + ADRs 0032–0036; no runtime code)
+- [x] H1 — Encrypted secret storage with version-addressable key resolution, bounded explicit
+  re-encryption, terminal revocation and safe key retirement (`0016_stage_h1_secret_manager`).
+- [x] H2 — Owner-bound PKCE OAuth, encrypted token custody, bounded refresh with durable fencing,
+  best-effort provider revocation, and explicit Worker account-tool brokering (`0017`, `0022`).
+- [x] H3 — Exact-Attempt approvals wait within the existing execution deadline, consume atomically
+  with invocation start, abandon on cancellation/lease loss, and emit safe public timeline events
+  (`0018`, `0021`).
+- [x] H4 — Package execution refuses on every currently unqualified platform before package code
+  runs. Resource-only adapters are test seams and do not qualify a platform; per-attempt scratch and
+  aggregate output bounds are enforced for an eventual qualified launcher (`0019`).
+- [x] H5 — Publisher trust/revocation applies to installation, rebind, rollback and package claim
+  checks (`0020_stage_h5_publisher_trust`).
+
+**Stage H repair acceptance is complete under ADR 0037.** The local migration head is
+`0022_stage_h_account_oauth`, and the Worker and Scheduler require exactly that revision. No
+platform currently qualifies untrusted package execution because the required combined filesystem
+and network isolation launcher has not yet been delivered; that refusal is intentional and tested.
+The frozen [Stage H](stage-h/README.md) remains historical governance text. Current verified behavior
+is recorded in [ADR 0037](adr/0037-stage-h-security-repair-contract.md) and the
+[verification review](stage-h/verification-review-2026-10-03.md).
+
 ## Post-Stage-G provider extension
 
 Gemini Developer API support was added after Stage G as the third production provider behind the existing provider-neutral model port. Canonical provider IDs are `anthropic`, `openai`, and `gemini`. A Gemini-capable Worker reads the optional process-only `GEMINI_API_KEY`; blank values leave it unconfigured. The API remains credential-free and accepts queued Runs for known providers. The Worker owns the Google Gen AI SDK client and routes Chat, tool-loop, and package ModelPort requests through the existing Run/Job/Attempt path. Gemini function calls are executed only by NervOS's Stage-D mediation. The implementation adds no schema migration, Vertex AI backend, provider fallback, or automatic Google tool execution.
 
-Verification used deterministic adapter, Worker, API, package-host, frontend, and supervised offline E2E coverage. The final full repository gate passed 2,917 Python and 152 frontend tests, Ruff, Pyright, frontend lint/typecheck, and the tracked-file security scan. No live Gemini request was made. The migration head and Worker/Scheduler expected revision remain `0013_stage_g3_package_registry`.
+Verification at the provider-extension closeout used deterministic adapter, Worker, API, package-host, frontend, and supervised offline E2E coverage. The then-current repository gate passed 2,917 Python and 152 frontend tests, Ruff, Pyright, frontend lint/typecheck, and the tracked-file security scan. No live Gemini request was made. The runtime integration migration later advanced the Worker/Scheduler expected revision to `0015_runtime_integration`.
 
 **E0 is architecture frozen and externally accepted.** It delivered governance only and changed no
 runtime behaviour. It fixed: that **Stage E decides when a Run exists while Stages C and D continue to

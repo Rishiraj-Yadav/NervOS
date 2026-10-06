@@ -7,6 +7,13 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
+from nervos_core.application.account_actions import AccountActionDispatcher
+from nervos_core.application.approvals import (
+    ApprovalAdmission,
+    ApprovalGate,
+    ApprovalRequest,
+    requires_approval,
+)
 from nervos_core.application.model_completion import (
     EXECUTION_CANCELLED,
     INTERNAL_EXECUTION_ERROR,
@@ -24,7 +31,11 @@ from nervos_core.application.tool_invocations import (
     ToolInvocationPersistence,
     result_envelope,
 )
-from nervos_core.application.tool_permissions import ToolPermissionEvaluator
+from nervos_core.application.tool_permissions import (
+    PermissionDecision,
+    PermissionDenialReason,
+    ToolPermissionEvaluator,
+)
 from nervos_core.application.tool_registry import (
     ToolExecutionFailure,
     ToolOutcomeUnknown,
@@ -96,6 +107,28 @@ def _durable_error_message(error_code: str, message: str | None) -> str:
     return safe_error_message(error_code)
 
 
+def _approval_refused() -> PermissionDecision:
+    """The one durable decision value an unmet approval produces.
+
+    ADR 0015 reserved `HARD_POLICY_DENIED` for runtime policy that is not a grant question,
+    which is exactly what an unmet approval is. Keeping it a single factory means every
+    approval refusal is recorded with the same vocabulary, and none of them invents a new one.
+    """
+    return PermissionDecision(allowed=False, reason=PermissionDenialReason.HARD_POLICY_DENIED)
+
+
+@dataclass(frozen=True, slots=True)
+class _GatedAction:
+    """One approval-required action together with the gate that owns its authority.
+
+    Carrying both in a single optional value keeps the dispatch-time re-check free of a second
+    lookup and free of an assertion: if this value exists, the gate exists.
+    """
+
+    gate: ApprovalGate
+    request: ApprovalRequest
+
+
 @dataclass(frozen=True, slots=True)
 class ToolInvocationOutcome:
     """A completed invocation or a safe denial for its caller to observe."""
@@ -107,7 +140,13 @@ class ToolInvocationOutcome:
 
 
 class ToolInvocationMediator:
-    """Own live permission, durable audit, timeout, and dispatch for one tool call."""
+    """Own live permission, durable audit, timeout, and dispatch for one tool call.
+
+    ``approvals`` is the Stage-H3 gate (ADR 0034). It is a constructor argument rather than a
+    global so the Worker composes it and every other caller keeps the unchanged Stage-D path: an
+    un-gated mediator does not silently gain an authority predicate, and a gated one cannot be
+    built by accident.
+    """
 
     def __init__(
         self,
@@ -116,11 +155,15 @@ class ToolInvocationMediator:
         authorize: ToolPermissionEvaluator,
         invocations: ToolInvocationPersistence,
         clock: Callable[[], datetime],
+        approvals: ApprovalGate | None = None,
+        account_actions: AccountActionDispatcher | None = None,
     ) -> None:
         self._registry = registry
         self._authorize = authorize
         self._invocations = invocations
         self._clock = clock
+        self._approvals = approvals
+        self._account_actions = account_actions
 
     async def invoke(
         self,
@@ -173,9 +216,73 @@ class ToolInvocationMediator:
             )
             return ToolInvocationOutcome(None, denied=True)
 
-        started = self._invocations.mark_started(
-            claim=claim, invocation_id=invocation_id, now=self._clock()
-        )
+        # The approval gate runs only for an action D2 has already allowed: an approval
+        # request for a call the owner never granted would put a durable row in front of
+        # the owner for something they would only ever be able to deny.
+        gated: _GatedAction | None = None
+        if self._approvals is not None and requires_approval(descriptor):
+            gated = _GatedAction(
+                gate=self._approvals,
+                request=ApprovalRequest(
+                    agent_instance_id=run.agent_instance_id,
+                    run_id=run.id,
+                    job_id=claim.job_id,
+                    attempt_id=claim.attempt_id,
+                    tool_sequence=tool_sequence,
+                    tool_definition_id=descriptor.tool_definition_id,
+                    upstream_name=descriptor.upstream_name,
+                    fingerprint=descriptor.fingerprint,
+                    arguments=arguments,
+                ),
+            )
+            try:
+                admission = gated.gate.admit(gated.request, now=self._clock())
+                while admission is ApprovalAdmission.REQUESTED:
+                    await asyncio.sleep(0.25)
+                    if not self._authorize.check_permission(
+                        run_id=run.id, tool_definition_id=descriptor.tool_definition_id
+                    ).allowed:
+                        gated.gate.abandon(gated.request, now=self._clock())
+                        admission = ApprovalAdmission.REFUSED
+                        break
+                    admission = gated.gate.admit(gated.request, now=self._clock())
+            except asyncio.CancelledError:
+                gated.gate.abandon(gated.request, now=self._clock())
+                self._invocations.mark_cancelled(
+                    claim=claim, invocation_id=invocation_id, now=self._clock()
+                )
+                raise
+            if admission is ApprovalAdmission.UNAVAILABLE:
+                # Authority could not be confirmed. The invocation row already exists and must
+                # not stay `requested` forever, so it closes as denied -- and the Run closes as
+                # an internal failure, because a model must not be told which predicate failed
+                # and nothing may be dispatched on an unchecked assumption.
+                self._invocations.mark_denied(
+                    claim=claim,
+                    invocation_id=invocation_id,
+                    decision=_approval_refused(),
+                    now=self._clock(),
+                )
+                raise ModelProviderError(INTERNAL_EXECUTION_ERROR, usage=usage)
+            if admission is not ApprovalAdmission.APPROVED:
+                # The approval request is now durable (or already refused): the model sees the
+                # ordinary Stage-D denial note and the owner decides out of band.
+                self._invocations.mark_denied(
+                    claim=claim,
+                    invocation_id=invocation_id,
+                    decision=_approval_refused(),
+                    now=self._clock(),
+                )
+                return ToolInvocationOutcome(None, denied=True)
+
+        if gated is not None:
+            started = gated.gate.start(
+                gated.request, claim=claim, invocation_id=invocation_id, now=self._clock()
+            )
+        else:
+            started = self._invocations.mark_started(
+                claim=claim, invocation_id=invocation_id, now=self._clock()
+            )
         if started.kind is StartOutcomeKind.FENCED:
             raise ModelProviderError(INTERNAL_EXECUTION_ERROR, usage=usage)
         if started.kind is StartOutcomeKind.CANCELLED:
@@ -185,9 +292,14 @@ class ToolInvocationMediator:
 
         try:
             async with asyncio.timeout(run.limits.tool_timeout_ms / 1000):
-                result = await self._registry.executor(descriptor.source_ref).execute(
-                    descriptor, arguments
-                )
+                if self._account_actions is not None and self._account_actions.applies(descriptor):
+                    result = await self._account_actions.invoke(
+                        run=run, claim=claim, descriptor=descriptor, arguments=arguments
+                    )
+                else:
+                    result = await self._registry.executor(descriptor.source_ref).execute(
+                        descriptor, arguments
+                    )
         except TimeoutError:
             self._mark_ambiguous(claim, invocation_id)
             raise ModelProviderError(TOOL_OUTCOME_UNKNOWN, usage=usage) from None

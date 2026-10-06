@@ -20,6 +20,7 @@ import { Brand } from "../components/Brand";
 import { ConfigSchemaForm } from "../components/ConfigSchemaForm";
 import { RunItem } from "../components/RunItem";
 import { RunTimeline } from "../components/RunTimeline";
+import { AgentRuntimeControls } from "../components/RuntimeControls";
 import { isTerminalStatus } from "../api/agentInstances";
 import { NotFoundPage } from "./NotFoundPage";
 
@@ -152,6 +153,7 @@ function AgentInstanceView({ agentInstanceId }: { agentInstanceId: number }) {
               )}
             </div>
             <h1 id="agent-title">{instance.data.display_name}</h1>
+            <AgentRuntimeControls instanceId={agentInstanceId} />
             <p className="lede">
               One submission creates one independent run. Earlier runs are shown below for your
               reference and are never sent to the model.

@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { delay, http, HttpResponse } from "msw";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -45,6 +45,20 @@ async function fillSetup(password = "correct horse battery") {
   await user.type(screen.getByLabelText(/^password$/i), password);
   await user.type(screen.getByLabelText(/confirm password/i), password);
   return user;
+}
+
+/**
+ * Lets every already-queued navigation and React commit drain.
+ *
+ * A route can look settled and still be one effect away from moving again, so a redirect is only
+ * asserted on after the scheduler has had a chance to run the work it had already queued.
+ */
+async function settleRouter() {
+  for (let tick = 0; tick < 3; tick += 1) {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  }
 }
 
 afterEach(() => {
@@ -147,6 +161,50 @@ describe("route guards", () => {
 });
 
 describe("initial setup", () => {
+  it("keeps the new administrator on the dashboard once setup completes", async () => {
+    server.use(
+      setupStatus(false),
+      http.post("/api/v1/setup", () => HttpResponse.json(apiUser, { status: 201 })),
+      authenticated(),
+    );
+    const { router } = await renderRoute("/setup");
+    const user = await fillSetup();
+    const visited = [router.state.location.pathname];
+    const unsubscribe = router.subscribe((state) => visited.push(state.location.pathname));
+
+    await user.click(screen.getByRole("button", { name: /create.*admin/i }));
+    await screen.findByRole("heading", { name: /nervos is ready/i });
+    await settleRouter();
+    unsubscribe();
+
+    // Leaving setup is derived from the session rather than navigated imperatively from the page.
+    // That navigate() used to race the session write: the router re-rendered with the new location
+    // while the gate still held the pre-setup session, so the redirect back to /setup was issued
+    // from superseded state and tore the dashboard down again a tick after it first appeared. The
+    // route it lands on afterwards proves nothing, so the whole path sequence is asserted on.
+    const firstDashboard = visited.indexOf("/");
+    expect(firstDashboard).toBeGreaterThanOrEqual(0);
+    expect(visited.slice(firstDashboard)).not.toContain("/setup");
+    expect(screen.getByRole("heading", { name: /nervos is ready/i })).toBeVisible();
+  });
+
+  it("returns an anonymous visitor to the page they asked for after signing in", async () => {
+    server.use(setupStatus(true), unauthenticated());
+    const { router } = await renderRoute("/agents");
+    await screen.findByRole("heading", { name: /welcome back/i });
+    const user = await userEvent.setup();
+    server.use(
+      http.post("/api/v1/auth/login", () => HttpResponse.json(apiUser)),
+      authenticated(),
+      http.get("/api/v1/agent-instances", () => HttpResponse.json({ items: [] })),
+      http.get("/api/v1/packages", () => HttpResponse.json({ items: [] })),
+    );
+    await user.type(screen.getByLabelText(/^username$/i), "admin");
+    await user.type(screen.getByLabelText(/^password$/i), "correct horse battery");
+    await user.click(screen.getByRole("button", { name: /sign in/i }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/agents"));
+  });
+
   it("submits the password exactly and enters the dashboard", async () => {
     const password = "  exact password value  ";
     let body: unknown;

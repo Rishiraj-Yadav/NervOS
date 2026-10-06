@@ -69,6 +69,11 @@ def test_the_api_settings_cannot_represent_a_provider_credential(
         "mcp_allowed_origins",
         "mcp_stdio_servers",
         "mcp_credential_aliases",
+        # Stage H's Secret Manager key location. This names a *file the API reads key material
+        # from*; it is not itself a credential, and no secret value is representable as a setting.
+        "secrets_key_file",
+        "secrets_key_version",
+        "account_oauth_providers",
     }
     for field in type(settings).model_fields:
         assert "anthropic" not in field and "openai" not in field and "gemini" not in field

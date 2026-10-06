@@ -12,6 +12,7 @@ from nervos_core.domain.jobs import RunEventType
 ROOT = Path(__file__).resolve().parents[4]
 CORE_SOURCE = ROOT / "packages" / "nervos-core" / "src" / "nervos_core"
 CORE_APPLICATION = CORE_SOURCE / "application"
+LANGGRAPH_SOURCE = ROOT / "packages" / "nervos-langgraph" / "src" / "nervos_langgraph"
 CORE_INFRASTRUCTURE = CORE_SOURCE / "infrastructure" / "database"
 MODELS_SOURCE = ROOT / "packages" / "nervos-models" / "src" / "nervos_models"
 API_SOURCE = ROOT / "apps" / "api" / "src" / "nervos_api"
@@ -254,7 +255,7 @@ def test_g2_has_no_network_resolver() -> None:
 def test_g3_adds_the_approved_package_registry_tables() -> None:
     """G3 owns the package registry; earlier migrations and unrelated tables remain stable."""
     migrations = sorted((ROOT / "apps" / "api" / "alembic" / "versions").glob("0*.py"))
-    assert migrations[-1].stem == "0014_stage_i4_marketplace_install_requests"
+    assert migrations[-1].stem == "0024_durable_workflows"
 
     tables = set(re.findall(r'__tablename__ = "([a-z_]+)"', ORM_MODELS.read_text(encoding="utf-8")))
     assert tables == EXPECTED_TABLES | {
@@ -263,6 +264,26 @@ def test_g3_adds_the_approved_package_registry_tables() -> None:
         "installed_package_files",
         "installed_package_dependencies",
         "agent_instance_package_bindings",
+        "agent_memory_policies",
+        "agent_tool_bindings",
+        "run_integrations",
+        "memory_suggestions",
+        # Stage H adds the security tables. H4 deliberately adds none: its limits are
+        # code-level policy, exactly as C6's concurrency caps are, and the evidence is the
+        # operating-system containment boundary rather than a row.
+        "secrets",
+        "secret_keys",
+        "account_connections",
+        "account_oauth_requests",
+        "action_approvals",
+        "publisher_trust",
+        # Durable autonomous workflows (ADR 0039). Five new tables; not one earlier table
+        # is altered, which is why every guard above still holds unchanged.
+        "workflow_executions",
+        "workflow_steps",
+        "workflow_checkpoints",
+        "workflow_signals",
+        "workflow_decisions",
     }
 
 
@@ -444,6 +465,21 @@ def test_b3_route_surface_and_migration_freeze() -> None:
         "0012_stage_f4_conversation_lifecycle.py",
         "0013_stage_g3_package_registry.py",
         "0014_stage_i4_marketplace_install_requests.py",
+        "0015_runtime_integration.py",
+        # Stage H ships five migrations: the encrypted secret store, account connections,
+        # durable approvals, a sandbox adoption marker, and local publisher trust.
+        "0016_stage_h1_secret_manager.py",
+        "0017_stage_h2_account_connections.py",
+        "0018_stage_h3_action_approvals.py",
+        "0019_stage_h4_sandbox_policy.py",
+        "0020_stage_h5_publisher_trust.py",
+        # Stage-H repair adds the safe approval timeline vocabulary, owner-bound OAuth
+        # state, and the Worker-observed sandbox capability projection.
+        "0021_stage_h_approval_events.py",
+        "0022_stage_h_account_oauth.py",
+        "0023_worker_sandbox_capability.py",
+        # Durable autonomous workflows add five new tables and alter nothing above.
+        "0024_durable_workflows.py",
     ]
     # The Worker refuses to run against a schema it does not expect, so the pinned revision and
     # the migration head are one fact in two places. Letting them drift bricks the supervised
@@ -479,6 +515,45 @@ def test_stage_g_governance_freeze_files_exist() -> None:
     assert git_blob_hash(stage_f_plan) == "62cfc0a8039e233c82e2a30ff3fd59495e99395d"
     for adr in ("0024", "0025", "0026"):
         assert list((ROOT / "docs" / "adr").glob(f"{adr}-*.md")), f"ADR {adr} missing"
+
+
+def test_stage_h_governance_files_exist() -> None:
+    """Stage H has a canonical contract and an explicit architecture-change protocol.
+
+    The secret manager, the approval gate, the containment policy, and the revocation wall are
+    architecture decisions, not implementation detail, so their presence is a boundary fact in
+    the same way the migration chain is.
+    """
+    stage_h_plan = ROOT / "docs" / "stage-h" / "README.md"
+    assert stage_h_plan.is_file()
+    assert "STAGE H ARCHITECTURE CHANGE REQUEST" in stage_h_plan.read_text(encoding="utf-8")
+    for adr in ("0032", "0033", "0034", "0035", "0036"):
+        assert list((ROOT / "docs" / "adr").glob(f"{adr}-*.md")), f"ADR {adr} missing"
+
+
+def test_stage_h_route_surface_is_named_and_execution_free() -> None:
+    """The Stage-H control plane is configuration and decisions only.
+
+    It adds three routers -- the secret store, and one router for the H2/H3/H5 owner-scoped
+    resources -- and none of them may name an execution-plane subsystem. Every new route stays
+    behind the existing B3 surface checks above, which this test extends rather than relaxes.
+    """
+    router_text = (API_SOURCE / "api" / "router.py").read_text(encoding="utf-8").lower()
+    for subsystem in FORBIDDEN_SUBSYSTEMS:
+        if subsystem in D5_AUTHORIZED_ROUTER_SUBSYSTEMS:
+            continue
+        assert subsystem not in router_text, subsystem
+    assert "secrets_router" in router_text
+    assert "security_router" in router_text
+
+    stage_h_routes = {
+        "secrets.py": API_ROUTES / "secrets.py",
+        "security.py": API_ROUTES / "security.py",
+    }
+    for name, path in stage_h_routes.items():
+        text = path.read_text(encoding="utf-8")
+        assert "nervos_core.infrastructure" not in text, name
+        assert "nervos_worker" not in text, name
 
 
 def test_stage_i_governance_freeze_files_exist() -> None:
@@ -522,6 +597,26 @@ def test_the_persisted_schema_is_exactly_the_reviewed_table_set() -> None:
         "installed_package_files",
         "installed_package_dependencies",
         "agent_instance_package_bindings",
+        "agent_memory_policies",
+        "agent_tool_bindings",
+        "run_integrations",
+        "memory_suggestions",
+        # Stage H adds the security tables. H4 deliberately adds none: its limits are
+        # code-level policy, exactly as C6's concurrency caps are, and the evidence is the
+        # operating-system containment boundary rather than a row.
+        "secrets",
+        "secret_keys",
+        "account_connections",
+        "account_oauth_requests",
+        "action_approvals",
+        "publisher_trust",
+        # Durable autonomous workflows (ADR 0039). Five new tables; not one earlier table
+        # is altered, which is why every guard above still holds unchanged.
+        "workflow_executions",
+        "workflow_steps",
+        "workflow_checkpoints",
+        "workflow_signals",
+        "workflow_decisions",
     }
     # The one table C6 adds is scheduling metadata, so it must stay incapable of becoming a
     # second queue: no cached count can drift, and it holds no execution authority.
@@ -903,10 +998,18 @@ def test_c7_adds_only_the_reviewed_observability_surface() -> None:
         # G4 is authorized the packages resource family.
         "packages.py",
         "runs.py",
+        "runtime_integration.py",
+        # Stage H adds two route modules: the secret store, and one module holding the
+        # H2/H3/H5 owner-scoped resources. Neither introduces a new subsystem word.
+        "secrets.py",
+        "security.py",
         "setup.py",
         # E4 is authorized exactly one new control-plane resource family: triggers.
         # F1 adds the conversation resource family.
         "triggers.py",
+        # W5b is authorized the workflows resource family. Control plane only: these routes
+        # never advance a workflow, and the Scheduler's tick remains the only thing that does.
+        "workflows.py",
     ]
     runs_route = (API_ROUTES / "runs.py").read_text(encoding="utf-8")
     # Exactly one new route, and it is a read.
@@ -1172,15 +1275,21 @@ def test_the_tool_event_vocabulary_matches_the_frozen_schema() -> None:
     not represent, so reading one back raised. A test that compares them is what keeps that from
     happening again, and it is also why `tool.cancelled` can never be added by accident -- it is
     absent from the migration, so an enum member for it would fail here.
+
+    The vocabulary now spans two migrations: `0007` declared the six Stage-D tool strings and
+    Stage-H repair's `0021` re-created the CHECK constraint with the two approval events.
     """
-    migration = (
-        ROOT / "apps" / "api" / "alembic" / "versions" / "0007_stage_d1_tool_capability_audit.py"
-    )
-    # The migration is the authority; the enum must be a subset of the strings it accepts.
+    versions = ROOT / "apps" / "api" / "alembic" / "versions"
+    migration = versions / "0007_stage_d1_tool_capability_audit.py"
+    approval_migration = versions / "0021_stage_h_approval_events.py"
+    # The migrations are the authority; the enum must be a subset of the strings they accept.
+    # Quoting style differs between declared SQL text and Python tuples, so the comparison is
+    # made against unquoted literal values in the union of the two migrations.
     text = migration.read_text(encoding="utf-8")
+    declared = text + "\n" + approval_migration.read_text(encoding="utf-8")
     members = {member.value for member in RunEventType}
     for value in members:
-        assert f"'{value}'" in text, value
+        assert value in declared, value
     tool_types = {value for value in members if value.startswith("tool.")}
     assert tool_types == {
         "tool.requested",
@@ -1189,6 +1298,10 @@ def test_the_tool_event_vocabulary_matches_the_frozen_schema() -> None:
         "tool.failed",
         "tool.denied",
         "tool.ambiguous",
+        # Stage-H repair added exactly two credential-free approval timeline events
+        # through `0021`; the CHECK vocabulary above is the authority they must match.
+        "tool.approval_requested",
+        "tool.approval_decided",
     }
     # `tool.cancelled` is deliberately absent from the *accepted vocabulary*. The migration's
     # prose explains why it is absent, so the assertion is made against the CHECK constant itself
@@ -1276,6 +1389,12 @@ def test_no_tool_queue_continuation_or_resume_primitive_exists() -> None:
     a new durable execution primitive, and ADR 0017's whole design is that one Job and one Attempt
     carry the entire Think -> Act -> Observe loop. Stage F owns conversation resume; D6 owns none
     of it.
+
+    ADR 0039 later authorized exactly **one** checkpoint primitive, and it lives in the
+    workflow domain rather than in the tool loop. That is a narrow, named exception, so the
+    scan below keeps its full strength over every other core module and is narrowed only for
+    the three workflow modules the milestone introduced. The tool layer itself stays under the
+    original, unweakened ban.
     """
     forbidden = (
         "ToolJob",
@@ -1288,10 +1407,115 @@ def test_no_tool_queue_continuation_or_resume_primitive_exists() -> None:
         "resume_from",
         "resume_attempt",
     )
+    workflow_checkpoint_scope = {
+        CORE_SOURCE / "domain" / "workflows.py",
+        CORE_APPLICATION / "workflows.py",
+        CORE_SOURCE / "infrastructure" / "database" / "workflows.py",
+        CORE_SOURCE / "infrastructure" / "database" / "models.py",
+        # Read-only owner projection. It renders a checkpoint's shape for the dashboard and
+        # holds no checkpointer, resume primitive, or queue of its own.
+        CORE_APPLICATION / "workflow_views.py",
+    }
     for path in python_files(CORE_SOURCE):
         text = path.read_text(encoding="utf-8")
-        for name in forbidden:
+        names = forbidden
+        if path in workflow_checkpoint_scope:
+            # The workflow foundation owns checkpoint *values*; it owns no checkpointer, no
+            # resume primitive and no queue, so only that one word is permitted in the two
+            # files that define it.
+            names = tuple(name for name in forbidden if name != "checkpoint")
+        for name in names:
             assert name not in text, (path.name, name)
+
+    # The exception is scoped, not general: the tool loop and the mediator still cannot hold
+    # checkpoint or resume machinery at all, because a step's checkpoint is committed by the
+    # Worker finalization boundary and by nothing in the tool path.
+    for name in ("tool_loop.py", "tool_invocation_mediator.py", "tool_invocations.py"):
+        text = (CORE_APPLICATION / name).read_text(encoding="utf-8")
+        for term in ("checkpoint", "checkpointer", "resume_from", "resume_attempt"):
+            assert term not in text, (name, term)
+
+
+def test_workflows_add_no_second_queue_or_lease_engine() -> None:
+    """The workflow foundation reuses the one Job/Attempt lease; it does not add another.
+
+    This is the guard that would catch the specific way ADR 0039 could have been violated: a
+    workflow owning its own lease, worker slot, or queue would strand an idle application
+    holding execution capacity, which is the exact property the milestone exists to remove.
+    """
+    foundation = (
+        CORE_SOURCE / "domain" / "workflows.py",
+        CORE_APPLICATION / "workflows.py",
+        CORE_SOURCE / "infrastructure" / "database" / "workflows.py",
+    )
+    for path in foundation:
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for forbidden in (
+            "WorkflowJob",
+            "WorkflowQueue",
+            "WorkflowWorker",
+            "WorkflowAttempt",
+            "claim_token",
+            "lease_expires_at",
+            "LeaseReclaimer",
+            "RunExecutor",
+            "def claim_next",
+        ):
+            assert forbidden not in text, (path.name, forbidden)
+
+
+def test_the_langgraph_adapter_owns_no_durable_state_and_no_model_client() -> None:
+    """The qualified framework adapter may not become a second store or a credential path.
+
+    Two failures this guard exists to catch, both of which would look like working code:
+
+    * A LangGraph **checkpointer** would make a second, unfenced source of truth for a
+      workflow whose checkpoint is already committed in the same transaction as its Run.
+    * A LangChain **model client** (``ChatOpenAI`` and friends) would reach a provider with
+      the package's own HTTP stack, bypassing the permission engine, the invocation audit,
+      and the credential broker that every NervOS model call goes through.
+
+    The adapter is also the one place framework-native serialization could creep back in, so
+    deserializing a framework blob is refused by the same rule.
+    """
+    adapter = LANGGRAPH_SOURCE / "adapter.py"
+    text = adapter.read_text(encoding="utf-8")
+    # These words appear in prose explaining why they are *not* used, so the guard matches the
+    # code forms rather than the vocabulary.
+    for forbidden in (
+        "checkpointer=",
+        "InMemorySaver",
+        "MemorySaver",
+        "SqliteSaver",
+        "PostgresSaver",
+        "BaseCheckpointSaver",
+        "pickle",
+    ):
+        assert forbidden not in text, ("nervos_langgraph/adapter.py", forbidden)
+    for forbidden in (
+        "langchain_openai",
+        "langchain_anthropic",
+        "langchain_google_genai",
+        "ChatOpenAI",
+        "ChatAnthropic",
+    ):
+        assert forbidden not in text, ("nervos_langgraph/adapter.py", forbidden)
+
+
+def test_the_langgraph_adapter_depends_only_on_the_public_sdk() -> None:
+    """The adapter may reach the SDK, and nothing inside NervOS.
+
+    A framework adapter that imported ``nervos_core`` would be able to bypass the host
+    boundary it is supposed to sit behind -- reading persistence directly, for instance --
+    which is exactly the authority the host/Worker split withholds from packages.
+    """
+    for path in sorted(LANGGRAPH_SOURCE.glob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        assert "nervos_core" not in text, (path.name, "nervos_core")
+        assert "nervos_api" not in text, (path.name, "nervos_api")
+        assert "nervos_worker" not in text, (path.name, "nervos_worker")
 
 
 def test_the_public_run_event_model_carries_only_safe_fields() -> None:
@@ -1355,11 +1579,17 @@ def test_the_frontend_gained_only_event_vocabulary() -> None:
         assert forbidden not in timeline, forbidden
 
 
-def test_the_migration_head_is_exactly_0014_stage_i4_marketplace_install_requests() -> None:
-    """G3 extends the frozen F4 head with the approved package registry migration."""
+def test_the_migration_head_is_exactly_the_durable_workflow_revision() -> None:
+    """The head is the durable-workflow schema, layered additively on the Stage-H repair.
+
+    `0024` adds five workflow tables and alters nothing that came before it, so the Stage-H
+    repair's own contracts -- approval events, account OAuth, the observed Worker sandbox
+    capability projection -- remain exactly as accepted.
+    """
     versions = ROOT / "apps" / "api" / "alembic" / "versions"
     discovered = sorted(path.name for path in versions.glob("*.py"))
-    assert discovered[-1] == "0014_stage_i4_marketplace_install_requests.py"
+    assert discovered[-1] == "0024_durable_workflows.py"
+    assert discovered[-2] == "0023_worker_sandbox_capability.py"
 
 
 def test_nervos_mcp_depends_only_on_public_sdk_surfaces() -> None:
@@ -1434,7 +1664,11 @@ def test_only_a_composition_root_may_name_the_concrete_mcp_implementation() -> N
     assert namers <= {
         API_COMPOSITION_ROOT.relative_to(ROOT).as_posix(),
         "apps/worker/src/nervos_worker/app.py",
+        # The Worker-side MCP composition module, and the account-action dispatcher that
+        # attaches broker credentials to MCP transports. Both are Worker composition seams
+        # beside app.py; no route and no application module may name the SDK.
         "apps/worker/src/nervos_worker/mcp.py",
+        "apps/worker/src/nervos_worker/account_actions.py",
     }, namers
 
 
@@ -1472,6 +1706,10 @@ def test_there_is_exactly_one_run_and_job_insertion_implementation() -> None:
     Manual submission and trigger materialization are two *callers* of one implementation. A second
     implementation would fork the ownership check, the admission checks and the grant cutoff, which
     is the failure ADR 0020 exists to prevent.
+
+    ADR 0039 added a fifth *caller* -- workflow continuation -- and deliberately no sixth
+    implementation. A workflow step is admitted, fenced and cut off exactly like any other Run,
+    which is the whole point of routing it through this primitive rather than around it.
     """
     source = (CORE_INFRASTRUCTURE / "jobs.py").read_text(encoding="utf-8")
     assert source.count("def insert_run_and_job_on_connection(") == 1
@@ -1483,7 +1721,13 @@ def test_there_is_exactly_one_run_and_job_insertion_implementation() -> None:
         for path in python_files(CORE_INFRASTRUCTURE)
         if "insert_run_and_job_on_connection(" in path.read_text(encoding="utf-8")
     }
-    assert callers == {"jobs.py", "conversations.py", "triggers.py"}, callers
+    assert callers == {
+        "jobs.py",
+        "conversations.py",
+        "triggers.py",
+        "runtime_integration.py",
+        "workflows.py",
+    }, callers
 
 
 def test_trigger_provenance_is_never_read_to_decide_execution() -> None:
@@ -1629,9 +1873,7 @@ def test_the_scheduler_declares_its_own_schema_expectation() -> None:
     scheduler_app = (ROOT / "apps" / "scheduler" / "src" / "nervos_scheduler" / "app.py").read_text(
         encoding="utf-8"
     )
-    assert (
-        'EXPECTED_SCHEMA_REVISION = "0014_stage_i4_marketplace_install_requests"' in scheduler_app
-    )
+    assert 'EXPECTED_SCHEMA_REVISION = "0024_durable_workflows"' in scheduler_app
     assert "nervos_worker" not in scheduler_app
     main = (ROOT / "apps" / "scheduler" / "src" / "nervos_scheduler" / "main.py").read_text(
         encoding="utf-8"
@@ -1982,8 +2224,10 @@ def test_no_run_event_type_was_added_for_ingress() -> None:
     """
     migrations = (ROOT / "apps" / "api" / "alembic" / "versions").glob("*.py")
     declared = "\n".join(path.read_text(encoding="utf-8") for path in migrations)
+    # Declared SQL text quotes values with single quotes while Python tuples use double
+    # quotes, so the comparison is made against the literal value rather than a quoting style.
     for member in RunEventType:
-        assert f"'{member.value}'" in declared, member.value
+        assert member.value in declared, member.value
     assert not any(
         member.value.startswith(("webhook", "trigger", "schedule")) for member in RunEventType
     )

@@ -6,12 +6,26 @@ G0–G4 define and implement the local `.nervos` package format, exact versioned
 AgentInstances, and explicit lifecycle surfaces. **G5 is complete and externally accepted, pending
 merge; Stage G is complete and externally accepted, pending merge.** Bootstrap prepares real local
 SDK/package-host wheels, package ToolPort calls use the shared Stage-D mediator, and real-host plus browser acceptance proves
-the install-to-Run path. Stage H has not started and is next.
-The frozen contract is in `docs/stage-g/README.md` and accepted ADRs 0024–0026.
+the install-to-Run path. Stage H adds per-action approval, encrypted secret management, account
+credential brokering, and persistent publisher trust. Package execution is currently refused on
+every platform until a combined filesystem/network isolation launcher is qualified.
+The frozen contract is in `docs/stage-g/README.md` and accepted ADRs 0024–0026; Stage H's is in
+`docs/stage-h/README.md` and ADRs 0032–0036.
 
-Stage G is a dependency-isolation and process-boundary design. It is **not a hostile-code sandbox**.
-Stage H owns OS-level containment, filesystem/network restrictions, resource controls, encrypted
-secret management, interactive approvals, and persistent publisher trust.
+Stage G remains a dependency-isolation and process-boundary design on its own. Stage H does not treat
+Windows Job Objects or POSIX rlimits as sufficient package isolation: they are resource primitives,
+not filesystem/network isolation. Containment is resolved *before* the spawn, and a platform
+that cannot establish it — macOS — makes the Worker **refuse to execute** the package with an
+explicit error rather than falling back to running it unsandboxed. Package code still never
+receives credentials: the broker resolves them server-side at dispatch time.
+
+## Publisher trust
+
+Stage H (ADR 0036) adds a persistent local publisher-trust store. A signature proves integrity, not
+trust: installing a package from a publisher requires an explicit local trust decision, and a
+**revoked** publisher blocks install, rebind, and any new execution. Already-installed packages,
+already-queued Runs, and historical Run records keep their defined behavior — revocation is a
+forward-looking gate, not a retroactive rewrite.
 
 ## Package artifact and identity
 

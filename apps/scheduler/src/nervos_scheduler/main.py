@@ -100,7 +100,7 @@ def run_scheduler(settings: SchedulerSettings, *, once: bool = False) -> int:
     try:
         revision = require_schema_revision(composition.engine, EXPECTED_SCHEMA_REVISION)
         logger.info(
-            "scheduler_started schema_revision=%s poll_interval_seconds=%s",
+            "scheduler_started schema_revision=%s poll_interval_seconds=%s workflows=enabled",
             revision,
             SCHEDULER_POLL_INTERVAL_SECONDS,
         )
@@ -128,7 +128,12 @@ def run_scheduler(settings: SchedulerSettings, *, once: bool = False) -> int:
 
 
 def run_tick(composition: SchedulerComposition) -> None:
-    """Run one tick and log its counters. This is the only line the loop adds to the service."""
+    """Run one tick and log its counters. This is the only line the loop adds to the service.
+
+    Two independent scans share the tick because they are independent obligations: a due cron
+    schedule and a due workflow continuation. Neither can satisfy the other, and both stay
+    bounded, so one being empty never starves the other.
+    """
     tick = composition.service.tick(utc_now())
     logger.info(
         "scheduler_tick examined=%s materialized=%s skipped=%s duplicated=%s stale=%s "
@@ -141,6 +146,18 @@ def run_tick(composition: SchedulerComposition) -> None:
         tick.deferred_capacity,
         tick.deferred_contention,
     )
+    workflows = composition.workflows.tick()
+    if workflows.dispatched or workflows.failed or workflows.needs_review:
+        logger.info(
+            "scheduler_workflow_tick examined=%s dispatched=%s deferred_capacity=%s "
+            "deferred_config=%s needs_review=%s failed=%s",
+            workflows.examined,
+            workflows.dispatched,
+            workflows.deferred_capacity,
+            workflows.deferred_config,
+            workflows.needs_review,
+            workflows.failed,
+        )
 
 
 def main(argv: Sequence[str] | None = None) -> int:

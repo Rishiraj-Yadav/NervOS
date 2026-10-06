@@ -363,3 +363,53 @@ def test_builtin_tool_ids_use_the_injected_clock_without_calling_it() -> None:
 
     assert builtin_tool_ids(clock=clock) == ("current_time", "calculate", "json_transform")
     assert calls == 0
+
+
+def test_runtime_integration_manifest_extension_accepts_frozen_arrays_and_rejects_bad_aliases() -> (
+    None
+):
+    import hashlib
+
+    digest = hashlib.sha256(b"{} ").hexdigest()
+    extension = (
+        "x-nervos-runtime-integration:\n"
+        "  version: 1\n"
+        "  context: structured-v1\n"
+        "  mcp_tools:\n"
+        "    - alias: research.search\n"
+        "      upstream_name: search\n"
+        f"      input_schema_sha256: {digest}\n"
+        "      required: true\n"
+    )
+    manifest = _parse(VALID_MANIFEST + extension)
+    from nervos_core.application.runtime_integration import package_integration
+
+    integration = package_integration(manifest)
+    assert integration.structured_context is True
+    assert integration.tools[0].alias == "research.search"
+    # An extension that says nothing about workflows must not demand the capability, or
+    # every pre-existing package would suddenly require a newer host.
+    assert integration.workflow is False
+    with pytest.raises(InvalidPackageManifest):
+        _parse(VALID_MANIFEST + extension.replace("research.search", "Bad Alias"))
+
+
+def test_a_package_may_declare_the_workflow_host_feature_by_exact_protocol_name() -> None:
+    from nervos_core.application.runtime_integration import package_integration
+
+    manifest = _parse(
+        VALID_MANIFEST + "x-nervos-runtime-integration:\n  version: 1\n  workflow: workflow-v1\n"
+    )
+    assert package_integration(manifest).workflow is True
+
+
+def test_workflow_declaration_rejects_a_boolean_or_an_unknown_protocol() -> None:
+    # A bare `true` would silently match whatever protocol the host happens to speak, which
+    # is exactly the coupling this declaration exists to avoid. The refusal lands at *parse*
+    # time, so such a package is never installable in the first place.
+    for declared in ("true", "workflow-v2", "'yes'"):
+        with pytest.raises(InvalidPackageManifest):
+            _parse(
+                VALID_MANIFEST
+                + f"x-nervos-runtime-integration:\n  version: 1\n  workflow: {declared}\n"
+            )

@@ -10,6 +10,21 @@ HOST_PROTOCOL_VERSION = "1"
 MAX_FRAME_BYTES = 1024 * 1024
 MAX_HEADER_BYTES = 8
 
+# ADR 0039: the additive package-host feature that carries durable workflow checkpoints.
+# A package that declares it in its manifest is refused against a host that does not
+# advertise it here, before ``initialize`` — so package code never runs on an old host.
+WORKFLOW_HOST_CAPABILITY = "workflow-v1"
+RUNTIME_INTEGRATION_HOST_CAPABILITY = "runtime-integration-v1"
+HOST_CAPABILITIES: tuple[str, ...] = (
+    RUNTIME_INTEGRATION_HOST_CAPABILITY,
+    WORKFLOW_HOST_CAPABILITY,
+)
+
+# Stricter than MAX_FRAME_BYTES on purpose: a checkpoint must not be able to spend the whole
+# frame budget, so both the host and the Worker enforce this before writing a frame.
+CHECKPOINT_MAX_BYTES = 64 * 1024
+SUMMARY_MAX_CHARS = 512
+
 MESSAGE_TYPES: frozenset[str] = frozenset(
     {
         "host_hello",
@@ -44,9 +59,16 @@ def canonical_payload(message: Mapping[str, object]) -> bytes:
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,
+            default=_mapping_json,
         ).encode("utf-8")
     except (TypeError, ValueError) as error:
         raise HostProtocolError("message payload is not canonical JSON data") from error
+
+
+def _mapping_json(value: object) -> dict[str, object]:
+    if isinstance(value, Mapping):
+        return dict(cast(Mapping[str, object], value))
+    raise TypeError("protocol payload is not JSON data")
 
 
 def write_frame(stream: BinaryIO, message: Mapping[str, object]) -> None:

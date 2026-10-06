@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Protocol, TypeVar
+from typing import Protocol, TypeVar, cast
 
 from nervos_core.application.clock import Clock, require_utc
 from nervos_core.application.errors import PersistenceContention, PersistenceUnavailable
@@ -361,6 +361,10 @@ class JobExecutionService:
         # Resolve conversational link & snapshot requirement
         link = await self._offload(self._persistence.load_conversation_run_link, claim.run_id)
         snapshot: ContextSnapshotData | None = None
+        if link is None:
+            snapshot = await self._offload(
+                self._persistence.load_run_context_snapshot, claim.run_id
+            )
         if link is not None and link[5] == "f2_context_snapshot":
             snapshot = await self._offload(
                 self._persistence.load_run_context_snapshot, claim.run_id
@@ -628,7 +632,20 @@ class JobExecutionService:
 
     def _terminalize(self, claim: ClaimedAttempt, outcome: ExecutionOutcome) -> bool:
         assert outcome.status == "succeeded" and outcome.output_text is not None
-        return self._persistence.succeed(
+        succeed = self._persistence.succeed
+        if outcome.memory_proposals or outcome.workflow_step is not None:
+            succeed = cast(Callable[..., bool], succeed)
+            return succeed(
+                claim,
+                output_text=outcome.output_text,
+                finish_reason=outcome.finish_reason,
+                usage=outcome.usage,
+                elapsed_ms=outcome.elapsed_ms,
+                now=require_utc(self._clock()),
+                memory_proposals=outcome.memory_proposals,
+                workflow_step=outcome.workflow_step,
+            )
+        return succeed(
             claim,
             output_text=outcome.output_text,
             finish_reason=outcome.finish_reason,

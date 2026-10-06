@@ -5,11 +5,21 @@ from __future__ import annotations
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from nervos_core.application.account_connections import (
+    ConnectionNotFound,
+    InvalidConnection,
+)
+from nervos_core.application.account_oauth import AccountAuthorizationUnavailable
 from nervos_core.application.agent_definitions import UnknownAgentDefinition
 from nervos_core.application.agents import (
     AgentInstanceNotFound,
     AgentInstanceUnavailable,
     RunNotFound,
+)
+from nervos_core.application.approvals import (
+    ApprovalConflict,
+    ApprovalNotFound,
+    InvalidApproval,
 )
 from nervos_core.application.authentication import (
     AuthenticationRequired,
@@ -46,7 +56,16 @@ from nervos_core.application.package_installation import (
     PackageAuthorizationMismatch,
     PackageHealthCheckFailed,
 )
+from nervos_core.application.publisher_trust import InvalidTrustState, PublisherRevoked
 from nervos_core.application.run_cancellation import RunNotCancellable
+from nervos_core.application.runtime_integration import IntegrationConflict, IntegrationNotFound
+from nervos_core.application.sandbox import ContainmentUnavailable
+from nervos_core.application.secrets import (
+    SecretAlreadyExists,
+    SecretNotFound,
+    SecretReferenced,
+    SecretStoreUnavailable,
+)
 from nervos_core.application.tool_permissions import McpConnectionNotFound
 from nervos_core.application.triggers import (
     TriggerConfigConflict,
@@ -55,6 +74,7 @@ from nervos_core.application.triggers import (
     TriggerNotFound,
 )
 from nervos_core.application.trusted_chat import UnknownAgentHandler
+from nervos_core.application.workflows import WorkflowCapacityExceeded
 from nervos_core.domain.agents import InvalidAgentDefinitionId, InvalidAgentInstance
 from nervos_core.domain.conversations import InvalidConversation
 from nervos_core.domain.memory import (
@@ -74,7 +94,14 @@ from nervos_core.domain.package_query import (
 )
 from nervos_core.domain.runs import InvalidRun
 from nervos_core.domain.scheduling import ScheduleCalculationError
+from nervos_core.domain.secrets import InvalidSecret
 from nervos_core.domain.triggers import InvalidTrigger
+from nervos_core.domain.workflows import (
+    InvalidWorkflow,
+    WorkflowConflict,
+    WorkflowNotFound,
+    WorkflowTransitionError,
+)
 from nervos_core.infrastructure.database.packages import (
     InstalledPackageNotFound,
     PackageIdentityConflict,
@@ -137,6 +164,56 @@ _ERROR_MAP: dict[type[Exception], tuple[int, str, str]] = {
 # registered for every key here. Static NervOS-owned messages only: no provider text, body,
 # header, credential, or stack trace is ever propagated.
 AGENT_ERROR_MAP: dict[type[Exception], tuple[int, str, str]] = {
+    AccountAuthorizationUnavailable: (
+        409,
+        "account_authorization_unavailable",
+        "Account authorization could not be completed.",
+    ),
+    # Stage H. The secret store is fail-closed: an unusable master key is a 503, never a
+    # silent plaintext fallback, and no message below ever names a secret, a key, or a
+    # credential.
+    SecretStoreUnavailable: (
+        503,
+        "secret_store_unavailable",
+        "The secret store is unavailable; no secret operation was performed.",
+    ),
+    SecretNotFound: (404, "secret_not_found", "The secret was not found."),
+    InvalidSecret: (422, "invalid_secret", "The secret request is invalid."),
+    SecretAlreadyExists: (409, "secret_already_exists", "A secret with that name already exists."),
+    SecretReferenced: (
+        409,
+        "secret_referenced",
+        "An account connection still references this secret.",
+    ),
+    ConnectionNotFound: (
+        404,
+        "account_connection_not_found",
+        "The account connection was not found.",
+    ),
+    InvalidConnection: (
+        422,
+        "invalid_account_connection",
+        "The account connection configuration is invalid.",
+    ),
+    ApprovalNotFound: (404, "action_approval_not_found", "The action approval was not found."),
+    ApprovalConflict: (
+        409,
+        "action_approval_conflict",
+        "The action approval is no longer awaiting that decision.",
+    ),
+    InvalidApproval: (422, "invalid_action_approval", "The action approval request is invalid."),
+    PublisherRevoked: (
+        409,
+        "publisher_revoked",
+        "This package's publisher has been revoked locally.",
+    ),
+    InvalidTrustState: (422, "invalid_trust_state", "The publisher trust state is invalid."),
+    IntegrationNotFound: (404, "integration_not_found", "The requested resource was not found."),
+    IntegrationConflict: (
+        409,
+        "integration_conflict",
+        "The configuration changed or does not match; refresh before continuing.",
+    ),
     MarketplaceRequestNotFound: (
         404,
         "marketplace_request_not_found",
@@ -369,6 +446,34 @@ AGENT_ERROR_MAP: dict[type[Exception], tuple[int, str, str]] = {
         "package_health_check_failed",
         "The package activation health check failed.",
     ),
+    ContainmentUnavailable: (
+        503,
+        ContainmentUnavailable.CODE,
+        ContainmentUnavailable.MESSAGE,
+    ),
+    # W5b durable workflows. `WorkflowNotFound` covers both "no such workflow" and "belongs to
+    # another owner", and returns one identical answer for both, so the response cannot be used
+    # to discover another owner's workflow id. `WorkflowTransitionError` is a subclass of it and
+    # is registered separately: the workflow *does* exist and is owned, so only the requested
+    # transition is illegal, and telling those two apart leaks nothing an owner did not already
+    # know about their own workflow.
+    WorkflowNotFound: (404, "workflow_not_found", "The workflow was not found."),
+    WorkflowTransitionError: (
+        409,
+        "workflow_transition_conflict",
+        "The workflow is no longer in a state that allows this action.",
+    ),
+    WorkflowConflict: (
+        409,
+        "workflow_conflict",
+        "The workflow changed or does not match; refresh before continuing.",
+    ),
+    WorkflowCapacityExceeded: (
+        409,
+        "workflow_capacity_exceeded",
+        "Too many workflows are already active for this owner.",
+    ),
+    InvalidWorkflow: (422, "invalid_workflow", "The workflow request is invalid."),
 }
 
 

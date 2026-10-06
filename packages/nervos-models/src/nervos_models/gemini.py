@@ -78,6 +78,7 @@ class GeminiModelCompletion:
         config = types.GenerateContentConfig(
             system_instruction=request.system_instruction,
             max_output_tokens=request.max_output_tokens,
+            temperature=request.temperature,
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
             http_options=types.HttpOptions(
                 base_url=_API_BASE_URL,

@@ -82,7 +82,9 @@ export type RunEventType =
   | "tool.succeeded"
   | "tool.failed"
   | "tool.denied"
-  | "tool.ambiguous";
+  | "tool.ambiguous"
+  | "tool.approval_requested"
+  | "tool.approval_decided";
 
 /**
  * One durable Run Event.
@@ -191,6 +193,8 @@ const RUN_EVENT_TYPES: readonly RunEventType[] = [
   "tool.failed",
   "tool.denied",
   "tool.ambiguous",
+  "tool.approval_requested",
+  "tool.approval_decided",
 ];
 
 function isRecord(value: unknown): value is Record<string, unknown> {

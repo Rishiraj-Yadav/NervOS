@@ -459,6 +459,8 @@ def test_sqlalchemy_failures_are_translated_with_preserved_cause(
     run = service.submit_run(1, instance.id, "hello")
     claimed = start(execution) if operation == "transition" else None
     with factory.begin() as session:
+        session.execute(text("DROP TABLE memory_suggestions"))
+        session.execute(text("DROP TABLE run_integrations"))
         if operation in {"read", "write"}:
             session.execute(text("DROP TABLE run_events"))
             session.execute(text("DROP TABLE job_attempts"))

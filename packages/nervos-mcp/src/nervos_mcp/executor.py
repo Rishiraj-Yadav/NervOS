@@ -73,11 +73,16 @@ class McpToolExecutor:
             raise ToolExecutionFailure(ToolFailureReason.INTERNAL, error.message) from error
         # ToolOutcomeUnknown and ToolExecutionFailure from the gateway propagate unchanged: both
         # are already the provider-neutral form the loop consumes.
-        if result.is_error:
-            # The server answered, and said the call failed. That is a known outcome, not an
-            # ambiguous one -- and the server's own error text is not repeated to the model.
-            raise ToolExecutionFailure(ToolFailureReason.INTERNAL, _TOOL_FAILED_NOTE)
-        return _normalize_content(result.content, result.structured_content, descriptor)
+        return normalize_mcp_result(result, descriptor)
+
+
+def normalize_mcp_result(result: Any, descriptor: ToolDescriptor) -> ToolResult:
+    """Normalize a brokered or ordinary MCP result using the same admitted schema."""
+    if result.is_error:
+        # The server answered, and said the call failed. That is a known outcome, not an
+        # ambiguous one -- and the server's own error text is not repeated to the model.
+        raise ToolExecutionFailure(ToolFailureReason.INTERNAL, _TOOL_FAILED_NOTE)
+    return _normalize_content(result.content, result.structured_content, descriptor)
 
 
 def _normalize_content(
@@ -122,4 +127,4 @@ def _validated_structured(structured_content: Any, descriptor: ToolDescriptor) -
     return value
 
 
-__all__ = ["McpToolExecutor"]
+__all__ = ["McpToolExecutor", "normalize_mcp_result"]

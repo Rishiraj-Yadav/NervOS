@@ -23,6 +23,7 @@ from nervos_core.application.lease_reclamation import (
     WorkerSnapshot,
     WorkerState,
 )
+from nervos_core.application.sandbox import WorkerSandboxCapability
 
 logger = logging.getLogger("nervos_worker.registry")
 
@@ -47,15 +48,25 @@ class WorkerRegistry:
         worker_id: str,
         *,
         clock: Callable[[], datetime],
+        capability: WorkerSandboxCapability,
     ) -> None:
         self._persistence = persistence
         self.worker_id = worker_id
         self._clock = clock
+        self._capability = capability
 
     def register(self) -> datetime:
         """Insert this incarnation's row. A restart draws a new id and therefore a new row."""
         now = self._clock()
-        self._persistence.register_worker(worker_id=self.worker_id, now=now)
+        self._persistence.register_worker(
+            worker_id=self.worker_id, capability=self._capability, now=now
+        )
+        logger.info(
+            "worker_sandbox_capability supported=%s platform=%s backend=%s",
+            self._capability.package_execution_supported,
+            self._capability.platform,
+            self._capability.backend,
+        )
         return now
 
     def heartbeat(self) -> WorkerLiveness:

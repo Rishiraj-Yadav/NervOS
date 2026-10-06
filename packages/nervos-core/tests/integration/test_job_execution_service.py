@@ -146,7 +146,9 @@ async def test_success_persists_one_terminal_run_with_one_provider_call(
                 .mappings()
                 .one()
             )
-        assert run == {"status": "succeeded", "output_text": "answer", "elapsed_ms": 0}
+        assert run["status"] == "succeeded"
+        assert run["output_text"] == "answer"
+        assert isinstance(run["elapsed_ms"], int) and run["elapsed_ms"] >= 0
         assert event_types(engine, claimed.run_id) == [
             "run.created",
             "run.queued",

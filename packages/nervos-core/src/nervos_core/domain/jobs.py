@@ -67,6 +67,8 @@ class RunEventType(StrEnum):
     TOOL_FAILED = "tool.failed"
     TOOL_DENIED = "tool.denied"
     TOOL_AMBIGUOUS = "tool.ambiguous"
+    TOOL_APPROVAL_REQUESTED = "tool.approval_requested"
+    TOOL_APPROVAL_DECIDED = "tool.approval_decided"
 
 
 @dataclass(frozen=True, slots=True)

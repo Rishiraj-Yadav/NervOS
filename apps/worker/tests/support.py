@@ -24,6 +24,7 @@ from nervos_core.application.run_execution import (
     RunExecutor,
     ToolLoopHandler,
 )
+from nervos_core.application.sandbox import WorkerSandboxCapability
 from nervos_core.application.trusted_chat import create_builtin_handler_registry
 from nervos_core.domain.runs import STAGE_B_LIMITS, RunLimits
 from nervos_core.infrastructure.database import create_sqlite_engine
@@ -243,7 +244,14 @@ def build_execution_service(
     Run whose snapshot allows tools is routed to the loop, and one that allows none keeps the
     unchanged single-call path. Passing `None` reproduces the tool-free composition exactly.
     """
-    persistence = SqlAlchemyJobExecutionPersistence(engine, policy=policy, sleep=lambda _: None)
+    from nervos_core.infrastructure.database.workflows import SqlAlchemyWorkflowStepFinalizer
+
+    persistence = SqlAlchemyJobExecutionPersistence(
+        engine,
+        policy=policy,
+        sleep=lambda _: None,
+        workflow_steps=SqlAlchemyWorkflowStepFinalizer(),
+    )
     service = JobExecutionService(
         persistence,
         RunExecutor(
@@ -291,7 +299,9 @@ def build_worker(
     _persistence, execution = build_execution_service(
         engine, completions, now, policy, tool_loop, package_execution
     )
-    registry = WorkerRegistry(_persistence, worker_id, clock=now)
+    registry = WorkerRegistry(
+        _persistence, worker_id, clock=now, capability=WorkerSandboxCapability(False, "test", None)
+    )
     worker = Worker(
         _persistence,
         execution,

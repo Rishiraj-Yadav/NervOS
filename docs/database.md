@@ -2,7 +2,7 @@
 
 Milestone A2 uses synchronous SQLAlchemy 2 with SQLite through `sqlite+pysqlite`. Alembic is the sole schema authority; application and test code must not call `Base.metadata.create_all()`.
 
-**Note:** This document describes the foundation schema through early milestones (A2/B1). The current schema includes additional tables from Stages C, D, E, and F. See `docs/implementation-status.md` and the Alembic migrations (`apps/api/alembic/versions/`) for the complete delivered schema.
+**Note:** This document describes the foundation schema through early milestones (A2/B1). The current schema includes additional tables from Stages C, D, E, F, G, and H. See `docs/implementation-status.md` and the Alembic migrations (`apps/api/alembic/versions/`) for the complete delivered schema.
 
 ## Connection behavior
 
@@ -58,6 +58,46 @@ B1 stores one immutable request snapshot per instance: exact definition/provider
 
 Neither migration nor setup seeds an Agent Instance or Run. No Agent Definition, provider, Job, Attempt, conversation, message, secret, cost, tool, or memory table exists.
 
+## Stage H security tables
+
+Stage H adds six tables through six migrations, with `0019_stage_h4_sandbox_policy` a deliberate
+no-op marker because the H4 policy is code rather than schema.
+
+| Revision | Tables |
+|---|---|
+| `0016_stage_h1_secret_manager` | `secrets`, `secret_keys` |
+| `0017_stage_h2_account_connections` | `account_connections` |
+| `0018_stage_h3_action_approvals` | `action_approvals` |
+| `0019_stage_h4_sandbox_policy` | none (no-op marker) |
+| `0020_stage_h5_publisher_trust` | `publisher_trust` |
+| `0021_stage_h_approval_events` | no table; extends the safe Run-event vocabulary |
+| `0022_stage_h_account_oauth` | `account_oauth_requests`; refresh and revocation fields on `account_connections` |
+| `0023_worker_sandbox_capability` | no table; bounded sandbox-capability columns on `workers` |
+
+The delivered local migration head is **`0023_worker_sandbox_capability`**, and both the Worker and
+the Scheduler refuse to start on any other revision.
+
+- **`secrets`** holds encrypted `ciphertext` plus the nonce and authentication tag, never a
+  plaintext value. A check constraint enforces that revoking a secret destroys its stored value.
+- **`secret_keys`** holds the key version so rotation is auditable. The key material itself is
+  **not** in the database — it lives in the file named by `NERVOS_SECRETS_KEY_FILE`.
+- **`account_connections`** binds an owner to a provider, its scopes, expiry, refresh lease and
+  provider-revocation outcome. It never stores a token.
+- **`account_oauth_requests`** stores a one-time, owner-bound hash of OAuth `state`, an expiry and
+  a reference to the encrypted PKCE verifier. It never stores the raw state or verifier.
+- **`action_approvals`** is the durable approval record: the exact action, its redacted preview and
+  a digest binding the request, the Run/Attempt, the resolved owner, the expiry, and who approved
+  it. `tool.approval_requested` and `tool.approval_decided` record safe, linked timeline evidence.
+- **`publisher_trust`** records the local trust decision for a signer fingerprint and its
+  revocation, so a revoked publisher is blocked at install, rebind, and new execution.
+- **`workers`** additionally carries the bounded sandbox capability the Worker observed for
+  itself — `platform`, `sandbox_backend`, `package_execution_supported`. It is observed health,
+  never execution authority: the launch factory re-decides at every package start, expired
+  Workers do not count as available, and no Worker identity, hostname or path is published.
+
+The `0016`, `0017`, `0018`, `0020`, `0021`, `0022`, and `0023` migrations refuse to downgrade: Stage H's security state
+must never be silently walked backwards.
+
 ## Migrations
 
 Set `NERVOS_DATABASE_PATH` to the intended database, then run:
@@ -70,12 +110,14 @@ uv run alembic -c apps/api/alembic.ini check
 
 The development API launcher runs `upgrade head` before Uvicorn. Direct production Uvicorn startup requires an explicit successful migration first.
 
-Downgrade to `base` is supported for disposable verification databases:
+**`downgrade base` is no longer available.** Stage H's H1, H2, H3 and H5 migrations refuse to
+downgrade unconditionally: dropping the secret, connection, approval or publisher-trust tables
+would destroy security evidence irrecoverably. The refusal happens before any DDL, so a refused
+downgrade leaves the schema exactly as it was rather than half-dropped.
 
-```bash
-uv run alembic -c apps/api/alembic.ini downgrade base
-```
-
-This downgrade deletes both application tables and all their data. Never run destructive migration tests against the default or another non-disposable database.
+A database that predates Stage H can still be walked back to `0015_runtime_integration` and below,
+which is why the pre-Stage-H migration lifecycle tests start there. Anything at or above
+`0016_stage_h1_secret_manager` must be restored from a backup instead. Never run destructive
+migration tests against the default or another non-disposable database.
 
 A3 uses this existing schema for setup and authentication without a migration. Passwords are stored only as Argon2id hashes. Session tokens are generated from 32 random bytes and persisted only as 32-byte binary SHA-256 digests. Initial setup reserves SQLite's writer with `BEGIN IMMEDIATE` before checking for any user, then commits the first admin and initial session atomically. No raw token, plaintext password, setup marker, conversation session, agent, job, worker, memory, or other runtime table is added.

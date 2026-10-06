@@ -15,6 +15,7 @@ members = [
     "apps/scheduler",
     "apps/worker",
     "packages/nervos-core",
+    "packages/nervos-langgraph",
     "packages/nervos-mcp",
     "packages/nervos-models",
     "packages/nervos-sdk",
@@ -29,7 +30,13 @@ dev = [
     "pytest-cov>=6,<8",
     "ruff>=0.12,<1",
     "boto3-stubs[s3]>=1.43,<1.44",
+    # The qualified LangGraph adapter must be runnable in CI, otherwise "qualified"
+    # would be an unverifiable claim. The pin lives in the adapter's own manifest.
+    "nervos-langgraph",
 ]
+
+[tool.uv.sources]
+nervos-langgraph = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = "--strict-config --strict-markers -m 'not marketplace_integration'"
@@ -41,6 +48,7 @@ pythonpath = [
     "apps/scheduler/src",
     "apps/worker/src",
     "packages/nervos-core/src",
+    "packages/nervos-langgraph/src",
     "packages/nervos-mcp/src",
     "packages/nervos-models/src",
     "packages/nervos-sdk/src",
@@ -54,6 +62,7 @@ testpaths = [
     "apps/scheduler/tests",
     "apps/worker/tests",
     "packages/nervos-core/tests",
+    "packages/nervos-langgraph/tests",
     "packages/nervos-mcp/tests",
     "packages/nervos-models/tests",
     "packages/nervos-sdk/tests",
@@ -105,6 +114,8 @@ include = [
     "apps/worker/tests",
     "packages/nervos-core/src",
     "packages/nervos-core/tests",
+    "packages/nervos-langgraph/src",
+    "packages/nervos-langgraph/tests",
     "packages/nervos-mcp/src",
     "packages/nervos-mcp/tests",
     "packages/nervos-models/src",
@@ -127,6 +138,7 @@ extraPaths = [
     "apps/scheduler/src",
     "apps/worker/src",
     "packages/nervos-core/src",
+    "packages/nervos-langgraph/src",
     "packages/nervos-mcp/src",
     "packages/nervos-models/src",
     "packages/nervos-sdk/src",

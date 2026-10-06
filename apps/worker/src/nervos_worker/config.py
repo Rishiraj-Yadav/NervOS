@@ -40,6 +40,9 @@ class WorkerSettings(BaseSettings):
     log_level: LogLevel = "INFO"
     worker_concurrency: int = Field(default=1, ge=1, le=16)
     max_active_jobs: int = Field(default=4, ge=1, le=16)
+    max_pending_jobs: int = Field(default=1000, ge=1, le=100_000)
+    max_pending_jobs_per_agent: int = Field(default=1000, ge=1, le=100_000)
+    max_pending_jobs_per_provider: int = Field(default=1000, ge=1, le=100_000)
     # Test-only readiness marker. Production never sets it, so production never writes a file.
     worker_ready_file: Path | None = None
     # Operator-owned MCP configuration. It is read at startup and never persisted: a durable
@@ -49,6 +52,10 @@ class WorkerSettings(BaseSettings):
     mcp_allowed_origins: str = ""
     mcp_stdio_servers: str = ""
     mcp_credential_aliases: str = ""
+    secrets_key_file: Path = Path("~/.nervos/secrets.key")
+    secrets_key_version: int = Field(default=1, ge=1)
+    account_oauth_providers: str = ""
+    account_tool_bindings: str = ""
     anthropic_api_key: SecretStr | None = Field(
         default=None,
         validation_alias=ANTHROPIC_API_KEY_VARIABLE,

@@ -30,6 +30,9 @@ DEFAULT_DATABASE = (Path.home() / ".nervos" / "nervos.db").resolve(strict=False)
 
 D1_REVISION = "0007_stage_d1_tool_capability_audit"
 C6_REVISION = "0006_stage_c6_queue_partitions"
+# The newest revision that can still be downgraded past. Stage H refuses to downgrade, so a
+# test that proves an earlier migration's downgrade contract must not start at `head`.
+PRE_STAGE_H_REVISION = "0015_runtime_integration"
 
 # The exact content of every migration D1 builds on. D1 adds 0007 and rewrites nothing, and a
 # frozen-history claim is only worth making if something fails when it stops being true.
@@ -108,14 +111,21 @@ def alembic_config(database_path: Path, monkeypatch: pytest.MonkeyPatch) -> Conf
     return Config(str(ALEMBIC_INI))
 
 
-def migrate_to_head(database_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Config, Engine]:
-    """Upgrade a disposable database to the D1 head, with one owner and one Agent Instance.
+def migrate_to_d1_surface(
+    database_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Config, Engine]:
+    """Upgrade a disposable database to the newest revision D1's downgrade can still reach.
+
+    This is deliberately *not* `head`. Stage H's H1/H2/H3/H5 migrations refuse to downgrade because
+    dropping their tables would destroy security evidence irrecoverably, so a database at head can
+    no longer reach 0007. Every test in this file proves a D1 contract, and it would prove nothing
+    if Stage H's refusal answered first -- so these tests start one revision below Stage H.
 
     The owner rows are seeded because almost every Stage D row hangs off them by RESTRICT foreign
     key, and because a migration test that silently forgot them would fail for the wrong reason.
     """
     config = alembic_config(database_path, monkeypatch)
-    command.upgrade(config, "head")
+    command.upgrade(config, PRE_STAGE_H_REVISION)
     engine = create_sqlite_engine(database_path)
     seed_owner(engine)
     return config, engine
@@ -586,7 +596,7 @@ def test_the_downgrade_refuses_each_populated_stage_d_table(
 ) -> None:
     """One table at a time, so each refusal is attributable to the condition that caused it."""
     database_path = tmp_path / f"d1-refuse-{table}.db"
-    config, engine = migrate_to_head(database_path, monkeypatch)
+    config, engine = migrate_to_d1_surface(database_path, monkeypatch)
     try:
         seed_parents(engine)
         # A ToolInvocation needs a definition to point at, and the definition case is the row
@@ -609,7 +619,7 @@ def test_the_downgrade_refuses_a_stage_d_run_event(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database_path = tmp_path / "d1-refuse-event.db"
-    config, engine = migrate_to_head(database_path, monkeypatch)
+    config, engine = migrate_to_d1_surface(database_path, monkeypatch)
     try:
         seed_parents(engine)
         insert_row(
@@ -634,7 +644,7 @@ def test_the_downgrade_refuses_an_event_that_references_an_invocation(
 ) -> None:
     """Distinct from the condition above: the *pointer* is Stage D-only, the event type is not."""
     database_path = tmp_path / "d1-refuse-event-pointer.db"
-    config, engine = migrate_to_head(database_path, monkeypatch)
+    config, engine = migrate_to_d1_surface(database_path, monkeypatch)
     try:
         seed_parents(engine)
         insert_row(engine, "tool_definitions", definition_row())
@@ -662,7 +672,7 @@ def test_the_downgrade_refuses_a_non_zero_grant_cutoff(
 ) -> None:
     """The cutoff is the capability bound, so a Run holding one is not representable at 0006."""
     database_path = tmp_path / "d1-refuse-cutoff.db"
-    config, engine = migrate_to_head(database_path, monkeypatch)
+    config, engine = migrate_to_d1_surface(database_path, monkeypatch)
     try:
         seed_run(engine, tool_grant_cutoff_id=7)
     finally:
@@ -685,7 +695,7 @@ def test_the_downgrade_refuses_a_non_default_run_limit(
 ) -> None:
     """Each value is legal at 0007 and still distinguishable from the legacy default."""
     database_path = tmp_path / f"d1-refuse-{column}.db"
-    config, engine = migrate_to_head(database_path, monkeypatch)
+    config, engine = migrate_to_d1_surface(database_path, monkeypatch)
     try:
         seed_run(engine, **{column: value})
     finally:
@@ -704,7 +714,7 @@ def test_the_downgrade_refuses_populated_attempt_token_accounting(
     columns would silently lose it rather than merely relocate it.
     """
     database_path = tmp_path / f"d1-refuse-{column}.db"
-    config, engine = migrate_to_head(database_path, monkeypatch)
+    config, engine = migrate_to_d1_surface(database_path, monkeypatch)
     try:
         seed_run(engine)
         seed_job(engine)
@@ -722,7 +732,7 @@ def test_a_refused_downgrade_rewrites_nothing_at_all(
 ) -> None:
     """Several conditions at once: the refusal names them all, and the data is bit-identical."""
     database_path = tmp_path / "d1-refuse-many.db"
-    config, engine = migrate_to_head(database_path, monkeypatch)
+    config, engine = migrate_to_d1_surface(database_path, monkeypatch)
     try:
         seed_parents(engine)
         insert_row(engine, "mcp_connections", connection_row())
@@ -784,7 +794,7 @@ def test_a_compatible_downgrade_succeeds_and_restores_the_0006_shape(
 ) -> None:
     """0006 -> 0007 -> 0006 -> 0007 on a database holding only pre-D state."""
     database_path = tmp_path / "d1-clean-round-trip.db"
-    config, engine = migrate_to_head(database_path, monkeypatch)
+    config, engine = migrate_to_d1_surface(database_path, monkeypatch)
     try:
         seed_run(engine)
     finally:
@@ -828,7 +838,7 @@ def test_the_downgrade_removes_the_tool_event_vocabulary(
 ) -> None:
     """At 0006 a tool event type must be rejected again, and a Stage C type must still work."""
     database_path = tmp_path / "d1-event-vocabulary.db"
-    config, engine = migrate_to_head(database_path, monkeypatch)
+    config, engine = migrate_to_d1_surface(database_path, monkeypatch)
     try:
         seed_parents(engine)
     finally:
