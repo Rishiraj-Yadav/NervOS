@@ -15,6 +15,8 @@ access to arbitrary same-user files. Filesystem read protection on Windows is th
 from __future__ import annotations
 
 import ctypes
+import platform
+import sys
 from collections.abc import Mapping
 from ctypes import wintypes
 from pathlib import Path
@@ -97,34 +99,41 @@ class _JOBOBJECT_BASIC_UI_RESTRICTIONS(ctypes.Structure):
     _fields_ = [("UIRestrictionsClass", wintypes.DWORD)]
 
 
-_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-_handle_close = _kernel32.CloseHandle
-_handle_close.argtypes = [wintypes.HANDLE]
-_handle_close.restype = wintypes.BOOL
+# Linux pyright cannot resolve the Windows-only ``ctypes.WinDLL`` binding, so the
+# kernel32 signatures are configured only where that binding exists. The module is
+# imported exclusively on Windows — the composition root selects the bubblewrap
+# adapter on POSIX — and constructing the adapter elsewhere is refused (see
+# :meth:`WindowsJobObjectContainment.__init__`).
+_kernel32: ctypes.CDLL
 
-_kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
-_kernel32.CreateJobObjectW.restype = wintypes.HANDLE
-_kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
-_kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
-_kernel32.SetInformationJobObject.argtypes = [
-    wintypes.HANDLE,
-    wintypes.DWORD,
-    wintypes.LPVOID,
-    wintypes.DWORD,
-]
-_kernel32.SetInformationJobObject.restype = wintypes.BOOL
-_kernel32.QueryInformationJobObject.argtypes = [
-    wintypes.HANDLE,
-    wintypes.DWORD,
-    wintypes.LPVOID,
-    wintypes.DWORD,
-    ctypes.POINTER(wintypes.DWORD),
-]
-_kernel32.QueryInformationJobObject.restype = wintypes.BOOL
-_kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-_kernel32.OpenProcess.restype = wintypes.HANDLE
-_kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
-_kernel32.TerminateJobObject.restype = wintypes.BOOL
+if sys.platform == "win32":
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _kernel32.CloseHandle.restype = wintypes.BOOL
+
+    _kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    _kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    _kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    _kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    _kernel32.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    _kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    _kernel32.QueryInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _kernel32.QueryInformationJobObject.restype = wintypes.BOOL
+    _kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    _kernel32.OpenProcess.restype = wintypes.HANDLE
+    _kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    _kernel32.TerminateJobObject.restype = wintypes.BOOL
 
 _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_TERMINATE = 0x0001
@@ -146,6 +155,8 @@ class WindowsJobObjectContainment:
     """Assign one child to a frozen nested Job Object and keep the handle alive."""
 
     def __init__(self) -> None:
+        if platform.system() != "Windows":
+            raise ContainmentUnavailable("Windows Job Object containment requires Windows")
         self._handles: dict[int, ctypes.c_void_p] = {}
 
     def prepare(
@@ -179,25 +190,25 @@ class WindowsJobObjectContainment:
         if not _kernel32.SetInformationJobObject(
             job, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, ctypes.byref(limits), ctypes.sizeof(limits)
         ):
-            _handle_close(job)
+            _kernel32.CloseHandle(job)
             raise ContainmentUnavailable
 
         ui = _JOBOBJECT_BASIC_UI_RESTRICTIONS(_UILIMIT_ALL)
         if not _kernel32.SetInformationJobObject(
             job, _JOB_OBJECT_BASIC_UI_RESTRICTIONS, ctypes.byref(ui), ctypes.sizeof(ui)
         ):
-            _handle_close(job)
+            _kernel32.CloseHandle(job)
             raise ContainmentUnavailable
 
         process = _kernel32.OpenProcess(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, process_id)
         if not process:
-            _handle_close(job)
+            _kernel32.CloseHandle(job)
             raise ContainmentUnavailable
         try:
             if not _kernel32.AssignProcessToJobObject(job, process):
                 raise ContainmentUnavailable
         finally:
-            _handle_close(process)
+            _kernel32.CloseHandle(process)
 
         self._handles[process_id] = job
         return ContainmentResult(
@@ -234,10 +245,10 @@ class WindowsJobObjectContainment:
         job = self._handles.pop(process_id, None)
         if job is not None:
             _kernel32.TerminateJobObject(job, 1)
-            _handle_close(job)
+            _kernel32.CloseHandle(job)
 
     def release(self, process_id: int) -> None:
         """Close the handle without terminating: the process has already exited."""
         job = self._handles.pop(process_id, None)
         if job is not None:
-            _handle_close(job)
+            _kernel32.CloseHandle(job)

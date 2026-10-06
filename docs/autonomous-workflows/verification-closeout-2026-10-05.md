@@ -61,3 +61,17 @@ Windows refuses uncontained packages. Use supported Linux for package agents.
 Built-in agents and workflow control surfaces work on Windows. No sending,
 arbitrary framework compatibility, automatic uncertain-effect replay or permanent
 agent process was added. Git publication is outside this task.
+
+## Hosted CI repair (2026-10-06)
+
+The first hosted check run exposed two platform-portability defects, both repaired
+before merge. Linux Pyright could not resolve the Windows-only `ctypes.WinDLL`
+binding in the Job Object containment module; the kernel32 signatures are now
+guarded behind an explicit Windows platform check, mirroring the Stage-I verifier
+precedent, and the adapter refuses construction off Windows. The hosted Marketplace
+and browser journeys require the Linux bubblewrap launcher that the runtime now
+mandates; both CI jobs install it and, on runners that restrict unprivileged user
+namespaces through AppArmor, re-enable them for the disposable runner. Targeted
+Linux and Windows type checks, the sandbox and runtime regression suites, and the
+security scan were rerun for the repair; hosted checks were rerun for the resulting
+commit before merge.

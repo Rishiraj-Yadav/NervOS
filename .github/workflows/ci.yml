@@ -29,6 +29,18 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install bubblewrap for package containment
+        # The runtime refuses package execution without qualified Linux isolation
+        # (ADR 0035/0038), so the hosted acceptance needs the same launcher a
+        # production Linux host has. Ubuntu 24.04 restricts unprivileged user
+        # namespaces through AppArmor; this disposable runner re-enables them.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          bwrap --version
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - name: Set up uv
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
@@ -112,11 +124,19 @@ jobs:
         run: uv lock --check
 
       - name: Bootstrap dependencies and Chromium
-        run: uv run python scripts/bootstrap.py
-
-      - name: Install Playwright system libraries
+        run: uv run python scripts/bootstrap.py      - name: Install Playwright system libraries
         # CI-runner-only OS provisioning. Local bootstrap never installs OS packages.
         run: pnpm --dir apps/web exec playwright install-deps chromium
-
+      - name: Install bubblewrap for package containment
+        # Same rationale as the marketplace job: the Stage-G journey installs a
+        # package whose agent only launches inside Linux isolation, so the
+        # launcher binary must exist on this runner too.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          bwrap --version
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - name: Playwright end-to-end journey
         run: uv run python scripts/check.py e2e
