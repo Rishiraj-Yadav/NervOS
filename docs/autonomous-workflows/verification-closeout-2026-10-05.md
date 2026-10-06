@@ -75,3 +75,19 @@ namespaces through AppArmor, re-enable them for the disposable runner. Targeted
 Linux and Windows type checks, the sandbox and runtime regression suites, and the
 security scan were rerun for the repair; hosted checks were rerun for the resulting
 commit before merge.
+
+A second hosted defect surfaced after the portability repair: the Marketplace and
+browser jobs failed with `bwrap: Creating new namespace failed: Resource temporarily
+unavailable`. The frozen `RLIMIT_NPROC` budget (32) was applied to the launcher
+process itself before exec; bubblewrap creates its namespaces by forking, and the
+kernel refuses that fork with `EAGAIN` as soon as the launching user already has
+that many processes anywhere on the host — routine on a shared CI runner, rare on a
+quiet development machine, which is why local qualification passed. The same
+failure was reproduced on an Ubuntu 24.04 container with a 42-process user: the
+launch reaches exec under every other frozen rlimit (AS, NOFILE, CPU, FSIZE) and
+fails only when NPROC is set. The launcher now applies AS/NOFILE/CPU/FSIZE before
+exec and execs the interpreter through an in-namespace bootstrap that applies the
+process budget to itself, so `MAX_ACTIVE_PROCESSES` still binds package code
+without binding the namespace bootstrap in front of it. The AppArmor and
+namespace-allowance sysctl hedges remain in both CI jobs, and the launcher
+diagnostic now prints the launching user's process count and NPROC limit.

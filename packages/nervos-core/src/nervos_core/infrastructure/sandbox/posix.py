@@ -94,22 +94,43 @@ def resource_limit(name: str) -> tuple[int, int]:
 
 
 def apply_child_rlimits() -> None:
-    """Set the frozen rlimits in a forked child before exec.
+    """Set every frozen rlimit in a forked child before exec.
 
-    Called only via ``preexec_fn`` (POSIX) by the Worker at package spawn time. Any
-    failure raises so the spawn aborts — a child that cannot be limited must not start.
+    Called via ``preexec_fn`` (POSIX) when the child execs the package interpreter
+    directly. Any failure raises so the spawn aborts — a child that cannot be limited
+    must not start.
     """
+    _apply_frozen_rlimits(include_nproc=True)
+
+
+def apply_launcher_rlimits() -> None:
+    """Set the frozen rlimits a namespace launcher itself may carry before exec.
+
+    Identical to :func:`apply_child_rlimits` except that ``RLIMIT_NPROC`` is left
+    untouched. The bubblewrap launcher creates its namespaces by forking, and the
+    kernel refuses that fork with ``EAGAIN`` as soon as the launching user already
+    has ``MAX_ACTIVE_PROCESSES`` processes anywhere on the host — before any package
+    code could run. The launcher execs the package interpreter through an
+    in-namespace bootstrap that applies the process budget to itself first, so the
+    budget still binds the package host without binding the bootstrap in front of it.
+    """
+    _apply_frozen_rlimits(include_nproc=False)
+
+
+def _apply_frozen_rlimits(*, include_nproc: bool) -> None:
     limits = _load_resource()
     limits.setrlimit(limits.RLIMIT_AS, (MEMORY_LIMIT_BYTES, MEMORY_LIMIT_BYTES))
     limits.setrlimit(limits.RLIMIT_NOFILE, (MAX_OPEN_FILES, MAX_OPEN_FILES))
-    try:
-        _, hard = limits.getrlimit(limits.RLIMIT_NPROC)
-        # A hard limit of -1 means "unlimited"; never try to raise it.
-        ceiling = hard if hard > 0 else MAX_ACTIVE_PROCESSES
-        limits.setrlimit(limits.RLIMIT_NPROC, (min(MAX_ACTIVE_PROCESSES, ceiling), hard))
-    except (ValueError, OSError):
-        # NPROC may be unrlimitable in containerized environments; AS/NOFILE/CPU/FSIZE still bind.
-        pass
+    if include_nproc:
+        try:
+            _, hard = limits.getrlimit(limits.RLIMIT_NPROC)
+            # A hard limit of -1 means "unlimited"; never try to raise it.
+            ceiling = hard if hard > 0 else MAX_ACTIVE_PROCESSES
+            limits.setrlimit(limits.RLIMIT_NPROC, (min(MAX_ACTIVE_PROCESSES, ceiling), hard))
+        except (ValueError, OSError):
+            # NPROC may be unrlimitable in containerized environments;
+            # AS/NOFILE/CPU/FSIZE still bind.
+            pass
     limits.setrlimit(limits.RLIMIT_CPU, (CPU_TIME_SECONDS, CPU_TIME_SECONDS))
     limits.setrlimit(limits.RLIMIT_FSIZE, (FILE_SIZE_LIMIT_BYTES, FILE_SIZE_LIMIT_BYTES))
 

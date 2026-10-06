@@ -10,12 +10,32 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from nervos_core.application.sandbox import (
+    MAX_ACTIVE_PROCESSES,
     ContainmentResult,
     ContainmentTier,
     ContainmentUnavailable,
     SandboxLaunch,
 )
-from nervos_core.infrastructure.sandbox.posix import POSIX_SIGKILL, apply_child_rlimits
+from nervos_core.infrastructure.sandbox.posix import POSIX_SIGKILL, apply_launcher_rlimits
+
+# ``RLIMIT_NPROC`` cannot bind the launcher itself: bubblewrap creates its namespaces
+# by forking, and the kernel refuses that fork with ``EAGAIN`` once this user already
+# has ``MAX_ACTIVE_PROCESSES`` processes anywhere on the host (reproduced on Ubuntu
+# 24.04 with a 42-process user; AS/NOFILE/CPU/FSIZE do not break the same launch). The
+# frozen budget still has to bind package code, so the launcher execs the interpreter
+# through a bootstrap that applies the process budget to itself and then ``exec``s the
+# real program — the interpreter keeps the limit across that final exec, while the
+# namespace bootstrap in front of it runs without the process budget attached.
+_PROCESS_BUDGET_BOOTSTRAP = (
+    "import os,resource,sys\n"
+    "try:\n"
+    "    _,hard=resource.getrlimit(resource.RLIMIT_NPROC)\n"
+    f"    ceiling=hard if hard>0 else {MAX_ACTIVE_PROCESSES}\n"
+    f"    resource.setrlimit(resource.RLIMIT_NPROC,(min({MAX_ACTIVE_PROCESSES},ceiling),hard))\n"
+    "except (ValueError,OSError):\n"
+    "    pass\n"
+    "os.execv(sys.argv[1],sys.argv[1:])\n"
+)
 
 
 class LinuxBubblewrapContainment:
@@ -121,12 +141,24 @@ class LinuxBubblewrapContainment:
             safe_environment["LD_LIBRARY_PATH"] = str(library_path)
         for name, value in safe_environment.items():
             command.extend(("--setenv", name, value))
-        command.extend(("--", str(environment_python), *arguments))
+        # argv after ``--`` is [interpreter, "-c", bootstrap, interpreter, *arguments]:
+        # the bootstrap applies RLIMIT_NPROC and re-execs the same interpreter, so the
+        # program the caller asked for finally sees exactly the arguments it expected.
+        command.extend(
+            (
+                "--",
+                str(environment_python),
+                "-c",
+                _PROCESS_BUDGET_BOOTSTRAP,
+                str(environment_python),
+                *arguments,
+            )
+        )
         return SandboxLaunch(
             command=tuple(command),
             cwd=scratch,
             environment={},
-            preexec_fn=apply_child_rlimits,
+            preexec_fn=apply_launcher_rlimits,
             start_new_session=True,
         )
 

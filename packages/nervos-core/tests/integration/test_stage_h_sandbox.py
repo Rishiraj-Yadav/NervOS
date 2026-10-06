@@ -132,6 +132,50 @@ def test_linux_launcher_prepares_namespaces_before_python_starts(
     assert launch.start_new_session is True
 
 
+def test_linux_launcher_applies_the_process_budget_inside_the_namespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``RLIMIT_NPROC`` binds the package host, never the namespace bootstrap.
+
+    The launcher creates its namespaces by forking; a launcher pre-limited to the
+    package process budget dies with ``EAGAIN`` before any package code starts as
+    soon as the launching user already has that many processes on the host. The
+    frozen budget is therefore applied by the interpreter inside the namespace.
+    """
+    from nervos_core.infrastructure.sandbox.linux_bubblewrap import LinuxBubblewrapContainment
+
+    executable = tmp_path / "bwrap"
+    executable.write_bytes(b"fixture")
+    environment_root = tmp_path / "environment"
+    python = environment_root / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"fixture")
+    (environment_root / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+
+    launch = LinuxBubblewrapContainment(str(executable)).prepare(
+        python=python,
+        scratch=scratch,
+        environment={"LANG": "C.UTF-8"},
+        arguments=("-m", "nervos_package_host"),
+    )
+
+    separator = launch.command.index("--")
+    interpreter = str(environment_root.resolve() / "bin" / "python")
+    assert launch.command[separator + 1] == interpreter
+    assert launch.command[separator + 2] == "-c"
+    bootstrap = launch.command[separator + 3]
+    assert "RLIMIT_NPROC" in bootstrap
+    assert "os.execv(sys.argv[1],sys.argv[1:])" in bootstrap
+    # The bootstrap re-execs the same interpreter, caller arguments untouched.
+    assert launch.command[separator + 4] == interpreter
+    assert launch.command[separator + 5 :] == ("-m", "nervos_package_host")
+    # AS/NOFILE/CPU/FSIZE still bind the launcher through preexec; NPROC never does.
+    assert launch.preexec_fn is not None
+
+
 def test_linux_launcher_refuses_an_interpreter_outside_a_package_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
