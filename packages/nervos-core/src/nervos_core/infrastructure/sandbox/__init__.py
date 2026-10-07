@@ -39,6 +39,14 @@ def create_containment() -> PackageContainment:
         )
 
         return LinuxBubblewrapContainment()
+    if platform.system() == "Windows" and os.environ.get(
+        "NERVOS_ALLOW_WINDOWS_SANDBOX", ""
+    ).lower() in ("1", "true", "yes"):
+        from nervos_core.infrastructure.sandbox.windows import (
+            WindowsJobObjectContainment,
+        )
+
+        return WindowsJobObjectContainment()
     raise ContainmentUnavailable
 
 
