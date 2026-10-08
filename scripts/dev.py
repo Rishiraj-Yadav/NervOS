@@ -35,6 +35,8 @@ def _subprocess_environment(settings: Settings) -> dict[str, str]:
             "NERVOS_LOG_LEVEL": settings.log_level,
         }
     )
+    if os.name == "nt":
+        environment.setdefault("NERVOS_ALLOW_WINDOWS_SANDBOX", "1")
     return environment
 
 
@@ -94,6 +96,8 @@ def run_worker(settings: WorkerSettings | None = None) -> int:
             "NERVOS_MAX_ACTIVE_JOBS": str(resolved.max_active_jobs),
         }
     )
+    if os.name == "nt":
+        environment.setdefault("NERVOS_ALLOW_WINDOWS_SANDBOX", "1")
     server = subprocess.run(
         [
             sys.executable,
