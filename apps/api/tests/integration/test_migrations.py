@@ -165,9 +165,11 @@ def test_upgrade_drift_downgrade_and_reupgrade(
     try:
         assert application_tables(engine) == APPLICATION_TABLES
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                LATEST_REVISION
-            )
+            version = connection.scalar(text("SELECT version_num FROM alembic_version"))
+        # 0025 (ADR 0046) downgrades cleanly when no process-kind row exists, so the
+        # refusal now fires one step later, at 0024's evidence-preservation guard; the
+        # version table stops there rather than at head. The evidence tables are intact.
+        assert version == "0024_durable_workflows"
     finally:
         engine.dispose()
 
@@ -1569,6 +1571,10 @@ REVIEWED_MIGRATIONS = [
     # Durable autonomous workflows (ADR 0039): five new tables, no alteration to an
     # existing one, so every prior migration's evidence is untouched.
     "0024_durable_workflows.py",
+    # Process-kind package install (ADR 0046): adds runtime_kind to the installed
+    # package versions table, makes the entrypoint columns nullable under a
+    # kind/entrypoint pairing CHECK, and refuses to downgrade with process rows.
+    "0025_process_kind_packages.py",
 ]
 
 
@@ -1592,7 +1598,7 @@ def test_c7_consumed_no_migration_number() -> None:
     names = sorted(path.name for path in VERSIONS.glob("*.py"))
 
     assert names == REVIEWED_MIGRATIONS
-    assert names[-1] == "0024_durable_workflows.py"
+    assert names[-1] == "0025_process_kind_packages.py"
     assert any(name.startswith("0014") for name in names)
 
 
@@ -1632,7 +1638,7 @@ F2_REVISION = "0010_stage_f2_context_snapshots_and_compactions"
 F3_REVISION = "0011_stage_f3_scoped_memory"
 F4_REVISION = "0012_stage_f4_conversation_lifecycle"
 G3_REVISION = "0013_stage_g3_package_registry"
-LATEST_REVISION = "0024_durable_workflows"
+LATEST_REVISION = "0025_process_kind_packages"
 # The last revision before Stage H. H1, H2, H3 and H5 refuse to downgrade by design --
 # dropping the secret, approval or publisher-trust tables would destroy security evidence
 # irrecoverably -- so a test proving an *earlier* migration's downgrade contract starts
@@ -2254,3 +2260,6 @@ def test_migration_0013_creates_package_registry_and_run_snapshot_columns(
         assert "execution_kind" in runs_cols
     finally:
         engine.dispose()
+
+
+# ---------------------------------------------------------------------------------------

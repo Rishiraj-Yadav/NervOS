@@ -55,6 +55,7 @@ class LinuxBubblewrapContainment:
         scratch: Path,
         environment: Mapping[str, str],
         arguments: tuple[str, ...],
+        package_root: Path | None = None,
     ) -> SandboxLaunch:
         # Do not resolve the interpreter symlink. A POSIX virtual environment's ``bin/python``
         # points at the system interpreter, while the directory that must be mounted is the
@@ -73,6 +74,17 @@ class LinuxBubblewrapContainment:
         scratch = Path(os.path.realpath(scratch))
         if not scratch.is_dir():
             raise ContainmentUnavailable
+
+        # For process kind, we need the package bundle directory to be mounted
+        # so the foreign agent can execute its command from the package bundle.
+        if package_root is not None:
+            # Reject symlinks - the original path must be a directory, not a symlink
+            if os.path.islink(package_root):
+                raise ContainmentUnavailable
+            package_root = Path(os.path.realpath(package_root))
+            if not package_root.is_dir():
+                raise ContainmentUnavailable
+
         command: list[str] = [
             self._executable,
             "--die-with-parent",
@@ -122,7 +134,15 @@ class LinuxBubblewrapContainment:
         for directory in _missing_mount_parents(package_environment, scratch, system_roots):
             command.extend(("--dir", str(directory)))
         command.extend(("--ro-bind", str(package_environment), str(package_environment)))
-        command.extend(("--bind", str(scratch), str(scratch), "--chdir", str(scratch)))
+
+        # Mount the package bundle directory for process kind
+        if package_root is not None:
+            command.extend(("--ro-bind", str(package_root), str(package_root)))
+
+        # Determine working directory: for process kind, use package_root; otherwise scratch
+        work_dir = package_root if package_root is not None else scratch
+        command.extend(("--bind", str(scratch), str(scratch), "--chdir", str(work_dir)))
+
         safe_environment = {
             "HOME": str(scratch),
             "TMP": str(scratch),
@@ -156,10 +176,11 @@ class LinuxBubblewrapContainment:
         )
         return SandboxLaunch(
             command=tuple(command),
-            cwd=scratch,
+            cwd=work_dir,
             environment={},
             preexec_fn=apply_launcher_rlimits,
             start_new_session=True,
+            package_root=package_root,
         )
 
     def establish(self, process_id: int) -> ContainmentResult:

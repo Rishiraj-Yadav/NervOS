@@ -60,7 +60,10 @@ from nervos_core.infrastructure.database.tool_definitions import (
 from nervos_core.infrastructure.database.tool_invocations import (
     SqlAlchemyToolInvocationPersistence,
 )
-from nervos_core.infrastructure.database.tools import SqlAlchemyToolPermissionEvaluator
+from nervos_core.infrastructure.database.tools import (
+    SqlAlchemyToolPermissionEvaluator,
+    SqlAlchemyToolPermissionPersistence,
+)
 from nervos_core.infrastructure.database.workflows import (
     SqlAlchemyWorkflowStepFinalizer,
     SqlAlchemyWorkflowStepSource,
@@ -89,7 +92,7 @@ from nervos_worker.registry import ReclaimLoop, WorkerRegistry
 from nervos_worker.service import Worker
 
 # Bumped only by the milestone that adds a migration. Stage H ships migrations 0016-0023.
-EXPECTED_SCHEMA_REVISION = "0024_durable_workflows"
+EXPECTED_SCHEMA_REVISION = "0025_process_kind_packages"
 
 
 def utc_now() -> datetime:
@@ -171,6 +174,7 @@ def create_worker(settings: WorkerSettings | None = None) -> WorkerComposition:
         gateway=mcp_gateway,
     )
     tool_authority = SqlAlchemyToolPermissionEvaluator(engine)
+    tool_permissions = SqlAlchemyToolPermissionPersistence(engine)
     tool_invocations = SqlAlchemyToolInvocationPersistence(engine)
     keys = FileMasterKeyResolver(resolved.secrets_key_file, resolved.secrets_key_version)
     secret_store = SqlAlchemySecretPersistence(engine)
@@ -249,6 +253,7 @@ def create_worker(settings: WorkerSettings | None = None) -> WorkerComposition:
                 integrations=integrations,
                 trust=publisher_trust,
                 workflow_steps=SqlAlchemyWorkflowStepSource(engine),
+                tool_permissions=tool_permissions,
             ),
             memory_extraction=MemoryExtractionAdapter(integrations),
         ),

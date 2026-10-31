@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
+from pathlib import PureWindowsPath
 from types import MappingProxyType
 from typing import cast
 
@@ -27,8 +28,12 @@ from nervos_core.application.clock import Clock
 from nervos_core.application.runtime_integration import package_integration
 from nervos_core.domain.agents import AgentDefinition
 from nervos_core.domain.packages import (
+    DEFAULT_RUNTIME_KIND,
     EXTENSION_KEY_PATTERN,
     MANIFEST_MAX_BYTES,
+    MAX_COMMAND_ITEM_CHARS,
+    MAX_COMMAND_ITEMS,
+    SUPPORTED_RUNTIME_KINDS,
     InvalidPackageManifest,
     ManifestVersion,
     PackageAssetDeclarations,
@@ -85,7 +90,7 @@ _REQUIRED_KEYS = frozenset(
         "configuration",
     }
 )
-_RUNTIME_KEYS = frozenset({"language", "python", "entrypoint"})
+_RUNTIME_KEYS = frozenset({"kind", "language", "python", "entrypoint", "command"})
 _NERVOS_KEYS = frozenset({"min_version", "max_version"})
 _CONFIGURATION_KEYS = frozenset({"schema"})
 _MODELS_KEYS = frozenset({"capabilities"})
@@ -259,12 +264,70 @@ def _collect_extensions(data: Mapping[str, object]) -> dict[str, object]:
 
 
 def _parse_runtime(data: Mapping[str, object]) -> PackageRuntime:
-    _exact_keys(data, _RUNTIME_KEYS, "runtime")
-    return PackageRuntime(
-        language=_required_text(data, "language"),
-        python=_required_text(data, "python"),
-        entrypoint=_required_text(data, "entrypoint"),
-    )
+    _reject_unknown_nested(data, _RUNTIME_KEYS, "runtime")
+    kind = _optional_text(data, "kind") or DEFAULT_RUNTIME_KIND
+    if kind not in SUPPORTED_RUNTIME_KINDS:
+        kinds = sorted(SUPPORTED_RUNTIME_KINDS)
+        raise InvalidPackageManifest(f"runtime.kind must be one of {kinds}")
+    if kind == "process":
+        # python-specific fields are not allowed for process kind
+        for forbidden in ("language", "python", "entrypoint"):
+            if forbidden in data:
+                msg = f"runtime.{forbidden} must not be set for process kind"
+                raise InvalidPackageManifest(msg)
+        _require_keys(data, frozenset({"command"}), "runtime")
+        command = _parse_command(_required_list(data, "command"))
+        return PackageRuntime(
+            kind=kind,
+            language="",
+            python="",
+            entrypoint="",
+            command=command,
+        )
+    else:
+        _require_keys(data, frozenset({"language", "python", "entrypoint"}), "runtime")
+        return PackageRuntime(
+            kind=kind,
+            language=_required_text(data, "language"),
+            python=_required_text(data, "python"),
+            entrypoint=_required_text(data, "entrypoint"),
+            command=(),
+        )
+
+
+def _required_list(data: Mapping[str, object], key: str) -> list[object]:
+    value = data.get(key)
+    if not isinstance(value, list):
+        raise InvalidPackageManifest(f"{key} must be a list")
+    return cast(list[object], value)
+
+
+def _parse_command(command_list: list[object]) -> tuple[str, ...]:
+    if not command_list:
+        raise InvalidPackageManifest("runtime.command must be a non-empty list")
+    if len(command_list) > MAX_COMMAND_ITEMS:
+        msg = f"runtime.command must have at most {MAX_COMMAND_ITEMS} items"
+        raise InvalidPackageManifest(msg)
+    result: list[str] = []
+    for i, item in enumerate(command_list):
+        if not isinstance(item, str):
+            raise InvalidPackageManifest(f"runtime.command[{i}] must be text")
+        if not item:
+            raise InvalidPackageManifest(f"runtime.command[{i}] must be non-empty")
+        if len(item) > MAX_COMMAND_ITEM_CHARS:
+            msg = f"runtime.command[{i}] exceeds {MAX_COMMAND_ITEM_CHARS} characters"
+            raise InvalidPackageManifest(msg)
+        if (
+            item.startswith(("/", "\\"))
+            or PureWindowsPath(item).is_absolute()
+            or bool(PureWindowsPath(item).drive)
+            or bool(PureWindowsPath(item).root)
+        ):
+            raise InvalidPackageManifest(f"runtime.command[{i}] must not be an absolute path")
+        if ".." in item.replace("\\", "/").split("/"):
+            raise InvalidPackageManifest(f"runtime.command[{i}] must not contain '..'")
+        result.append(item)
+    return tuple(result)
 
 
 def _parse_nervos(data: Mapping[str, object]) -> PackageCompatibility:

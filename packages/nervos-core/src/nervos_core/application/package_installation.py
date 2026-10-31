@@ -260,11 +260,15 @@ class PackageApplicationService:
             )
             self._registry.mark_environment_ready(environment.id, self._clock())
             self._registry.attach_environment(installed.id, environment.id, self._clock())
-            self._health_checker.check(
-                environment=environment_path,
-                entrypoint=staged.verified.manifest.runtime.entrypoint,
-                expected_sdk_api_version=SDK_API_VERSION,
-            )
+            if staged.verified.manifest.runtime.kind == "python":
+                # ADR 0046: the health check imports the declared entrypoint, so it only
+                # applies to python kind; a process package has nothing to import (its
+                # interpreter reaches the child via NERVOS_PACKAGE_PYTHON, ADR 0043 item 2).
+                self._health_checker.check(
+                    environment=environment_path,
+                    entrypoint=staged.verified.manifest.runtime.entrypoint,
+                    expected_sdk_api_version=SDK_API_VERSION,
+                )
             active = self._registry.mark_active(installed.id, self._clock())
             return PackageInstallResult(active, staged.archive_digest)
         except BaseException:

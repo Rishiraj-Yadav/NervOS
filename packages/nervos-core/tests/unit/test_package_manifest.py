@@ -74,6 +74,11 @@ resources:
 x-nervos-category: finance
 """
 
+# The runtime block inside VALID_MANIFEST, used by the runtime kind/command tests.
+PYTHON_RUNTIME_BLOCK = (
+    'runtime:\n  language: python\n  python: ">=3.12,<4"\n  entrypoint: acme_invoice.agent:Agent'
+)
+
 UNLIMITED_MANIFEST = VALID_MANIFEST.replace(
     "resources:\n  limits:\n    max_model_calls: 8\n"
     "    max_tool_calls: 4\n    tool_timeout_ms: 10000\n",
@@ -413,3 +418,123 @@ def test_workflow_declaration_rejects_a_boolean_or_an_unknown_protocol() -> None
                 VALID_MANIFEST
                 + f"x-nervos-runtime-integration:\n  version: 1\n  workflow: {declared}\n"
             )
+
+
+def test_runtime_kind_defaults_to_python_and_accepts_explicit_python() -> None:
+    manifest = _parse()
+    assert manifest.runtime.kind == "python"
+    assert manifest.runtime.language == "python"
+    assert manifest.runtime.python == ">=3.12,<4"
+    assert manifest.runtime.entrypoint == "acme_invoice.agent:Agent"
+    assert manifest.runtime.command == ()
+
+    explicit_python = VALID_MANIFEST.replace(
+        PYTHON_RUNTIME_BLOCK,
+        "runtime:\n"
+        "  kind: python\n"
+        "  language: python\n"
+        '  python: ">=3.12,<4"\n'
+        "  entrypoint: acme_invoice.agent:Agent",
+    )
+    manifest2 = _parse(explicit_python)
+    assert manifest2.runtime.kind == "python"
+
+
+def test_runtime_kind_process_requires_command_and_rejects_python_fields() -> None:
+    valid_process = VALID_MANIFEST.replace(
+        PYTHON_RUNTIME_BLOCK,
+        "runtime:\n  kind: process\n  command:\n    - bin/agent\n    - --flag",
+    )
+    manifest = _parse(valid_process)
+    assert manifest.runtime.kind == "process"
+    assert manifest.runtime.command == ("bin/agent", "--flag")
+    assert manifest.runtime.language == ""
+    assert manifest.runtime.python == ""
+    assert manifest.runtime.entrypoint == ""
+
+    # command missing
+    missing_command = VALID_MANIFEST.replace(
+        PYTHON_RUNTIME_BLOCK,
+        "runtime:\n  kind: process",
+    )
+    with pytest.raises(InvalidPackageManifest, match="missing required runtime field: command"):
+        _parse(missing_command)
+
+    # empty command
+    empty_command = VALID_MANIFEST.replace(
+        PYTHON_RUNTIME_BLOCK,
+        "runtime:\n  kind: process\n  command: []",
+    )
+    with pytest.raises(InvalidPackageManifest, match=r"runtime.command must be a non-empty list"):
+        _parse(empty_command)
+
+    # python fields present with process kind
+    python_fields = VALID_MANIFEST.replace(
+        PYTHON_RUNTIME_BLOCK,
+        "runtime:\n"
+        "  kind: process\n"
+        "  language: python\n"
+        '  python: ">=3.12,<4"\n'
+        "  entrypoint: foo:Bar\n"
+        "  command:\n"
+        "    - bin/agent",
+    )
+    with pytest.raises(InvalidPackageManifest, match="must not be set for process kind"):
+        _parse(python_fields)
+
+
+def test_runtime_command_validates_path_safety_and_limits() -> None:
+    # absolute path rejected
+    absolute = VALID_MANIFEST.replace(
+        PYTHON_RUNTIME_BLOCK,
+        'runtime:\n  kind: process\n  command:\n    - "/absolute/path"\n    - arg',
+    )
+    with pytest.raises(InvalidPackageManifest, match="must not be an absolute path"):
+        _parse(absolute)
+
+    # parent traversal rejected
+    traversal = VALID_MANIFEST.replace(
+        PYTHON_RUNTIME_BLOCK,
+        "runtime:\n  kind: process\n  command:\n    - bin/../escape\n    - arg",
+    )
+    with pytest.raises(InvalidPackageManifest, match="must not contain"):
+        _parse(traversal)
+
+    # item too long rejected
+    long_item = "x" * 513
+    long_cmd = VALID_MANIFEST.replace(
+        PYTHON_RUNTIME_BLOCK,
+        f"runtime:\n  kind: process\n  command:\n    - {long_item!r}\n    - arg",
+    )
+    with pytest.raises(InvalidPackageManifest, match="exceeds 512 characters"):
+        _parse(long_cmd)
+
+    # too many items rejected
+    many_items = "\n    - ".join([f"arg{i}" for i in range(33)])
+    many_cmd = VALID_MANIFEST.replace(
+        PYTHON_RUNTIME_BLOCK,
+        f"runtime:\n  kind: process\n  command:\n    - {many_items}",
+    )
+    with pytest.raises(InvalidPackageManifest, match="at most 32 items"):
+        _parse(many_cmd)
+
+    # non-string items rejected
+    non_string = VALID_MANIFEST.replace(
+        PYTHON_RUNTIME_BLOCK,
+        "runtime:\n  kind: process\n  command:\n    - 123\n    - arg",
+    )
+    with pytest.raises(InvalidPackageManifest, match="must be text"):
+        _parse(non_string)
+
+
+def test_invalid_runtime_kind_rejected() -> None:
+    invalid_kind = VALID_MANIFEST.replace(
+        PYTHON_RUNTIME_BLOCK,
+        "runtime:\n"
+        "  kind: javascript\n"
+        "  language: python\n"
+        '  python: ">=3.12,<4"\n'
+        "  entrypoint: acme_invoice.agent:Agent",
+    )
+    with pytest.raises(InvalidPackageManifest, match=r"runtime.kind must be one of"):
+        _parse(invalid_kind)

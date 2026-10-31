@@ -1277,6 +1277,252 @@ D7 is integrated deterministic acceptance for Stage D and its closeout, not a fe
 
 **Stage D proves capable tool-using agents.** It does not yet provide scheduling, background triggers, persistent conversation memory, installable agent packages, or interactive approvals and isolation — those remain Stages E, F, G and H. NervOS still makes **no exactly-once claim** for remote effects: it prevents known unsafe replay after dispatch and records ambiguity when a remote outcome cannot be proven.
 
+## Generic Process Agent Bridge (ADR 0041) — IMPLEMENTED
+
+**Status: ACCEPTED and IMPLEMENTED** per ADR 0041 Owner decisions.
+
+The Generic Process Agent Bridge allows any executable (not just `nervos-sdk` Python entrypoints) to run as a sandboxed NervOS agent. The agent reaches models and tools **only through NervOS** via a loopback HTTP shim in the package host that translates OpenAI-compatible `/v1/chat/completions` and MCP `/mcp` requests into the existing wire protocol frames (`model_request`/`tool_request`) over stdio.
+
+### Key Implementation Details
+
+**Manifest (M1)**: Added optional `runtime.kind` with values `python` (default, existing behavior unchanged) and `process`. For `process` kind, `runtime.command` is required: a non-empty list of strings (max 32 items, each max 512 chars), validated for no absolute paths, no `..` traversal, no shell strings. `runtime.entrypoint` and `runtime.python` remain required only for `python` kind.
+- Files: `packages/nervos-core/src/nervos_core/application/package_manifest.py`, `packages/nervos-core/src/nervos_core/domain/packages.py`
+
+**Loopback Shim (M2)**: New module `packages/nervos-package-host/src/nervos_package_host/bridge_shim.py` (standard library only). Binds `127.0.0.1` on port 0. Requires `Authorization: Bearer <per-run-random-token>` header; rejects others with 401. Rejects requests whose `Host` header is not `127.0.0.1:<port>`. Caps request body at 1 MiB, per-request timeout, and total requests per run.
+- `POST /v1/chat/completions`: Accepts messages with string content (or list of text parts, concatenated). Returns 400 if `stream=true`, non-text parts present, or `tools`/`functions` present. Translates to `model_request` wire frame, waits for `model_response`, returns OpenAI-shaped completion.
+- `POST /mcp`: Streamable HTTP, JSON-RPC 2.0, non-streaming JSON responses. Supports `initialize`, `notifications/initialized` (202), `ping`, `tools/list`, `tools/call`. `tools/call` sends `tool_request` wire frame, maps `tool_response` to MCP result; denied/failed tool returns `isError=true`.
+- **Linux-only test** added: `packages/nervos-package-host/tests/test_linux_bubblewrap_loopback.py` — asserts direct outbound network call fails inside bubblewrap; skipped on non-Linux with reason "requires bubblewrap; loopback in namespace unverified".
+
+**Host Mode (M3)**: When `runtime.kind` is `process`, package host starts shim, then spawns command as child with scrubbed environment (same allowlist as `package_host_environment()` plus `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `NERVOS_MCP_URL`). Sends run input as JSON on child's stdin, closes stdin. Exit code 0 → stdout (UTF-8, capped) is final output; non-zero → `run_error` with truncated stderr. Honors `cancel` frame by killing child tree. Shuts down shim on every exit path.
+- File: `packages/nervos-package-host/src/nervos_package_host/__main__.py` (`_run_process_agent`)
+
+**Worker (M4)**: Minimal change to accept `process` packages through same `PackageExecutionAdapter` seam: same containment, mediators, audit, limits. Reads `runtime.kind` and `runtime.command` from manifest, passes to `_spawn_host` and `initialize` frame.
+- File: `apps/worker/src/nervos_worker/package_execution.py`
+
+**Tests (M5)**:
+- Shim unit tests: `packages/nervos-package-host/tests/test_bridge_shim.py` (auth, Host check, size caps, error mappings, MCP methods, denied tool, wire protocol roundtrips)
+- E2E test: `packages/nervos-package-host/tests/test_process_agent_e2e.py` (fake foreign agent script using only stdlib, validates wire protocol frames)
+- Real-socket E2E test: `apps/worker/tests/integration/test_real_e2e_shim_child.py` (real ShimServer on 127.0.0.1 with a fake Worker wire channel and a real stdlib-only child process; granted tool returns TOOL_OK, ungranted tool denied with `isError=true`, request without Bearer key rejected with 401; exercises the shim, not the full Worker stack)
+- Linux-only test: `packages/nervos-package-host/tests/test_linux_bubblewrap_loopback.py` (skipped on Windows)
+
+**Owner Decisions** (recorded in ADR 0041):
+1. Windows behavior unchanged: package execution stays refused unless existing `NERVOS_ALLOW_WINDOWS_SANDBOX` flag allows it; no containment weakening.
+2. Streaming deferred.
+3. Images/multimodal deferred.
+4. Per-run random API key replaces fixed "nervos-proxy" placeholder.
+5. No live Linux sandbox verification; loopback assumption stays `[unverified]`.
+
+**Known Limitations**:
+- Loopback inside bubblewrap namespace is `[unverified]` — Linux-only test skipped
+- Anthropic/Responses/Gemini-compatible endpoints are not implemented (ADR 0042 Part 2)
+- A conversation whose tool exchange precedes a later user message is refused
+  (`model_request_rejected`): the core `ModelRequest` cannot represent it and ADR 0042
+  does not change the core
+- Streaming is replay of one full `model_response` as SSE, not incremental generation
+
+**Bridge Model Tools and Streaming (ADR 0042) — IMPLEMENTED**:
+
+-**SDK (M1)**: `nervos_sdk.types` adds optional, defaulted tool fields — `ToolDefinition`
+(name, description, JSON-schema parameters) on `ModelRequest`; `tool_calls`
+(`ToolCall`: id, name, JSON-text-or-mapping arguments) and `tool_call_id` on
+`ModelMessage`; `tool_calls` on `ModelResult` with the `STOP_REASON_TOOL_USE` convention.
+Frozen-dataclass and JSON-freezing style throughout; existing constructions unchanged.
+-**Wire (M2)**: `model_request` frames may carry `tools` and per-message
+`tool_calls`/`tool_call_id`; `model_response` frames may carry `tool_calls`. Frames
+without the new fields stay valid; advertised via the existing capability list as
+`model-tools-v1`.
+-**Worker (M3)**: `complete_model` maps the wire conversation onto the core
+`ModelRequest` (systems → `system_instruction`, plain prefix → `history`, current user →
+`user_text`, trailing assistant/tool exchange → `turns`), validates and filters offered
+tools to the run's declared tools (≤64 tools; text + tool traffic + schemas ≤ 64 KiB),
+and returns the core `tool_calls` in the response frame. The process-kind initialize
+frame now lists exactly the run's granted tools via `granted_tools_payload`
+(`list_grants_at_or_before_cutoff` × `gather_descriptors`), closing ADR 0041 M3's gap.
+-**Shim (M4)**: `/v1/chat/completions` accepts `tools`, `tool_choice` (auto/none;
+`required`/named → 400), assistant `tool_calls`, `role: tool` messages, and
+`stream: true` (full-result-then-SSE replay with tool_call deltas, finish chunk,
+optional `stream_options.include_usage` usage chunk, `[DONE]`). Non-text content parts
+and non-function tools get 400; all existing loopback protections apply unchanged.
+-**Tests (M5)**: real-socket suite
+`apps/worker/tests/integration/test_real_e2e_shim_tools_stream.py` (tool loop, streamed
+text + usage, streamed tool call, 400/413 rejections that never reach the wire);
+`apps/worker/tests/unit/test_model_tool_mediation.py`; `apps/worker/tests/unit/test_granted_tools_payload.py`;
+`packages/nervos-sdk/tests/test_public_contracts.py`; `packages/nervos-package-host/tests/test_wire_model_tools.py`.
+- Files: `packages/nervos-sdk/src/nervos_sdk/types.py`, `packages/nervos-sdk/src/nervos_sdk/__init__.py`,
+`packages/nervos-package-host/src/nervos_package_host/wire.py`, `bridge_shim.py`, `__main__.py`,
+`apps/worker/src/nervos_worker/package_execution.py`, and the test files above.
+- ADR: `docs/adr/0042-bridge-model-tools-and-streaming.md` (Status: ACCEPTED).
+
+**Bridge API Shapes (ADR 0044) — IMPLEMENTED**:
+
+The shim serves Anthropic Messages, OpenAI Responses, and Gemini routes that translate
+into the same internal `model_request` path as the chat route (shared `_request_model`
+seam). No Worker, SDK-type, wire, or core change. Vendor-shaped error envelopes on every
+failure; all chat-route protections (loopback-only, Host check, per-run key via Bearer /
+`x-api-key` / `x-goog-api-key` / `?key=`, 1 MiB body cap, request cap, timeout) apply to
+every route. Streaming is replay of the complete result in each vendor's SSE format.
+
+**Supported API shapes and known limits** (verified by the real-socket suites, not assumed):
+
+| Route | Tools | Streaming | Known gaps |
+|---|---|---|---|
+| `POST /v1/chat/completions` (OpenAI Chat) | yes (function; auto/none only) | yes (SSE replay; `include_usage`) | `tool_choice` required/named → 400; non-text content → 400 |
+| `POST /v1/messages` (Anthropic) | yes (`tool_use`/`tool_result`; auto/none only) | yes (documented event sequence) | `tool_choice` any/tool → 400; images → 400; `anthropic-version` required, value ignored |
+| `POST /v1/responses` (OpenAI Responses) | yes (function tools, `function_call(_output)` items) | yes (`response.*` event sequence) | `previous_response_id` → 400; hosted tools/files/images → 400; `store` ignored; `reasoning` items dropped |
+| `POST /v1beta/models/{m}:generateContent` (Gemini) | yes (`functionDeclarations`, `functionCall`/`functionResponse`) | n/a | calls addressed by name (no call ids); non-text parts → 400; `toolConfig` ANY → 400 |
+| `POST /v1beta/models/{m}:streamGenerateContent?alt=sse` | yes | yes (SSE chunks; closing chunk carries finishReason+usage) | same as generateContent; `alt` other than `sse` → 400 |
+| `GET /v1/models` / `GET /v1beta/models` | n/a | n/a | advisory only: lists the last model used, else `nervos-model`; the wire carries no per-run model allowlist to the host |
+
+Cross-route limits inherited from ADR 0042 remain: multi-turn conversations with a tool
+exchange before a later user message are refused (`model_request_rejected`), and forced
+tool choice would need a core change.
+
+- Child environment: `process_agent_environment()` sets `OPENAI_BASE_URL`(+`/v1`),
+  `ANTHROPIC_BASE_URL`, `GOOGLE_GEMINI_BASE_URL`, `NERVOS_MCP_URL`(+`/mcp`), and the
+  per-run key as `OPENAI_API_KEY`/`ANTHROPIC_API_KEY`/`GEMINI_API_KEY`/`GOOGLE_API_KEY`.
+- Tests: `apps/worker/tests/integration/test_real_e2e_shim_vendor_routes.py` (15
+  real-socket tests: per-route tool loop, streamed text, streamed tool call, 400/401
+  vendor-shaped rejections that never reach the wire, both discovery listings, env);
+  `packages/nervos-package-host/tests/test_process_agent_environment.py`.
+- ADR: `docs/adr/0044-bridge-api-shapes.md` (Status: ACCEPTED).
+
+**Bridge Tool Choice and Tool-Aware History (ADR 0045) — IMPLEMENTED**:
+
+- Core: `ModelRequest.tool_choice` (auto/none/required/named via `ToolChoice`) and the
+  bridge-only ordered `conversation` field (`UserTurn` joins `AssistantTurn`/
+  `ToolResultTurn`); both optional, defaults byte-identical, nothing persisted.
+- Adapters: each mode maps to the vendor's real parameter — OpenAI
+  `tool_choice` ("none"/"required"/`{"type":"function","name":N}`), Anthropic
+  `{"type":"none"|"any"|"tool",...}`, Gemini `FunctionCallingConfigMode`
+  (NONE/ANY + `allowed_function_names`); ordered conversation renders per provider.
+- Worker: parses the wire `tool_choice` (undeclared named → `model_request_rejected`)
+  and maps a conversation whose tool traffic precedes a later user message onto
+  `conversation` instead of refusing.
+- Shim: all four routes accept forced choice (OpenAI `"required"`/`{"type":"function"}`,
+  Anthropic `{"type":"any"|"tool"}`, Gemini `mode: ANY` (+ `allowedFunctionNames`)) and
+  multi-turn tool conversations; the ADR 0042 refusals are removed.
+- Tests: `packages/nervos-models/tests/unit/test_tool_choice_and_conversation.py`
+  (exact per-adapter kwargs + byte-identical defaults),
+  `apps/worker/tests/unit/test_model_tool_mediation.py` (the former multi-turn refusal
+  test now asserts success — renamed
+  `test_tool_traffic_before_a_later_user_turn_now_succeeds_via_conversation`),
+  `apps/worker/tests/integration/test_real_e2e_shim_tool_choice_multiturn.py` (8
+  real-socket tests).
+- ADR: `docs/adr/0045-bridge-tool-choice-and-tool-history.md` (Status: ACCEPTED).
+
+**Real-host launch verification (Phase A1) — IMPLEMENTED**:
+
+`apps/worker/tests/integration/test_real_host_process_launch.py` spawns the real
+`python -m nervos_package_host` subprocess and drives it over real wire frames: the
+child sees the full bridge environment, the run input arrives on its stdin, its stdout
+becomes the `run_result`, a failing child yields `run_error`, and a `cancel` frame kills
+the whole child tree. The host also honors the initialize frame's tool list on the
+real path (`/mcp tools/call` enforces the run's real grants) and cancels the child tree
+(process group on POSIX, `taskkill /T` on Windows).
+
+**Verified with real SDKs** (`scripts/bridge_sdk_smoke.py --node-dir`; throwaway dirs
+outside the repo, default client settings, loopback only):
+
+| SDK (Node) | Version | Cases (all passed) |
+|---|---|---|
+| `openai` (Node) | 7.43.0 | chat_plain, chat_stream, chat_tool, responses_plain, responses_stream — 5/5 |
+| `@anthropic-ai/sdk` | 1.3.0 | messages_plain, messages_stream, messages_tool — 3/3 |
+| `@google/genai` | 2.31.0 | generate_plain, generate_stream, generate_tool — 3/3 |
+| `ai` (Vercel) | 7.0.153 | generate_plain, generate_stream, generate_tool, generate_structured (forced tool) — 4/4 |
+
+One shim fix came out of the Node run: the Vercel AI SDK sends plain `{role, content}`
+input items without a `"type"` field, which the Responses route rejected; those are now
+treated as message items (regression covered by the smoke run; the route's typed-item
+behavior is unchanged).
+
+**Bundling (ADR 0043) — item 3 RESOLVED by "bundle ships its runtime"**:
+
+A Node package ships its own `node` binary and `node_modules` as bundle assets and
+launches them via `runtime.command: ["bin/node", "app.js"]`, possible because item 1
+makes `command[0]` executable at materialization. Validated by
+`packages/nervos-core/tests/unit/test_node_bundle_command.py`.
+
+**Linux verification kit — WRITTEN, NOT RUN ([unverified])**:
+
+`packages/nervos-core/tests/integration/test_linux_bridge_verification.py` (4 skip-unless-
+Linux-with-bwrap tests), `scripts/verify_linux_bridge.sh`, and
+`docs/linux-verification-runbook.md`. Loopback in bubblewrap remains `[unverified]`
+until the owner runs the kit on Linux.
+
+**Process-kind install (ADR 0046) — IMPLEMENTED** (closes the Phase A2 stop):
+
+- Migration `0025_process_kind_packages`: `runtime_kind` on
+  `installed_package_versions` (NOT NULL, default 'python', CHECK in
+  ('python','process')); `entrypoint_module`/`entrypoint_object` nullable with a
+  kind/entrypoint pairing CHECK; downgrade refuses while any process-kind row
+  exists and otherwise restores the 0024 shape exactly. Python-kind rules are as
+  strict as before. **Upgrade note: existing databases must run**
+  `uv run alembic -c apps/api/alembic.ini upgrade head` — the Worker and scheduler
+  refuse to start against the old revision.
+- Persistence/queries: process rows store NULL entrypoint columns; the
+  run-executable snapshot carries the stable non-secret label
+  `process:<command[0]>` in the existing `package_entrypoint` column (no jobs-table
+  schema change); inspect/detail expose `runtime_kind`, `command`, and optional
+  entrypoint fields; python-kind responses are unchanged in shape and values.
+- Worker: accepts the label (the `package_entrypoint is None` refusal never fires
+  for either kind), handles the ADR 0041 `run_error` frame from a failed process
+  child, and closes the host's stdin after `run_result` so the host exits cleanly.
+- API/CLI: `runtime_kind` + `command` exposed; process packages print kind and
+  command instead of `module:object`.
+- Tests: `apps/api/tests/integration/test_migration_0025.py` (upgrade keeps python
+  rows valid; CHECKs accept both kinds and reject invalid mixes; downgrade refuses
+  with process rows and restores the old shape),
+  `apps/worker/tests/integration/test_real_worker_process_package.py` (un-skipped
+  A2 journey: real signed install, mediation, audit, denial, credential isolation),
+  `packages/nervos-core/tests/unit/test_node_bundle_command.py`, and the
+  granted-tools payload unit tests updated to alias/upstream-name semantics
+  (ADR 0046: the presented name is exactly what a tool_request must use).
+- ADR: `docs/adr/0046-process-kind-package-install.md` (Status: ACCEPTED, with the
+  full consumer trace).
+**Verified with real SDKs** (`scripts/bridge_sdk_smoke.py`: real ShimServer + fake wire
+Worker; the SDKs run in a throwaway venv outside the repo, default client settings, no
+custom transport, loopback only — no live provider call):
+
+| SDK | Version | Cases (all passed unless noted) |
+|---|---|---|
+| `openai` | 3.37.0 | chat_plain, chat_stream, chat_tool, responses_plain, responses_stream, responses_tool, models_list — 7/7 |
+| `anthropic` | 2.3.0 | messages_plain, messages_stream, messages_tool, models_list — 4/4 |
+| `google-genai` | 2.33.0 | generate_plain, generate_stream, generate_tool — 3/3 |
+
+No shim compatibility fixes were required: the first valid run passed 14/14. The only
+defect found was in the smoke harness itself (a blocking subprocess call that froze the
+event loop); it was fixed before the first valid run and changed no shipped code.
+
+**Bundling (ADR 0043 items 1 and 2 — ACCEPTED, implemented)**:
+
+- `prepare_process_command_target` (`apps/worker/src/nervos_worker/package_execution.py`):
+  after materialization, the process-kind `runtime.command[0]` must be a file inside the
+  bundle (refused otherwise on every platform) and, on POSIX only, gets the executable
+  bit. Archive format, signing, integrity digests, and other files' modes are untouched.
+  Tests: `apps/worker/tests/unit/test_process_command_target.py` (POSIX chmod test skips
+  on Windows with that reason; the containment refusals run everywhere).
+- `process_agent_environment` exports `NERVOS_PACKAGE_PYTHON` = the package environment
+  interpreter (the host's `sys.executable` inside the sandbox), so Python foreign agents
+  run on the same offline site-packages as python-kind packages.
+  Test: `packages/nervos-package-host/tests/test_process_agent_environment.py`.
+- ADR 0043 Status is now ACCEPTED for items 1 and 2; the Node runtime (item 3) stays
+  deferred.
+
+**Files Changed**:
+- `packages/nervos-core/src/nervos_core/application/package_manifest.py`
+- `packages/nervos-core/src/nervos_core/domain/packages.py`
+- `packages/nervos-package-host/src/nervos_package_host/bridge_shim.py` (new)
+- `packages/nervos-package-host/src/nervos_package_host/__main__.py`
+- `apps/worker/tests/integration/test_real_e2e_shim_child.py` (new)
+- `packages/nervos-package-host/src/nervos_package_host/wire.py`
+- `packages/nervos-package-host/src/nervos_package_host/__init__.py`
+- `apps/worker/src/nervos_worker/package_execution.py`
+- `packages/nervos-package-host/tests/test_bridge_shim.py` (new)
+- `packages/nervos-package-host/tests/test_process_agent_e2e.py` (new)
+- `packages/nervos-package-host/tests/test_linux_bubblewrap_loopback.py` (new)
+- `docs/adr/0041-generic-process-agent-bridge.md` (Status → ACCEPTED, Owner decisions added)
+- `docs/generic-agent-bridge/plan.md` (Status → IMPLEMENTED, milestones marked complete)
+
 ## Maintenance rule
 
 Update this file after every accepted milestone. Do not check an item merely because code was generated; verify its acceptance criteria first.

@@ -307,8 +307,11 @@ class InstalledPackageVersionRecord(Base):
     agent_wheel_version: Mapped[str] = mapped_column(String(128), nullable=False)
     agent_wheel_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     agent_wheel_size: Mapped[int] = mapped_column(Integer, nullable=False)
-    entrypoint_module: Mapped[str] = mapped_column(String(256), nullable=False)
-    entrypoint_object: Mapped[str] = mapped_column(String(256), nullable=False)
+    # ADR 0046: python packages carry a module:object entrypoint; process packages
+    # leave both columns NULL and are named by runtime.command instead.
+    runtime_kind: Mapped[str] = mapped_column(String(8), nullable=False, default="python")
+    entrypoint_module: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    entrypoint_object: Mapped[str | None] = mapped_column(String(256), nullable=True)
     storage_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
     staging_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
     environment_id: Mapped[int | None] = mapped_column(
@@ -326,6 +329,36 @@ class InstalledPackageVersionRecord(Base):
     removed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     last_error_message: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    __table_args__ = (
+        UniqueConstraint("package_id", "package_version"),
+        CheckConstraint("package_id NOT LIKE 'nervos.%'", name="package_id_not_reserved"),
+        CheckConstraint(f"status IN ({PACKAGE_INSTALL_STATUSES})", name="status_value"),
+        CheckConstraint(SHA256_SQL.format(column="content_digest"), name="content_digest_hex"),
+        CheckConstraint(SHA256_SQL.format(column="archive_digest"), name="archive_digest_hex"),
+        CheckConstraint(
+            SHA256_SQL.format(column="signer_fingerprint"), name="signer_fingerprint_hex"
+        ),
+        CheckConstraint("length(signer_public_key) = 32", name="signer_public_key_size"),
+        CheckConstraint("agent_wheel_size > 0", name="agent_wheel_size_positive"),
+        CheckConstraint(
+            "(last_error_code IS NULL AND last_error_message IS NULL) OR (last_error_code IS NOT NULL AND last_error_message IS NOT NULL)",
+            name="error_pair",
+        ),
+        CheckConstraint("updated_at >= created_at", name="timestamp_order"),
+        Index("ix_installed_package_versions_status_id", "status", "id"),
+        Index("ix_installed_package_versions_content_digest", "content_digest"),
+        # ADR 0046: python packages carry a module:object entrypoint; process packages
+        # leave both columns NULL under the kind/entrypoint pairing.
+        CheckConstraint("runtime_kind IN ('python','process')", name="runtime_kind_value"),
+        CheckConstraint(
+            "(runtime_kind = 'python' AND entrypoint_module IS NOT NULL AND "
+            "entrypoint_object IS NOT NULL) OR "
+            "(runtime_kind = 'process' AND entrypoint_module IS NULL AND "
+            "entrypoint_object IS NULL)",
+            name="runtime_entrypoint_pairing",
+        ),
+        {"sqlite_autoincrement": True},
+    )
 
 
 class InstalledPackageFileRecord(Base):

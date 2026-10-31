@@ -68,7 +68,10 @@ def handle_package_inspect(args: argparse.Namespace, client: NervosClient) -> in
         print(f"Content Digest:       {data['content_digest']}")
         print(f"Archive Digest:       {data['archive_digest']}")
         print(f"NervOS Compatible:    {'Yes' if data['is_compatible'] else 'No'}")
-        print(f"Entrypoint:           {data['entrypoint_module']}:{data['entrypoint_object']}")
+        if data.get("runtime_kind") == "process":
+            print(f"Runtime:              process, command: {' '.join(data['command'])}")
+        else:
+            print(f"Entrypoint:           {data['entrypoint_module']}:{data['entrypoint_object']}")
         if data.get("tools_required"):
             print(f"Required Tools:       {', '.join(data['tools_required'])}")
         return 0

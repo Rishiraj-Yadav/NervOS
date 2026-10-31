@@ -9,6 +9,7 @@ from typing import Any, cast
 import anthropic
 from anthropic import AsyncAnthropic, Omit
 from nervos_core.application.model_completion import (
+    MODEL_REQUEST_REJECTED,
     MODEL_RESPONSE_INVALID,
     AssistantTurn,
     ModelProviderError,
@@ -17,7 +18,9 @@ from nervos_core.application.model_completion import (
     ModelUsage,
     StopOutcome,
     ToolCall,
+    ToolChoiceKind,
     ToolResultTurn,
+    UserTurn,
 )
 from nervos_core.domain.conversations import MessageRole
 from nervos_core.domain.tools import JsonValue, canonical_json_text
@@ -121,6 +124,7 @@ class AnthropicModelCompletion:
         }
         if request.temperature is not None:
             request_kwargs["temperature"] = request.temperature
+        _validate_tool_choice(request)
         if request.tools:
             request_kwargs["tools"] = [
                 {
@@ -132,10 +136,7 @@ class AnthropicModelCompletion:
             ]
             # No parallelism: one call at a time, in the order the model produced them, so the
             # loop's ambiguity boundary and its budgets stay one-dimensional.
-            request_kwargs["tool_choice"] = {
-                "type": "auto",
-                "disable_parallel_tool_use": True,
-            }
+            request_kwargs.update(_tool_choice_kwargs(request))
         try:
             message = await self._client.messages.create(**request_kwargs)
         except anthropic.AnthropicError as error:
@@ -246,6 +247,48 @@ def _normalized_response(message: Any, *, tools_enabled: bool) -> ModelResponse:
     )
 
 
+def _validate_tool_choice(request: ModelRequest) -> None:
+    """Refuse a forced choice the vendor parameter cannot express (ADR 0045)."""
+    choice = request.tool_choice
+    offered = {tool.name for tool in request.tools}
+    if choice.kind is ToolChoiceKind.REQUIRED and not offered:
+        raise ModelProviderError(MODEL_REQUEST_REJECTED)
+    if choice.kind is ToolChoiceKind.NAMED and (not offered or choice.name not in offered):
+        raise ModelProviderError(MODEL_REQUEST_REJECTED)
+
+
+def _tool_choice_kwargs(request: ModelRequest) -> dict[str, Any]:
+    """Map the neutral tool choice onto Messages' own parameter (ADR 0045).
+
+    The default AUTO choice reproduces the exact pre-ADR kwargs; a mode the vendor
+    parameter cannot express is refused rather than emulated.
+    """
+    choice = request.tool_choice
+    if choice.kind is ToolChoiceKind.NAMED:
+        return {
+            "tool_choice": {
+                "type": "tool",
+                "name": choice.name,
+                "disable_parallel_tool_use": True,
+            }
+        }
+    if choice.kind is ToolChoiceKind.NONE:
+        return {"tool_choice": {"type": "none"}}
+    if choice.kind is ToolChoiceKind.REQUIRED:
+        return {
+            "tool_choice": {
+                "type": "any",
+                "disable_parallel_tool_use": True,
+            }
+        }
+    return {
+        "tool_choice": {
+            "type": "auto",
+            "disable_parallel_tool_use": True,
+        }
+    }
+
+
 def _messages(request: ModelRequest) -> list[dict[str, Any]]:
     """Build the wire message list: memory, multi-turn history, user request, and tool turns.
 
@@ -256,6 +299,8 @@ def _messages(request: ModelRequest) -> list[dict[str, Any]]:
     asked to continue from exactly this conversation.
     """
     messages: list[dict[str, Any]] = []
+    if request.conversation:
+        return _conversation_messages(request)
 
     prefixes: list[str] = []
     if request.user_memory_context:
@@ -297,6 +342,32 @@ def _messages(request: ModelRequest) -> list[dict[str, Any]]:
             continue
         pending.append(_tool_result_block(turn))
     # A trailing run of results is only flushed at the end, so the loop back refers to them.
+    if pending:
+        messages.append({"role": _USER_ROLE, "content": pending})
+    return messages
+
+
+def _conversation_messages(request: ModelRequest) -> list[dict[str, Any]]:
+    """The ordered bridge conversation as Messages wire messages (ADR 0045).
+
+    Consecutive tool results are gathered into one user message, matching the
+    Messages API's shape, exactly as the turns path does.
+    """
+    messages: list[dict[str, Any]] = []
+    pending: list[dict[str, Any]] = []
+    for item in request.conversation:
+        if isinstance(item, UserTurn):
+            if pending:
+                messages.append({"role": _USER_ROLE, "content": pending})
+                pending = []
+            messages.append({"role": _USER_ROLE, "content": item.text})
+        elif isinstance(item, AssistantTurn):
+            if pending:
+                messages.append({"role": _USER_ROLE, "content": pending})
+                pending = []
+            messages.append({"role": _ASSISTANT_ROLE, "content": _assistant_content(item)})
+        else:
+            pending.append(_tool_result_block(item))
     if pending:
         messages.append({"role": _USER_ROLE, "content": pending})
     return messages

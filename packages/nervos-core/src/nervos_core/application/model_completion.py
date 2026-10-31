@@ -1,7 +1,7 @@
 """Narrow provider-neutral model completion boundary and normalized provider outcomes."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Protocol
@@ -304,7 +304,42 @@ class ToolResultTurn:
     is_error: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class UserTurn:
+    """One user turn inside an ordered bridge conversation (ADR 0045)."""
+
+    text: str
+
+
 type ConversationTurn = AssistantTurn | ToolResultTurn
+
+# The full ordered conversation the bridge can carry when tool traffic precedes a
+# later user message. Bridge-only: nothing persisted references it (ADR 0045).
+type ConversationItem = ConversationTurn | UserTurn
+
+
+class ToolChoiceKind(StrEnum):
+    """The provider-neutral tool-choice modes every supported adapter can express."""
+
+    AUTO = "auto"
+    NONE = "none"
+    REQUIRED = "required"
+    NAMED = "named"
+
+
+@dataclass(frozen=True, slots=True)
+class ToolChoice:
+    """How a request wants tools chosen. Defaults to the pre-ADR-0045 behavior."""
+
+    kind: ToolChoiceKind = ToolChoiceKind.AUTO
+    name: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind == ToolChoiceKind.NAMED:
+            if not self.name:
+                raise ValueError("a named tool choice requires a tool name")
+        elif self.name is not None:
+            raise ValueError("only a named tool choice carries a tool name")
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,6 +357,9 @@ class ModelRequest:
     user_memory_context: str | None = None
     agent_memory_context: str | None = None
     temperature: float | None = None
+    # ADR 0045: additive, used only when non-empty; default behavior is untouched.
+    tool_choice: ToolChoice = field(default_factory=ToolChoice)
+    conversation: tuple[ConversationItem, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

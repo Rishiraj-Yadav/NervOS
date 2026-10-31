@@ -15,9 +15,16 @@ MAX_HEADER_BYTES = 8
 # advertise it here, before ``initialize`` — so package code never runs on an old host.
 WORKFLOW_HOST_CAPABILITY = "workflow-v1"
 RUNTIME_INTEGRATION_HOST_CAPABILITY = "runtime-integration-v1"
+GENERIC_PROCESS_BRIDGE_CAPABILITY = "generic-process-bridge-v1"
+# ADR 0042: model_request frames may carry ``tools`` and per-message ``tool_calls`` /
+# ``tool_call_id``, and model_response frames may carry ``tool_calls``. Every field is
+# optional, so a frame without them is exactly the frame an older peer already accepts.
+MODEL_TOOLS_HOST_CAPABILITY = "model-tools-v1"
 HOST_CAPABILITIES: tuple[str, ...] = (
     RUNTIME_INTEGRATION_HOST_CAPABILITY,
     WORKFLOW_HOST_CAPABILITY,
+    GENERIC_PROCESS_BRIDGE_CAPABILITY,
+    MODEL_TOOLS_HOST_CAPABILITY,
 )
 
 # Stricter than MAX_FRAME_BYTES on purpose: a checkpoint must not be able to spend the whole

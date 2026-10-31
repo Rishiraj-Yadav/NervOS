@@ -131,3 +131,28 @@ def test_list_packages_sorts_semver_descending(tmp_path: Path) -> None:
 
     results = service.list_packages()
     assert [r.package_version for r in results] == ["2.0.0", "1.1.0", "1.0.0"]
+
+
+def test_inspect_process_package_reports_kind_and_command(tmp_path: Path) -> None:
+    """ADR 0046: a process package exposes runtime kind + command, NULL entrypoints."""
+    process_manifest = VALID_MANIFEST.replace(
+        b"runtime:\n"
+        b"  language: python\n"
+        b'  python: ">=3.12,<4"\n'
+        b"  entrypoint: acme_invoice.agent:InvoiceAgent\n",
+        b"runtime:\n  kind: process\n  command:\n    - bin/node\n    - app.js\n",
+    )
+    assert process_manifest != VALID_MANIFEST
+    pkg_file = tmp_path / "process.nervos"
+    pkg_file.write_bytes(_build_test_pkg(process_manifest))
+
+    store = PackageStore(tmp_path / "store")
+    mock_persistence = MagicMock(spec=PackageQueryPersistence)
+    service = PackageQueryService(mock_persistence, store)
+
+    metadata = service.inspect_artifact(pkg_file)
+
+    assert metadata.runtime_kind == "process"
+    assert metadata.command == ("bin/node", "app.js")
+    assert metadata.entrypoint_module is None
+    assert metadata.entrypoint_object is None

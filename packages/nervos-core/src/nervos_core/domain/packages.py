@@ -13,6 +13,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import total_ordering
+from pathlib import PureWindowsPath
 
 from nervos_core.domain.agents import AGENT_KEY_PATTERN, MAX_AGENT_KEY_LENGTH, AgentDefinitionId
 from nervos_core.domain.runs import RunLimits
@@ -60,6 +61,10 @@ SUPPORTED_RUNTIME_LANGUAGE = "python"
 # Frozen: V1 is exactly Python 3.12. The declaration is the exact text `>=3.12,<4`, not a range
 # the parser resolves; anything else is a different runtime and is refused by construction.
 SUPPORTED_RUNTIME_PYTHON = ">=3.12,<4"
+SUPPORTED_RUNTIME_KINDS = frozenset({"python", "process"})
+DEFAULT_RUNTIME_KIND = "python"
+MAX_COMMAND_ITEMS = 32
+MAX_COMMAND_ITEM_CHARS = 512
 # The core-owned current NervOS version used for compatibility validation. Kept in sync with the
 # distribution metadata by a unit test rather than read from it at import time: a domain value must
 # not depend on installed packaging metadata.
@@ -244,16 +249,49 @@ class PackageIdentity(PackageRef):
 class PackageRuntime:
     """The V1 runtime declaration."""
 
-    language: str
-    python: str
-    entrypoint: str
+    kind: str = DEFAULT_RUNTIME_KIND
+    language: str = ""
+    python: str = ""
+    entrypoint: str = ""
+    command: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.language != SUPPORTED_RUNTIME_LANGUAGE:
-            raise InvalidPackageManifest("runtime.language must be python")
-        if self.python != SUPPORTED_RUNTIME_PYTHON:
-            raise InvalidPackageManifest(f"runtime.python must be {SUPPORTED_RUNTIME_PYTHON}")
-        validate_entrypoint(self.entrypoint)
+        if self.kind not in SUPPORTED_RUNTIME_KINDS:
+            kinds = sorted(SUPPORTED_RUNTIME_KINDS)
+            raise InvalidPackageManifest(f"runtime.kind must be one of {kinds}")
+        if self.kind == "python":
+            if self.language != SUPPORTED_RUNTIME_LANGUAGE:
+                raise InvalidPackageManifest("runtime.language must be python")
+            if self.python != SUPPORTED_RUNTIME_PYTHON:
+                msg = f"runtime.python must be {SUPPORTED_RUNTIME_PYTHON}"
+                raise InvalidPackageManifest(msg)
+            validate_entrypoint(self.entrypoint)
+            if self.command:
+                raise InvalidPackageManifest("runtime.command must be empty for python kind")
+        elif self.kind == "process":
+            if not self.command:
+                raise InvalidPackageManifest("runtime.command must be non-empty for process kind")
+            if self.language or self.python or self.entrypoint:
+                msg = "runtime.language, python, entrypoint must be empty for process kind"
+                raise InvalidPackageManifest(msg)
+            for item in self.command:
+                if (
+                    item.startswith(("/", "\\"))
+                    or PureWindowsPath(item).is_absolute()
+                    or bool(PureWindowsPath(item).drive)
+                    or bool(PureWindowsPath(item).root)
+                ):
+                    raise InvalidPackageManifest("runtime.command items must not be absolute paths")
+                if ".." in item.replace("\\", "/").split("/"):
+                    raise InvalidPackageManifest("runtime.command items must not contain '..'")
+                if len(item) > MAX_COMMAND_ITEM_CHARS:
+                    msg = (
+                        f"runtime.command items must not exceed {MAX_COMMAND_ITEM_CHARS} characters"
+                    )
+                    raise InvalidPackageManifest(msg)
+            if len(self.command) > MAX_COMMAND_ITEMS:
+                msg = f"runtime.command must have at most {MAX_COMMAND_ITEMS} items"
+                raise InvalidPackageManifest(msg)
 
 
 @dataclass(frozen=True, slots=True)

@@ -13,15 +13,19 @@ import httpx
 from google import genai
 from google.genai import types
 from nervos_core.application.model_completion import (
+    MODEL_REQUEST_REJECTED,
     MODEL_RESPONSE_INVALID,
+    AssistantTurn,
     ModelProviderError,
     ModelRequest,
     ModelResponse,
     ModelUsage,
     StopOutcome,
     ToolCall,
+    ToolChoiceKind,
     ToolResultTurn,
     ToolSchema,
+    UserTurn,
 )
 from nervos_core.domain.conversations import MessageRole
 from nervos_core.domain.tools import JsonValue, canonical_json_text, validate_json_value
@@ -87,14 +91,11 @@ class GeminiModelCompletion:
                 retry_options=types.HttpRetryOptions(attempts=1),
             ),
         )
+        _validate_tool_choice(request)
         if request.tools:
             declarations = [_function_declaration(tool) for tool in request.tools]
             config.tools = [types.Tool(function_declarations=declarations)]
-            config.tool_config = types.ToolConfig(
-                function_calling_config=types.FunctionCallingConfig(
-                    mode=types.FunctionCallingConfigMode.AUTO
-                )
-            )
+            config.tool_config = _tool_config(request)
         try:
             models: Any = self._client.aio.models
             response = await models.generate_content(
@@ -156,6 +157,8 @@ def _contents(
         )
         if value
     ]
+    if request.conversation:
+        return _conversation_contents(request, signatures)
     prefix_text = "\n\n".join(prefix)
     result: list[types.Content] = []
     if request.history:
@@ -229,6 +232,115 @@ def _contents(
     if pending_responses:
         result.append(types.Content(role="user", parts=pending_responses))
     return result
+
+
+def _validate_tool_choice(request: ModelRequest) -> None:
+    """Refuse a forced choice the vendor parameter cannot express (ADR 0045)."""
+    choice = request.tool_choice
+    offered = {tool.name for tool in request.tools}
+    if choice.kind is ToolChoiceKind.REQUIRED and not offered:
+        raise ModelProviderError(MODEL_REQUEST_REJECTED)
+    if choice.kind is ToolChoiceKind.NAMED and (not offered or choice.name not in offered):
+        raise ModelProviderError(MODEL_REQUEST_REJECTED)
+
+
+def _tool_config(request: ModelRequest) -> types.ToolConfig:
+    """Map the neutral tool choice onto the function calling config (ADR 0045).
+
+    The default AUTO choice reproduces the exact pre-ADR config; forced modes use
+    the vendor's own mode and allowed function names, never emulation.
+    """
+    choice = request.tool_choice
+    mode = types.FunctionCallingConfigMode.AUTO
+    allowed: list[str] | None = None
+    if choice.kind is ToolChoiceKind.NONE:
+        mode = types.FunctionCallingConfigMode.NONE
+    elif choice.kind is ToolChoiceKind.REQUIRED:
+        mode = types.FunctionCallingConfigMode.ANY
+    elif choice.kind is ToolChoiceKind.NAMED:
+        mode = types.FunctionCallingConfigMode.ANY
+        allowed_name: str | None = choice.name
+        allowed = [allowed_name] if allowed_name else None
+    return types.ToolConfig(
+        function_calling_config=types.FunctionCallingConfig(
+            mode=mode, allowed_function_names=allowed
+        )
+    )
+
+
+def _conversation_contents(
+    request: ModelRequest,
+    signatures: OrderedDict[str, tuple[str | None, bytes | None, str, tuple[types.Part, ...]]],
+) -> list[types.Content]:
+    """The ordered bridge conversation as Gemini contents (ADR 0045).
+
+    Function results are addressed by the function name the conversation itself
+    recorded for the call id, falling back to the adapter's signatures registry.
+    """
+    names_by_call_id = {
+        call.call_id: call.name
+        for item in request.conversation
+        if isinstance(item, AssistantTurn)
+        for call in item.tool_calls
+    }
+    contents: list[types.Content] = []
+    pending: list[types.Part] = []
+    for item in request.conversation:
+        if isinstance(item, UserTurn):
+            if pending:
+                contents.append(types.Content(role="user", parts=pending))
+                pending = []
+            contents.append(types.Content(role="user", parts=[types.Part(text=item.text)]))
+        elif isinstance(item, AssistantTurn):
+            if pending:
+                contents.append(types.Content(role="user", parts=pending))
+                pending = []
+            parts: list[types.Part] = []
+            if item.text:
+                parts.append(types.Part(text=item.text))
+            for call in item.tool_calls:
+                provider_call_id, signature, _name, thoughts = signatures.get(
+                    call.call_id, (call.call_id, None, call.name, ())
+                )
+                parts.extend(part.model_copy(deep=True) for part in thoughts)
+                parts.append(
+                    types.Part(
+                        function_call=types.FunctionCall(
+                            id=provider_call_id,
+                            name=call.name,
+                            args=_decode_arguments(call.arguments_json),
+                        ),
+                        thought_signature=signature,
+                    )
+                )
+            if parts:
+                contents.append(types.Content(role="model", parts=parts))
+        else:
+            provider_call_id, _signature, signature_name, _thoughts = signatures.get(
+                item.call_id, (item.call_id, None, "", ())
+            )
+            function_name = signature_name or names_by_call_id.get(item.call_id, "")
+            if not function_name:
+                raise ModelProviderError(MODEL_RESPONSE_INVALID)
+            payload: dict[str, JsonValue]
+            if item.is_error:
+                payload = {"error": item.text}
+            elif item.structured is not None and isinstance(item.structured, dict):
+                payload = cast(dict[str, JsonValue], item.structured)
+            else:
+                payload = {"result": item.text}
+            pending.append(
+                types.Part(
+                    function_response=types.FunctionResponse(
+                        id=provider_call_id,
+                        name=function_name,
+                        response=payload,
+                    )
+                )
+            )
+    if pending:
+        contents.append(types.Content(role="user", parts=pending))
+    return contents
 
 
 def _function_declaration(tool: ToolSchema) -> types.FunctionDeclaration:

@@ -38,7 +38,7 @@ from sqlalchemy import Engine
 from nervos_scheduler.config import SchedulerSettings
 
 #: The one migration revision this process understands. The durable-workflow milestone ships 0024.
-EXPECTED_SCHEMA_REVISION = "0024_durable_workflows"
+EXPECTED_SCHEMA_REVISION = "0025_process_kind_packages"
 
 
 def utc_now() -> datetime:

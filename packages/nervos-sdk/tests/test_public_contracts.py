@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import inspect
+from collections.abc import Mapping
 from dataclasses import FrozenInstanceError, replace
 from types import MappingProxyType
 
 import pytest
 from nervos_sdk import (
     SDK_API_VERSION,
+    STOP_REASON_TOOL_USE,
     AgentContext,
     AgentEntrypoint,
     AgentResult,
@@ -15,6 +17,8 @@ from nervos_sdk import (
     ModelPort,
     ModelRequest,
     ModelResult,
+    ToolCall,
+    ToolDefinition,
     ToolPort,
     ToolRequest,
     ToolResult,
@@ -146,3 +150,61 @@ def test_agent_entrypoint_protocol_is_async_run_only() -> None:
 
     result = asyncio.run(run_agent())
     assert result.output["run_id"] == "run-1"
+
+
+def test_model_tool_fields_default_to_absent_everywhere() -> None:
+    # A tool-free construction is exactly what it always was: no new field carries a value.
+    message = ModelMessage("user", "hello")
+    assert message.tool_calls == ()
+    assert message.tool_call_id is None
+    request = ModelRequest(messages=(message,))
+    assert request.tools == ()
+    result = ModelResult("done")
+    assert result.tool_calls == ()
+    assert result.stop_reason is None
+
+
+def test_model_tool_fields_carry_and_freeze_tool_traffic() -> None:
+    mapping_arguments: dict[str, JSONValue] = {"value": 1}
+    call = ToolCall(id="call-1", name="echo", arguments=mapping_arguments)
+    arguments = call.arguments
+    assert isinstance(arguments, Mapping)
+    with pytest.raises(TypeError):
+        arguments["value"] = 2  # type: ignore[index]
+
+    assistant = ModelMessage("assistant", "", tool_calls=(call,))
+    assert assistant.tool_calls[0].id == "call-1"
+    tool_message = ModelMessage("tool", "result", tool_call_id="call-1")
+    assert tool_message.tool_call_id == "call-1"
+
+    parameters: dict[str, JSONValue] = {"type": "object", "properties": {}}
+    definition = ToolDefinition(name="echo", description="Echo", parameters=parameters)
+    request = ModelRequest(messages=(assistant,), tools=(definition,))
+    frozen_parameters = request.tools[0].parameters
+    assert isinstance(frozen_parameters, Mapping)
+    with pytest.raises(TypeError):
+        frozen_parameters["type"] = "array"  # type: ignore[index]
+
+    result = ModelResult(
+        output_text="",
+        stop_reason=STOP_REASON_TOOL_USE,
+        tool_calls=(ToolCall(id="call-1", name="echo", arguments='{"value": 1}'),),
+    )
+    assert result.stop_reason == "tool_use"
+    text_arguments = result.tool_calls[0].arguments
+    assert isinstance(text_arguments, str)
+    assert text_arguments == '{"value": 1}'
+
+
+def test_model_tool_types_are_frozen() -> None:
+    call = ToolCall(id="call-1", name="echo", arguments="{}")
+    with pytest.raises(FrozenInstanceError):
+        call.name = "renamed"  # type: ignore[misc]
+
+    definition = ToolDefinition(name="echo", description="Echo")
+    with pytest.raises(FrozenInstanceError):
+        definition.description = "rewritten"  # type: ignore[misc]
+
+    message = ModelMessage("assistant", "", tool_calls=(call,))
+    with pytest.raises(FrozenInstanceError):
+        message.tool_call_id = "call-1"  # type: ignore[misc]

@@ -9,6 +9,7 @@ from typing import Any, cast
 import openai
 from nervos_core.application.model_completion import (
     INTERNAL_EXECUTION_ERROR,
+    MODEL_REQUEST_REJECTED,
     MODEL_RESPONSE_INVALID,
     AssistantTurn,
     ModelProviderError,
@@ -17,7 +18,9 @@ from nervos_core.application.model_completion import (
     ModelUsage,
     StopOutcome,
     ToolCall,
+    ToolChoiceKind,
     ToolResultTurn,
+    UserTurn,
 )
 from nervos_core.domain.conversations import MessageRole
 from nervos_core.domain.tools import JsonValue, canonical_json_text
@@ -118,6 +121,7 @@ class OpenAIModelCompletion:
         }
         if request.temperature is not None:
             request_kwargs["temperature"] = request.temperature
+        _validate_tool_choice(request)
         if request.tools:
             request_kwargs["tools"] = [
                 {
@@ -129,7 +133,7 @@ class OpenAIModelCompletion:
                 }
                 for tool in request.tools
             ]
-            request_kwargs["tool_choice"] = "auto"
+            request_kwargs.update(_tool_choice_kwargs(request))
         try:
             response = await self._client.responses.create(**request_kwargs)
         except openai.OpenAIError as error:
@@ -224,12 +228,42 @@ def _normalized_error(error: openai.OpenAIError) -> ModelProviderError:
     return ModelProviderError(INTERNAL_EXECUTION_ERROR)
 
 
+def _validate_tool_choice(request: ModelRequest) -> None:
+    """Refuse a forced choice the vendor parameter cannot express (ADR 0045)."""
+    choice = request.tool_choice
+    offered = {tool.name for tool in request.tools}
+    if choice.kind is ToolChoiceKind.REQUIRED and not offered:
+        raise ModelProviderError(MODEL_REQUEST_REJECTED)
+    if choice.kind is ToolChoiceKind.NAMED and (not offered or choice.name not in offered):
+        raise ModelProviderError(MODEL_REQUEST_REJECTED)
+
+
+def _tool_choice_kwargs(request: ModelRequest) -> dict[str, Any]:
+    """Map the neutral tool choice onto the Responses API's own parameter (ADR 0045).
+
+    Never emulated: a mode the parameter cannot express is refused instead. With the
+    default AUTO choice this returns exactly the pre-ADR `tool_choice="auto"`.
+    """
+    choice = request.tool_choice
+    if choice.kind is ToolChoiceKind.NAMED:
+        return {"tool_choice": {"type": "function", "name": choice.name}}
+    if choice.kind is ToolChoiceKind.NONE:
+        return {"tool_choice": "none"}
+    if choice.kind is ToolChoiceKind.REQUIRED:
+        return {"tool_choice": "required"}
+    return {"tool_choice": "auto"}
+
+
 def _input_items(request: ModelRequest) -> Any:
     """Build the request input: memory, multi-turn history, user request, and tool turns.
 
     A tool-free request with no history/memory keeps the exact string input Stage B/C used, so the
     tool-free wire path is unchanged. A request with memory, history, or tools sends explicit items.
+    A request carrying an ordered bridge conversation (ADR 0045) sends exactly those
+    items, in order, instead.
     """
+    if request.conversation:
+        return _conversation_items(request)
     if (
         not request.turns
         and not request.history
@@ -306,6 +340,41 @@ def _input_items(request: ModelRequest) -> Any:
                 "output": _tool_output(turn),
             }
         )
+    return items
+
+
+def _conversation_items(request: ModelRequest) -> list[dict[str, Any]]:
+    """The ordered bridge conversation as Responses input items (ADR 0045)."""
+    items: list[dict[str, Any]] = []
+    for item in request.conversation:
+        if isinstance(item, UserTurn):
+            items.append({"role": "user", "content": [{"type": "input_text", "text": item.text}]})
+        elif isinstance(item, AssistantTurn):
+            if item.text:
+                items.append(
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": item.text}],
+                    }
+                )
+            for call in item.tool_calls:
+                items.append(
+                    {
+                        "type": _LOCAL_TOOL_ITEM_TYPE,
+                        "call_id": call.call_id,
+                        "name": call.name,
+                        "arguments": _json_text(call.arguments_json),
+                    }
+                )
+        else:
+            items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": item.call_id,
+                    "output": _tool_output(item),
+                }
+            )
     return items
 
 

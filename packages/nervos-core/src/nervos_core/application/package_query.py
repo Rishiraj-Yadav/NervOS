@@ -97,10 +97,14 @@ class PackageQueryService:
                 min_nervos_version=min_ver,
                 max_nervos_version=max_ver,
                 is_compatible=is_compatible,
-                entrypoint_module=manifest.runtime.entrypoint.split(":")[0],
-                entrypoint_object=manifest.runtime.entrypoint.split(":")[1]
-                if ":" in manifest.runtime.entrypoint
-                else "",
+                runtime_kind=manifest.runtime.kind,
+                command=tuple(manifest.runtime.command),
+                entrypoint_module=manifest.runtime.entrypoint.split(":", 1)[0]
+                if manifest.runtime.kind == "python"
+                else None,
+                entrypoint_object=manifest.runtime.entrypoint.split(":", 1)[1]
+                if manifest.runtime.kind == "python"
+                else None,
                 tools_required=tools_required,
                 tools_optional=tools_optional,
                 memory_declarations=tuple(memory_decls),

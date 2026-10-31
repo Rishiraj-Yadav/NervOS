@@ -200,6 +200,57 @@ def test_linux_launcher_refuses_an_interpreter_outside_a_package_environment(
         )
 
 
+def test_posix_prepare_with_process_kind_raises_containment_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POSIX rlimits-only containment cannot mount a package bundle; refuse process kind."""
+    from nervos_core.infrastructure.sandbox.posix import PosixContainment
+
+    executable = tmp_path / "python"
+    executable.write_bytes(b"#!/bin/sh\nexit 0\n")
+    executable.chmod(0o755)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    package_root = tmp_path / "package_bundle"
+    package_root.mkdir()
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+
+    containment = PosixContainment()
+    with pytest.raises(ContainmentUnavailable):
+        containment.prepare(
+            python=executable,
+            scratch=scratch,
+            environment={},
+            arguments=("-m", "nervos_package_host"),
+            package_root=package_root,
+        )
+
+
+def test_posix_prepare_with_python_kind_accepts_no_package_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POSIX containment accepts process-kind-less package when package_root is absent."""
+    from nervos_core.infrastructure.sandbox.posix import PosixContainment
+
+    executable = tmp_path / "python"
+    executable.write_bytes(b"#!/bin/sh\nexit 0\n")
+    executable.chmod(0o755)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+
+    containment = PosixContainment()
+    launch = containment.prepare(
+        python=executable,
+        scratch=scratch,
+        environment={},
+        arguments=("-m", "nervos_package_host"),
+        package_root=None,
+    )
+    assert launch.cwd == scratch.resolve()
+    assert launch.environment == {}
+
+
 @pytest.mark.skipif(
     not POSIX or shutil.which("bwrap") is None,
     reason="real bubblewrap qualification requires Linux with bwrap installed",
@@ -362,8 +413,9 @@ class _RecordingContainment:
         scratch: Path,
         environment: object,
         arguments: object,
+        package_root: Path | None = None,
     ) -> SandboxLaunch:
-        del python, environment, arguments
+        del python, environment, arguments, package_root
         self.scratch = scratch
         self.cwd = scratch
         return SandboxLaunch(

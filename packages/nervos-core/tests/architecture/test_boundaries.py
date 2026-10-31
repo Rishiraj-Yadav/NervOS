@@ -255,7 +255,7 @@ def test_g2_has_no_network_resolver() -> None:
 def test_g3_adds_the_approved_package_registry_tables() -> None:
     """G3 owns the package registry; earlier migrations and unrelated tables remain stable."""
     migrations = sorted((ROOT / "apps" / "api" / "alembic" / "versions").glob("0*.py"))
-    assert migrations[-1].stem == "0024_durable_workflows"
+    assert migrations[-1].stem == "0025_process_kind_packages"
 
     tables = set(re.findall(r'__tablename__ = "([a-z_]+)"', ORM_MODELS.read_text(encoding="utf-8")))
     assert tables == EXPECTED_TABLES | {
@@ -480,6 +480,9 @@ def test_b3_route_surface_and_migration_freeze() -> None:
         "0023_worker_sandbox_capability.py",
         # Durable autonomous workflows add five new tables and alter nothing above.
         "0024_durable_workflows.py",
+        # ADR 0046: runtime_kind on installed_package_versions, nullable entrypoint
+        # columns under a pairing CHECK; downgrade refuses with process rows.
+        "0025_process_kind_packages.py",
     ]
     # The Worker refuses to run against a schema it does not expect, so the pinned revision and
     # the migration head are one fact in two places. Letting them drift bricks the supervised
@@ -1588,8 +1591,8 @@ def test_the_migration_head_is_exactly_the_durable_workflow_revision() -> None:
     """
     versions = ROOT / "apps" / "api" / "alembic" / "versions"
     discovered = sorted(path.name for path in versions.glob("*.py"))
-    assert discovered[-1] == "0024_durable_workflows.py"
-    assert discovered[-2] == "0023_worker_sandbox_capability.py"
+    assert discovered[-1] == "0025_process_kind_packages.py"
+    assert discovered[-2] == "0024_durable_workflows.py"
 
 
 def test_nervos_mcp_depends_only_on_public_sdk_surfaces() -> None:
@@ -1873,7 +1876,7 @@ def test_the_scheduler_declares_its_own_schema_expectation() -> None:
     scheduler_app = (ROOT / "apps" / "scheduler" / "src" / "nervos_scheduler" / "app.py").read_text(
         encoding="utf-8"
     )
-    assert 'EXPECTED_SCHEMA_REVISION = "0024_durable_workflows"' in scheduler_app
+    assert 'EXPECTED_SCHEMA_REVISION = "0025_process_kind_packages"' in scheduler_app
     assert "nervos_worker" not in scheduler_app
     main = (ROOT / "apps" / "scheduler" / "src" / "nervos_scheduler" / "main.py").read_text(
         encoding="utf-8"

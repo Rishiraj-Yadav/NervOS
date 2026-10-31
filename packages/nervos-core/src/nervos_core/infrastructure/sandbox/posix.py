@@ -152,7 +152,16 @@ class PosixContainment:
         scratch: Path,
         environment: Mapping[str, str],
         arguments: tuple[str, ...],
+        package_root: Path | None = None,
     ) -> SandboxLaunch:
+        # POSIX rlimits-only containment cannot enforce filesystem boundaries for the
+        # package bundle. A process-kind agent must have its command and its code
+        # reachable inside the sandbox; since this adapter only applies rlimits and
+        # does not mount anything, it cannot provide filesystem isolation for a
+        # process-kind package bundle. Refuse rather than silently allow an
+        # uncontained process-kind agent.
+        if package_root is not None:
+            raise ContainmentUnavailable
         return SandboxLaunch(
             command=(str(python), *arguments),
             cwd=scratch,

@@ -130,7 +130,17 @@ class SqlAlchemyPackageRegistryPersistence:
                 )
                 return self._load_on_connection(connection, int(existing["id"]))
 
-            module, symbol = verified.manifest.runtime.entrypoint.split(":", 1)
+            runtime_kind = verified.manifest.runtime.kind
+            if runtime_kind == "process":
+                # ADR 0046: a process package names its entry by runtime.command; the
+                # entrypoint columns stay NULL under the pairing CHECK.
+                entrypoint_columns: dict[str, str | None] = {
+                    "entrypoint_module": None,
+                    "entrypoint_object": None,
+                }
+            else:
+                module, symbol = verified.manifest.runtime.entrypoint.split(":", 1)
+                entrypoint_columns = {"entrypoint_module": module, "entrypoint_object": symbol}
             result = connection.execute(
                 insert(InstalledPackageVersionRecord).values(
                     package_id=package_id,
@@ -147,8 +157,8 @@ class SqlAlchemyPackageRegistryPersistence:
                     agent_wheel_version=verified.agent_wheel.version,
                     agent_wheel_sha256=verified.agent_wheel.sha256,
                     agent_wheel_size=verified.agent_wheel.size,
-                    entrypoint_module=module,
-                    entrypoint_object=symbol,
+                    runtime_kind=runtime_kind,
+                    **entrypoint_columns,
                     staging_key=command.staging_key,
                     approved_by_user_id=command.authorization.approved_by_user_id,
                     approved_at=command.authorization.approved_at,
@@ -1240,6 +1250,8 @@ def resolve_run_execution_snapshot_on_connection(
                 InstalledPackageVersionRecord.package_version,
                 InstalledPackageVersionRecord.status.label("package_status"),
                 InstalledPackageVersionRecord.content_digest,
+                InstalledPackageVersionRecord.runtime_kind,
+                InstalledPackageVersionRecord.manifest_bytes,
                 InstalledPackageVersionRecord.entrypoint_module,
                 InstalledPackageVersionRecord.entrypoint_object,
                 InstalledPackageVersionRecord.environment_id,
@@ -1286,15 +1298,23 @@ def resolve_run_execution_snapshot_on_connection(
         or row["environment_status"] != PackageEnvironmentStatus.READY.value
     ):
         raise PackageRegistryInvariantError("package binding is not executable")
-    entrypoint_module = str(row["entrypoint_module"])
-    entrypoint_object = str(row["entrypoint_object"])
+    runtime_kind = str(row["runtime_kind"])
+    if runtime_kind == "process":
+        # ADR 0046 decision (c): a stable non-secret label in the existing column.
+        # The command comes from the stored manifest bytes; python rows keep the
+        # module:object form and never parse anything here.
+        manifest = parse_package_manifest(bytes(row["manifest_bytes"]))
+        command_head = manifest.runtime.command[0]
+        package_entrypoint = f"process:{command_head}"
+    else:
+        package_entrypoint = f"{row['entrypoint_module']}:{row['entrypoint_object']}"
     return RunExecutableSnapshot(
         execution_kind=RunExecutionKind.PACKAGE,
         installed_package_version_id=int(row["installed_id"]),
         package_content_digest=str(row["content_digest"]),
         package_environment_id=int(row["environment_id"]),
         package_environment_digest=str(row["environment_digest"]),
-        package_entrypoint=f"{entrypoint_module}:{entrypoint_object}",
+        package_entrypoint=package_entrypoint,
         effective_config_json=str(row["effective_config_json"]),
         effective_config_digest=str(row["effective_config_digest"]),
         agent_instance_config_revision=int(row["config_revision"]),
@@ -1377,8 +1397,18 @@ def _load_package_detail_on_connection(
         min_nervos_version=manifest.nervos.min_version.value,
         max_nervos_version=manifest.nervos.max_version.value,
         is_compatible=is_compatible,
-        entrypoint_module=str(row["entrypoint_module"]),
-        entrypoint_object=str(row["entrypoint_object"]),
+        runtime_kind=manifest.runtime.kind,
+        command=tuple(manifest.runtime.command),
+        entrypoint_module=(
+            manifest.runtime.entrypoint.split(":", 1)[0]
+            if manifest.runtime.kind == "python"
+            else None
+        ),
+        entrypoint_object=(
+            manifest.runtime.entrypoint.split(":", 1)[1]
+            if manifest.runtime.kind == "python"
+            else None
+        ),
         tools_required=tuple(manifest.tools.required),
         tools_optional=tuple(manifest.tools.optional),
         memory_declarations=tuple(memory_decls),

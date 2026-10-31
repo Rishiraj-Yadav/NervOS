@@ -89,6 +89,7 @@ class SandboxLaunch:
     environment: Mapping[str, str]
     preexec_fn: Callable[[], None] | None = None
     start_new_session: bool = False
+    package_root: Path | None = None
 
 
 class PackageContainment(Protocol):
@@ -101,6 +102,7 @@ class PackageContainment(Protocol):
         scratch: Path,
         environment: Mapping[str, str],
         arguments: tuple[str, ...],
+        package_root: Path | None = None,
     ) -> SandboxLaunch:
         """Return a protected launch specification before any package code starts."""
         ...

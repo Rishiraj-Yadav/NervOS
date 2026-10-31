@@ -58,8 +58,12 @@ class InspectedPackageMetadata:
     min_nervos_version: str
     max_nervos_version: str | None
     is_compatible: bool
-    entrypoint_module: str
-    entrypoint_object: str
+    # ADR 0046: python packages carry module:object; process packages carry a
+    # command and NULL entrypoint fields instead.
+    runtime_kind: str
+    command: tuple[str, ...]
+    entrypoint_module: str | None
+    entrypoint_object: str | None
     tools_required: tuple[str, ...]
     tools_optional: tuple[str, ...]
     memory_declarations: tuple[str, ...]
@@ -103,8 +107,12 @@ class PackageVersionDetail:
     min_nervos_version: str
     max_nervos_version: str | None
     is_compatible: bool
-    entrypoint_module: str
-    entrypoint_object: str
+    # ADR 0046: python packages carry module:object; process packages carry a
+    # command and NULL entrypoint fields instead.
+    runtime_kind: str
+    command: tuple[str, ...]
+    entrypoint_module: str | None
+    entrypoint_object: str | None
     tools_required: tuple[str, ...]
     tools_optional: tuple[str, ...]
     memory_declarations: tuple[str, ...]

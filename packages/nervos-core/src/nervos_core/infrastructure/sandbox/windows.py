@@ -166,6 +166,7 @@ class WindowsJobObjectContainment:
         scratch: Path,
         environment: Mapping[str, str],
         arguments: tuple[str, ...],
+        package_root: Path | None = None,
     ) -> SandboxLaunch:
         return SandboxLaunch(
             command=(str(python), *arguments), cwd=scratch, environment=environment
